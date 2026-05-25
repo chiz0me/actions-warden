@@ -283,6 +283,40 @@ After the first release tag is pushed, open the release on github.com and tick
 "Publish this Action to the GitHub Marketplace" to list it. No automation
 required — the release workflow above handles everything except that opt-in.
 
+### Publishing to npm
+
+The release workflow includes a `publish-npm` job that publishes to npm with
+provenance via OIDC trusted publishing — no long-lived `NPM_TOKEN` lives in
+GitHub secrets.
+
+**One-time setup on npmjs.com:**
+
+1. Sign in to https://www.npmjs.com and open **Account → Packages → Trusted
+   Publishers** (or **Settings → Trusted Publishers** on a package once it
+   exists).
+2. Add a new GitHub Actions trusted publisher with:
+   - Organization or user: `chiz0me`
+   - Repository: `actions-warden`
+   - Workflow filename: `release.yml`
+   - Environment: *(leave blank)*
+3. Save.
+
+After this is configured, every `vX.Y.Z` tag push will:
+
+- Run the full test suite and dependency-pin verification.
+- Publish to npm with `--provenance --access public` (so the published package
+  carries a verifiable link back to this exact commit and workflow run).
+- Create the GitHub Release and move the floating major tag.
+
+The package is published as **`actions-warden`** (unscoped, public). Consumers
+install it with:
+
+```sh
+npm install -g actions-warden
+# or
+npx actions-warden audit
+```
+
 ## Security
 
 See [SECURITY.md](./SECURITY.md) for the disclosure policy.

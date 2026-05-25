@@ -2,6 +2,15 @@
   "name": "actions-warden",
   "version": "0.1.0",
   "description": "Audit, pin, and upgrade GitHub Actions workflows. LLM-friendly TOON output, safe-by-default.",
+  "author": "Naveen Yagati",
+  "homepage": "https://github.com/chiz0me/actions-warden#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chiz0me/actions-warden.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chiz0me/actions-warden/issues"
+  },
   "type": "module",
   "main": "./src/index.js",
   "exports": {
@@ -23,12 +32,17 @@
   "engines": {
     "node": ">=20.0.0"
   },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "test": "vitest --run",
     "test:watch": "vitest",
     "lint": "eslint src test",
     "verify-deps": "node scripts/verify-deps.js",
-    "audit": "npm audit --audit-level=high"
+    "audit": "npm audit --audit-level=high",
+    "prepublishOnly": "node scripts/verify-deps.js && npm test"
   },
   "dependencies": {
     "commander": "14.0.3",
