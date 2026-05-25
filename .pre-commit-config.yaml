@@ -1,0 +1,48 @@
+# Pre-commit hooks for actions-warden.
+#
+# Install with prek (preferred, Rust, no Python):
+#   prek install
+#   prek install --hook-type pre-push
+#
+# Or with pre-commit (Python):
+#   pre-commit install
+#   pre-commit install --hook-type pre-push
+#
+# Run manually against everything: `prek run --all-files`
+
+repos:
+  - repo: local
+    hooks:
+      - id: verify-version-sync
+        name: package.json and plugin.json versions agree
+        entry: node scripts/verify-version-sync.js
+        language: system
+        pass_filenames: false
+        files: '^(package\.json|\.claude-plugin/plugin\.json)$'
+
+      - id: verify-deps-pinned
+        name: dependencies pinned to exact versions
+        entry: node scripts/verify-deps.js
+        language: system
+        pass_filenames: false
+        files: '^package\.json$'
+
+      - id: check-yaml
+        name: YAML syntax
+        entry: node scripts/check-yaml.js
+        language: system
+        files: '\.(ya?ml)$'
+
+      - id: actions-warden-self-audit
+        name: actions-warden audit on changed workflows
+        entry: node src/cli.js audit --severity=high
+        language: system
+        pass_filenames: false
+        files: '^(\.github/workflows/.+\.ya?ml|action\.yml)$'
+
+      - id: vitest
+        name: vitest (pre-push)
+        entry: npx vitest --run
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

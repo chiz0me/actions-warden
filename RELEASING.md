@@ -2,6 +2,26 @@
 
 Maintainer notes. End users don't need this.
 
+## Dev setup
+
+Install the pre-commit hooks before working on the repo:
+
+```sh
+prek install --hook-type pre-commit --hook-type pre-push
+```
+
+| stage | check |
+|---|---|
+| pre-commit | `package.json` and `.claude-plugin/plugin.json` versions agree |
+| pre-commit | runtime + dev deps pinned to exact versions |
+| pre-commit | YAML syntax for any touched `.yml` / `.yaml` |
+| pre-commit | `actions-warden audit --severity=high` on any touched workflow |
+| pre-push   | full vitest run |
+
+[`prek`](https://github.com/j178/prek) is the recommended runner (Rust, no
+Python). The Python [`pre-commit`](https://pre-commit.com) tool works against
+the same `.pre-commit-config.yaml` if you prefer it.
+
 ## Cutting a release
 
 1. Bump `version` in `package.json` **and** `.claude-plugin/plugin.json`.
