@@ -289,24 +289,50 @@ The release workflow includes a `publish-npm` job that publishes to npm with
 provenance via OIDC trusted publishing — no long-lived `NPM_TOKEN` lives in
 GitHub secrets.
 
-**One-time setup on npmjs.com:**
+**npm does not support pre-publish trusted-publisher configuration** — the
+Trusted Publisher panel only appears on packages that already exist on the
+registry. So the very first publish has to be done with a one-time automation
+token; after that, OIDC takes over.
 
-1. Sign in to https://www.npmjs.com and open **Account → Packages → Trusted
-   Publishers** (or **Settings → Trusted Publishers** on a package once it
-   exists).
-2. Add a new GitHub Actions trusted publisher with:
-   - Organization or user: `chiz0me`
-   - Repository: `actions-warden`
-   - Workflow filename: `release.yml`
-   - Environment: *(leave blank)*
-3. Save.
+#### Step 1 — bootstrap publish (one time, locally)
 
-After this is configured, every `vX.Y.Z` tag push will:
+```sh
+npm login                              # browser auth
+npm publish --access public            # no --provenance on the first publish;
+                                       # local publishes can't sign provenance
+```
 
-- Run the full test suite and dependency-pin verification.
-- Publish to npm with `--provenance --access public` (so the published package
-  carries a verifiable link back to this exact commit and workflow run).
-- Create the GitHub Release and move the floating major tag.
+#### Step 2 — configure the trusted publisher on npmjs.com
+
+Once the package exists, go to:
+
+**npmjs.com → Packages → actions-warden → Settings → Trusted publishing**
+
+Add a new GitHub Actions publisher with:
+
+- Organization or user: `chiz0me`
+- Repository: `actions-warden`
+- Workflow filename: `release.yml`
+- Environment: *(leave blank)*
+
+Save. From this point on, no token is needed.
+
+#### Step 3 — release future versions
+
+Bump `version` in `package.json`, push, then:
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The release workflow then:
+
+- runs the full test suite and dependency-pin verification,
+- publishes to npm with `--provenance --access public` (the published package
+  carries a verifiable link back to this exact commit and workflow run),
+- creates the GitHub Release with auto-generated notes,
+- force-moves the floating major tag (`v0`).
 
 The package is published as **`actions-warden`** (unscoped, public). Consumers
 install it with:
@@ -316,6 +342,9 @@ npm install -g actions-warden
 # or
 npx actions-warden audit
 ```
+
+> **Requirements:** trusted publishing needs npm ≥ 11.5.1 and Node ≥ 24, so the
+> `publish-npm` job uses Node 24 and upgrades npm to latest before publishing.
 
 ## Security
 
