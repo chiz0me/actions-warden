@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "actions-warden",
+  "displayName": "Actions Warden",
+  "version": "0.1.0",
+  "description": "Audit, pin, and upgrade GitHub Actions workflows. Safe-by-default CLI with LLM-friendly TOON output.",
+  "author": {
+    "name": "Naveen Yagati"
+  },
+  "homepage": "https://github.com/chiz0me/actions-warden#readme",
+  "repository": "https://github.com/chiz0me/actions-warden",
+  "license": "MIT",
+  "keywords": [
+    "github-actions",
+    "security",
+    "audit",
+    "supply-chain",
+    "workflow",
+    "sha-pin",
+    "toon"
+  ]
+}

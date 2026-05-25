@@ -187,26 +187,36 @@ set `continue-on-error: true` on the step.
 
 ## Use it from Claude Code
 
-The repo ships a Claude Code skill at [`skill/SKILL.md`](./skill/SKILL.md).
-Once installed, Claude will invoke `actions-warden` automatically whenever a
-prompt asks to audit, pin, or upgrade GitHub Actions workflows.
+This repo is also a Claude Code plugin. Once installed, Claude will invoke
+`actions-warden` automatically whenever a prompt asks to audit, pin, or
+upgrade GitHub Actions workflows.
+
+**Option A - via the plugin marketplace (recommended):**
+
+```
+/plugin marketplace add chiz0me/claude-plugins
+/plugin install actions-warden@chiz0me
+```
+
+**Option B - drop the skill in directly (no marketplace):**
 
 ```sh
 mkdir -p ~/.claude/skills/actions-warden
-cp skill/SKILL.md ~/.claude/skills/actions-warden/SKILL.md
-```
-
-Or as a one-liner from any directory:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/chiz0me/actions-warden/main/skill/SKILL.md \
+curl -fsSL https://raw.githubusercontent.com/chiz0me/actions-warden/main/skills/actions-warden/SKILL.md \
   -o ~/.claude/skills/actions-warden/SKILL.md
 ```
 
-After that, prompts like *"audit my workflows"*, *"pin my actions to SHAs"*,
-or *"check this workflow for script injection"* will route through the skill,
-which runs the CLI via `npx actions-warden` and explains the TOON output back
-to you.
+After installation, prompts like *"audit my workflows"*, *"pin my actions to
+SHAs"*, or *"check this workflow for script injection"* will route through the
+skill, which runs the CLI via `npx actions-warden` and explains the TOON
+output back to you.
+
+Plugin layout (per the Claude Code plugin spec):
+
+```
+.claude-plugin/plugin.json      # plugin manifest
+skills/actions-warden/SKILL.md  # the skill itself
+```
 
 ## Programmatic API
 
