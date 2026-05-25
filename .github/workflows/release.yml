@@ -126,5 +126,19 @@ jobs:
       - name: Install
         run: npm ci --no-audit --no-fund --ignore-scripts
 
+      - name: Check if version already on registry
+        id: check
+        run: |
+          set -euo pipefail
+          pkg_name="$(node -p "require('./package.json').name")"
+          pkg_version="$(node -p "require('./package.json').version")"
+          if npm view "${pkg_name}@${pkg_version}" version >/dev/null 2>&1; then
+            echo "::notice::${pkg_name}@${pkg_version} is already published; skipping publish"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish
+        if: steps.check.outputs.skip == 'false'
         run: npm publish --provenance --access public
