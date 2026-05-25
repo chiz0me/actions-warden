@@ -142,3 +142,56 @@ jobs:
       - name: Publish
         if: steps.check.outputs.skip == 'false'
         run: npm publish --provenance --access public
+
+  sync-marketplace:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: chiz0me/claude-plugins
+          token: ${{ secrets.MARKETPLACE_SYNC_TOKEN }}
+          path: marketplace
+          persist-credentials: false
+
+      - name: Bump actions-warden version in marketplace.json
+        id: update
+        working-directory: marketplace
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const path = '.claude-plugin/marketplace.json';
+          const data = JSON.parse(fs.readFileSync(path, 'utf8'));
+          const target = data.plugins.find(p => p.name === 'actions-warden');
+          if (!target) { console.error('actions-warden not listed in marketplace'); process.exit(1); }
+          const desired = process.env.REF_NAME.replace(/^v/, '');
+          if (target.version === desired) {
+            console.log(`marketplace already at ${desired}; no-op`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'changed=false\n');
+            process.exit(0);
+          }
+          target.version = desired;
+          fs.writeFileSync(path, JSON.stringify(data, null, 2) + '\n');
+          console.log(`bumped actions-warden to ${desired}`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'changed=true\n');
+          NODE
+
+      - name: Commit and push
+        if: steps.update.outputs.changed == 'true'
+        working-directory: marketplace
+        env:
+          TOKEN: ${{ secrets.MARKETPLACE_SYNC_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .claude-plugin/marketplace.json
+          git commit -m "sync: bump actions-warden to ${REF_NAME}"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)" \
+            push "https://github.com/chiz0me/claude-plugins.git" HEAD:main

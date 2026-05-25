@@ -316,6 +316,26 @@ After the first release tag is pushed, open the release on github.com and tick
 "Publish this Action to the GitHub Marketplace" to list it. No automation
 required - the release workflow above handles everything except that opt-in.
 
+### Marketplace sync
+
+When a `vX.Y.Z` tag is pushed, the `sync-marketplace` job in `release.yml`
+updates the `actions-warden` plugin entry in
+[chiz0me/claude-plugins/.claude-plugin/marketplace.json](https://github.com/chiz0me/claude-plugins/blob/main/.claude-plugin/marketplace.json)
+to match. No-op when the marketplace is already on the target version.
+
+**One-time setup (cross-repo write requires a token the default
+`GITHUB_TOKEN` cannot provide):**
+
+1. Create a **fine-grained personal access token** at
+   https://github.com/settings/personal-access-tokens/new with:
+   - Repository access: **Only select repositories → `chiz0me/claude-plugins`**
+   - Permissions: **Contents: Read and write**
+2. In `chiz0me/actions-warden` repo settings, add it as an Actions secret
+   named **`MARKETPLACE_SYNC_TOKEN`**.
+
+After that, every release tag also writes a `sync: bump actions-warden to vX.Y.Z`
+commit to the marketplace repo.
+
 ### Publishing to npm
 
 The release workflow includes a `publish-npm` job that publishes to npm with
