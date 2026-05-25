@@ -185,6 +185,29 @@ making findings visible directly in the GitHub UI.
 which fails the job by default. To collect findings without failing the build,
 set `continue-on-error: true` on the step.
 
+## Use it from Claude Code
+
+The repo ships a Claude Code skill at [`skill/SKILL.md`](./skill/SKILL.md).
+Once installed, Claude will invoke `actions-warden` automatically whenever a
+prompt asks to audit, pin, or upgrade GitHub Actions workflows.
+
+```sh
+mkdir -p ~/.claude/skills/actions-warden
+cp skill/SKILL.md ~/.claude/skills/actions-warden/SKILL.md
+```
+
+Or as a one-liner from any directory:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/chiz0me/actions-warden/main/skill/SKILL.md \
+  -o ~/.claude/skills/actions-warden/SKILL.md
+```
+
+After that, prompts like *"audit my workflows"*, *"pin my actions to SHAs"*,
+or *"check this workflow for script injection"* will route through the skill,
+which runs the CLI via `npx actions-warden` and explains the TOON output back
+to you.
+
 ## Programmatic API
 
 Each command is also exported as an async function, so an LLM agent or
