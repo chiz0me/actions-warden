@@ -8,6 +8,13 @@ invocation by humans **or** LLMs.
 - **Upgrade** - bump pinned actions to the newest permitted version
 - **Report** - combined audit + dry-run plan, ideal for LLM context
 
+Inspired by [`actions-up`](https://github.com/azat-io/actions-up). The
+update/pin core borrows its overall shape - YAML parsing plus regex-based
+source rewrites that preserve formatting - and adds an audit layer, an
+LLM-friendly TOON output format, inline ignore directives, an upgrade
+cooldown, a Claude Code plugin, and a composite GitHub Action so the same
+engine runs locally, in CI, and from inside Claude.
+
 ## Why
 
 Tag references in `uses:` are mutable - anyone with write access to the action
@@ -286,122 +293,14 @@ TTL defaults to 1 hour. Delete the directory to force a refresh.
 | `1` | findings reported, or errors during pin/upgrade |
 | `2` | invalid arguments |
 
-## Releasing
-
-To cut a release:
-
-1. Bump `version` in `package.json` (e.g. `0.1.0` → `0.2.0`).
-2. Commit and push to `main`.
-3. Create and push the tag:
-
-   ```sh
-   git tag v0.2.0
-   git push origin v0.2.0
-   ```
-
-The `.github/workflows/release.yml` workflow then:
-
-- verifies `package.json` version matches the tag and runs the test suite,
-- creates a GitHub Release with auto-generated notes,
-- force-updates the floating major tag (e.g. `v0`) to point at the new commit.
-
-Consumers can pin precisely (`@v0.2.0`), float on the major (`@v0`), or
-pin to a commit SHA (recommended - and what `actions-warden pin` will
-produce when run against their workflow).
-
-### Publishing to the GitHub Marketplace
-
-The repo's `action.yml` already declares `branding`, so it is Marketplace-eligible.
-After the first release tag is pushed, open the release on github.com and tick
-"Publish this Action to the GitHub Marketplace" to list it. No automation
-required - the release workflow above handles everything except that opt-in.
-
-### Marketplace sync
-
-When a `vX.Y.Z` tag is pushed, the `sync-marketplace` job in `release.yml`
-updates the `actions-warden` plugin entry in
-[chiz0me/claude-plugins/.claude-plugin/marketplace.json](https://github.com/chiz0me/claude-plugins/blob/main/.claude-plugin/marketplace.json)
-to match. No-op when the marketplace is already on the target version.
-
-**One-time setup (cross-repo write requires a token the default
-`GITHUB_TOKEN` cannot provide):**
-
-1. Create a **fine-grained personal access token** at
-   https://github.com/settings/personal-access-tokens/new with:
-   - Repository access: **Only select repositories → `chiz0me/claude-plugins`**
-   - Permissions: **Contents: Read and write**
-2. In `chiz0me/actions-warden` repo settings, add it as an Actions secret
-   named **`MARKETPLACE_SYNC_TOKEN`**.
-
-After that, every release tag also writes a `sync: bump actions-warden to vX.Y.Z`
-commit to the marketplace repo.
-
-### Publishing to npm
-
-The release workflow includes a `publish-npm` job that publishes to npm with
-provenance via OIDC trusted publishing - no long-lived `NPM_TOKEN` lives in
-GitHub secrets.
-
-**npm does not support pre-publish trusted-publisher configuration** — the
-Trusted Publisher panel only appears on packages that already exist on the
-registry. So the very first publish has to be done with a one-time automation
-token; after that, OIDC takes over.
-
-#### Step 1 — bootstrap publish (one time, locally)
-
-```sh
-npm login                              # browser auth
-npm publish --access public            # no --provenance on the first publish;
-                                       # local publishes can't sign provenance
-```
-
-#### Step 2 — configure the trusted publisher on npmjs.com
-
-Once the package exists, go to:
-
-**npmjs.com → Packages → actions-warden → Settings → Trusted publishing**
-
-Add a new GitHub Actions publisher with:
-
-- Organization or user: `chiz0me`
-- Repository: `actions-warden`
-- Workflow filename: `release.yml`
-- Environment: *(leave blank)*
-
-Save. From this point on, no token is needed.
-
-#### Step 3 — release future versions
-
-Bump `version` in `package.json`, push, then:
-
-```sh
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-The release workflow then:
-
-- runs the full test suite and dependency-pin verification,
-- publishes to npm with `--provenance --access public` (the published package
-  carries a verifiable link back to this exact commit and workflow run),
-- creates the GitHub Release with auto-generated notes,
-- force-moves the floating major tag (`v0`).
-
-The package is published as **`actions-warden`** (unscoped, public). Consumers
-install it with:
-
-```sh
-npm install -g actions-warden
-# or
-npx actions-warden audit
-```
-
-> **Requirements:** trusted publishing needs npm ≥ 11.5.1 and Node ≥ 24, so the
-> `publish-npm` job uses Node 24 and upgrades npm to latest before publishing.
-
 ## Security
 
 See [SECURITY.md](./SECURITY.md) for the disclosure policy.
+
+## Maintainers
+
+Release process, npm/marketplace setup, and verification commands live in
+[RELEASING.md](./RELEASING.md).
 
 ## License
 
