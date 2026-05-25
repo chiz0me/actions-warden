@@ -1,5 +1,13 @@
 # actions-warden
 
+[![npm](https://img.shields.io/npm/v/actions-warden?color=cb3837&logo=npm)](https://www.npmjs.com/package/actions-warden)
+[![provenance](https://img.shields.io/badge/npm-provenance-5b21b6?logo=npm)](https://www.npmjs.com/package/actions-warden?activeTab=code)
+[![ci](https://github.com/chiz0me/actions-warden/actions/workflows/ci.yml/badge.svg)](https://github.com/chiz0me/actions-warden/actions/workflows/ci.yml)
+[![CodeQL](https://img.shields.io/badge/CodeQL-active-2188ff?logo=github)](https://github.com/chiz0me/actions-warden/security/code-scanning)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/chiz0me/actions-warden/badge)](https://securityscorecards.dev/viewer/?uri=github.com/chiz0me/actions-warden)
+[![node](https://img.shields.io/node/v/actions-warden)](https://www.npmjs.com/package/actions-warden)
+[![license: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+
 Audit, pin, and upgrade GitHub Actions workflows. Designed for safe, hands-off
 invocation by humans **or** LLMs.
 
