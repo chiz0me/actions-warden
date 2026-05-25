@@ -1,0 +1,54 @@
+{
+  "name": "actions-warden",
+  "version": "0.1.0",
+  "description": "Audit, pin, and upgrade GitHub Actions workflows. LLM-friendly TOON output, safe-by-default.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./commands/audit": "./src/commands/audit.js",
+    "./commands/pin": "./src/commands/pin.js",
+    "./commands/upgrade": "./src/commands/upgrade.js",
+    "./commands/report": "./src/commands/report.js"
+  },
+  "bin": {
+    "actions-warden": "./src/cli.js"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "test": "vitest --run",
+    "test:watch": "vitest",
+    "lint": "eslint src test",
+    "verify-deps": "node scripts/verify-deps.js",
+    "audit": "npm audit --audit-level=high"
+  },
+  "dependencies": {
+    "commander": "14.0.3",
+    "picomatch": "4.0.4",
+    "semver": "7.8.1",
+    "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "vitest": "4.1.6"
+  },
+  "keywords": [
+    "github-actions",
+    "security",
+    "audit",
+    "pin",
+    "sha-pin",
+    "workflow",
+    "supply-chain",
+    "toon",
+    "llm"
+  ],
+  "license": "MIT"
+}

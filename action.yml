@@ -1,0 +1,208 @@
+name: 'actions-warden'
+description: 'Audit, pin, and upgrade GitHub Actions workflows. LLM-friendly TOON output, safe-by-default.'
+author: 'actions-warden contributors'
+branding:
+  icon: 'shield'
+  color: 'gray-dark'
+
+inputs:
+  command:
+    description: 'Subcommand to run: audit | pin | upgrade | report | rules'
+    required: false
+    default: 'audit'
+  workflow:
+    description: 'Workflow path or glob (space-separated for multiple). Defaults to .github/workflows/*.yml'
+    required: false
+    default: ''
+  severity:
+    description: 'Minimum severity to report (audit/report): low | medium | high | critical'
+    required: false
+    default: ''
+  format:
+    description: 'Output format: toon | json | text'
+    required: false
+    default: 'toon'
+  mode:
+    description: 'Upgrade scope (upgrade/report): major | minor | patch'
+    required: false
+    default: 'minor'
+  min-age:
+    description: 'Cooldown in days before accepting a new tag (upgrade/report). Default 7.'
+    required: false
+    default: '7'
+  write:
+    description: 'For pin/upgrade: apply changes (true) instead of dry-run (false).'
+    required: false
+    default: 'false'
+  explain:
+    description: 'For audit: include plain-English remediation hint per finding.'
+    required: false
+    default: 'false'
+  offline:
+    description: 'For report: skip network calls (audit only).'
+    required: false
+    default: 'false'
+  output-path:
+    description: 'Write output to this file in addition to stdout.'
+    required: false
+    default: ''
+  token:
+    description: 'GitHub API token. Defaults to ${{ github.token }} via the calling workflow.'
+    required: false
+    default: ''
+  working-directory:
+    description: 'Directory to scan. Defaults to GITHUB_WORKSPACE.'
+    required: false
+    default: ''
+  node-version:
+    description: 'Node.js version to install.'
+    required: false
+    default: '20'
+
+outputs:
+  status:
+    description: 'OK or FAIL'
+    value: ${{ steps.run.outputs.status }}
+  findings:
+    description: 'Number of audit findings (audit/report only).'
+    value: ${{ steps.run.outputs.findings }}
+  report-path:
+    description: 'Absolute path of the written report file, if output-path was set.'
+    value: ${{ steps.run.outputs.report-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Node.js
+      uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install actions-warden
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        if [ -f package-lock.json ]; then
+          npm ci --no-audit --no-fund --ignore-scripts
+        else
+          npm install --no-audit --no-fund --ignore-scripts
+        fi
+
+    - name: Run actions-warden
+      id: run
+      shell: bash
+      env:
+        AW_BIN: ${{ github.action_path }}/src/cli.js
+        AW_CMD: ${{ inputs.command }}
+        AW_WORKFLOW: ${{ inputs.workflow }}
+        AW_SEVERITY: ${{ inputs.severity }}
+        AW_FORMAT: ${{ inputs.format }}
+        AW_MODE: ${{ inputs.mode }}
+        AW_MIN_AGE: ${{ inputs.min-age }}
+        AW_WRITE: ${{ inputs.write }}
+        AW_EXPLAIN: ${{ inputs.explain }}
+        AW_OFFLINE: ${{ inputs.offline }}
+        AW_OUTPUT_PATH: ${{ inputs.output-path }}
+        AW_TOKEN: ${{ inputs.token }}
+        AW_CWD: ${{ inputs.working-directory }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+
+        case "$AW_CMD" in
+          audit|pin|upgrade|report|rules) ;;
+          *)
+            echo "::error::unknown command: $AW_CMD"
+            exit 2
+            ;;
+        esac
+
+        args=("$AW_CMD")
+
+        if [ -n "$AW_CWD" ]; then
+          args+=(--cwd "$AW_CWD")
+        else
+          args+=(--cwd "${GITHUB_WORKSPACE:-$PWD}")
+        fi
+
+        if [ -n "$AW_WORKFLOW" ]; then
+          # Space-separated globs/paths.
+          for w in $AW_WORKFLOW; do
+            args+=(--workflow "$w")
+          done
+        fi
+
+        case "$AW_CMD" in
+          audit)
+            [ -n "$AW_SEVERITY" ] && args+=(--severity "$AW_SEVERITY")
+            [ "$AW_EXPLAIN" = "true" ] && args+=(--explain)
+            args+=(--format "$AW_FORMAT")
+            ;;
+          pin)
+            [ "$AW_WRITE" = "true" ] && args+=(--write)
+            args+=(--format "$AW_FORMAT")
+            ;;
+          upgrade)
+            [ "$AW_WRITE" = "true" ] && args+=(--write)
+            args+=(--mode "$AW_MODE" --min-age "$AW_MIN_AGE" --format "$AW_FORMAT")
+            ;;
+          report)
+            [ "$AW_OFFLINE" = "true" ] && args+=(--offline)
+            args+=(--mode "$AW_MODE" --min-age "$AW_MIN_AGE" --format "$AW_FORMAT")
+            ;;
+          rules)
+            args+=(--format "$AW_FORMAT")
+            ;;
+        esac
+
+        if [ -n "$AW_OUTPUT_PATH" ]; then
+          args+=(--output file --output-path "$AW_OUTPUT_PATH")
+        fi
+
+        # Capture stdout so we can extract status/findings even when --output=file.
+        tmp_out="$(mktemp)"
+        exit_code=0
+        if [ -n "$AW_OUTPUT_PATH" ]; then
+          node "$AW_BIN" "${args[@]}" || exit_code=$?
+          cp "$AW_OUTPUT_PATH" "$tmp_out" 2>/dev/null || true
+          # Also surface the report contents in the job log.
+          echo "--- actions-warden output ---"
+          cat "$AW_OUTPUT_PATH" || true
+          echo "--- end ---"
+        else
+          node "$AW_BIN" "${args[@]}" | tee "$tmp_out"
+          exit_code=${PIPESTATUS[0]}
+        fi
+
+        # Parse status from the last STATUS: line (TOON) or json body.
+        status="$(grep -E '^STATUS: (OK|FAIL)$' "$tmp_out" | tail -n1 | awk '{print $2}')"
+        if [ -z "$status" ]; then
+          # Fall back to JSON status field.
+          status="$(python3 -c "import json,sys;d=json.load(open('$tmp_out'));print(d.get('status',''))" 2>/dev/null || true)"
+        fi
+        [ -z "$status" ] && status="UNKNOWN"
+        echo "status=$status" >> "$GITHUB_OUTPUT"
+
+        findings="$(grep -oE 'findings=[0-9]+' "$tmp_out" | tail -n1 | cut -d= -f2)"
+        [ -z "$findings" ] && findings="0"
+        echo "findings=$findings" >> "$GITHUB_OUTPUT"
+
+        if [ -n "$AW_OUTPUT_PATH" ]; then
+          echo "report-path=$AW_OUTPUT_PATH" >> "$GITHUB_OUTPUT"
+        fi
+
+        # Step summary for at-a-glance review.
+        {
+          echo "### actions-warden ($AW_CMD)"
+          echo ""
+          echo "status: \`$status\`  findings: \`$findings\`"
+          echo ""
+          echo '```'
+          head -c 8000 "$tmp_out"
+          echo ''
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        rm -f "$tmp_out"
+        exit "$exit_code"

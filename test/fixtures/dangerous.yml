@@ -1,0 +1,21 @@
+name: ci
+on:
+  pull_request_target:
+    types: [opened]
+permissions: write-all
+env:
+  GLOBAL_SECRET: ${{ secrets.AWS_SECRET }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+      - uses: actions/setup-node@v4.0.0
+      - name: dangerous run
+        run: |
+          echo "title: ${{ github.event.issue.title }}"
