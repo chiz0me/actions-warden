@@ -1,5 +1,5 @@
 /**
- * Audit command — scan workflows for security findings.
+ * Audit command - scan workflows for security findings.
  *
  * Programmatic API:
  *   const result = await audit({ cwd, workflows, severity, explain });

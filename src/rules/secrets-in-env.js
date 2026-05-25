@@ -33,7 +33,7 @@ export function check(workflow) {
       severity,
       line: 1,
       fields: { type: id, sev: severity, key, scope: 'workflow' },
-      explain: `secret ${key} is in workflow-level env — every step (including 3rd-party) can read it`,
+      explain: `secret ${key} is in workflow-level env - every step (including 3rd-party) can read it`,
     });
   }
   for (const job of workflow.jobs) {

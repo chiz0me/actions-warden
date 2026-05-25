@@ -3,11 +3,11 @@
  *
  * Directives (accept either `actions-warden-` or `aw-` prefix):
  *
- *   # actions-warden-ignore-file                — silence the entire file
- *   # actions-warden-ignore-start               — start a block (until -end)
- *   # actions-warden-ignore-end                 — end the current block
- *   # actions-warden-ignore-next-line           — silence the next non-comment line
- *   # actions-warden-ignore                     — silence the same line (inline)
+ *   # actions-warden-ignore-file                - silence the entire file
+ *   # actions-warden-ignore-start               - start a block (until -end)
+ *   # actions-warden-ignore-end                 - end the current block
+ *   # actions-warden-ignore-next-line           - silence the next non-comment line
+ *   # actions-warden-ignore                     - silence the same line (inline)
  *
  * Optional rule filter: append rule ids after a colon, e.g.
  *   # actions-warden-ignore: unpinned-action,secrets-in-env

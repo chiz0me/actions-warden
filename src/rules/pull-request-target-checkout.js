@@ -37,7 +37,7 @@ export function check(workflow) {
           severity,
           line: step.line,
           fields: { type: id, sev: severity, job: job.name },
-          explain: 'avoid checking out PR head under pull_request_target — use pull_request, or split build/deploy',
+          explain: 'avoid checking out PR head under pull_request_target - use pull_request, or split build/deploy',
         });
       }
     }

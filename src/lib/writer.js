@@ -2,7 +2,7 @@
  * Safe file writer with dry-run guard.
  *
  * Every mutation flows through {@link writeFileGuarded}. When `dryRun` is true
- * (the default), no bytes are written — the change is recorded and reported.
+ * (the default), no bytes are written - the change is recorded and reported.
  */
 
 import { writeFile } from 'node:fs/promises';

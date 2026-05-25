@@ -1,5 +1,5 @@
 /**
- * Pin command — rewrite tag-based `uses:` refs to immutable commit SHAs.
+ * Pin command - rewrite tag-based `uses:` refs to immutable commit SHAs.
  *
  * Format: `uses: owner/repo@<sha>  # <original-ref>`
  *

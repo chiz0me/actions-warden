@@ -32,7 +32,7 @@ export function check(workflow) {
         action: ref.raw,
         ref: ref.ref ?? '',
       },
-      explain: `pin ${ref.owner}/${ref.repo} to a 40-char commit SHA — tags are mutable`,
+      explain: `pin ${ref.owner}/${ref.repo} to a 40-char commit SHA - tags are mutable`,
     });
   }
   return findings;

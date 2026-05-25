@@ -1,5 +1,5 @@
 /**
- * Report command — runs audit + dry-run pin + dry-run upgrade and produces
+ * Report command - runs audit + dry-run pin + dry-run upgrade and produces
  * a combined view. Useful for "what would change?" review and LLM prompting.
  */
 

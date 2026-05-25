@@ -60,7 +60,7 @@ export function check(workflow) {
       severity,
       line: 1,
       fields: { type: id, sev: severity, scope: topScope, target: 'workflow' },
-      explain: `workflow grants ${topScope} — narrow to specific scopes`,
+      explain: `workflow grants ${topScope} - narrow to specific scopes`,
     });
   }
   for (const job of workflow.jobs) {

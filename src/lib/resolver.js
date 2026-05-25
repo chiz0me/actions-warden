@@ -115,7 +115,7 @@ export async function resolveRefToSha({ owner, repo, ref, token, cwd }) {
     const obj = tagRes.body.object;
     if (obj && obj.sha) {
       if (obj.type === 'tag') {
-        // Annotated tag — dereference to commit.
+        // Annotated tag - dereference to commit.
         const tagObjUrl = `${API}/repos/${owner}/${repo}/git/tags/${obj.sha}`;
         const tagObj = await ghFetch({ url: tagObjUrl, token, cwd });
         if (tagObj.status === 200 && tagObj.body && tagObj.body.object) {

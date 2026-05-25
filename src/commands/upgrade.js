@@ -1,5 +1,5 @@
 /**
- * Upgrade command — bump pinned (or tagged) actions to the newest version
+ * Upgrade command - bump pinned (or tagged) actions to the newest version
  * permitted by the chosen policy.
  *
  * For SHA-pinned refs, the human-readable version is read from the inline

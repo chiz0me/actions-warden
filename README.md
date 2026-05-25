@@ -3,17 +3,17 @@
 Audit, pin, and upgrade GitHub Actions workflows. Designed for safe, hands-off
 invocation by humans **or** LLMs.
 
-- **Audit** — scan workflows for supply-chain and injection vulnerabilities
-- **Pin** — rewrite tag refs (`@v3`) to immutable commit SHAs
-- **Upgrade** — bump pinned actions to the newest permitted version
-- **Report** — combined audit + dry-run plan, ideal for LLM context
+- **Audit** - scan workflows for supply-chain and injection vulnerabilities
+- **Pin** - rewrite tag refs (`@v3`) to immutable commit SHAs
+- **Upgrade** - bump pinned actions to the newest permitted version
+- **Report** - combined audit + dry-run plan, ideal for LLM context
 
 ## Why
 
-Tag references in `uses:` are mutable — anyone with write access to the action
+Tag references in `uses:` are mutable - anyone with write access to the action
 repo (or a stolen maintainer token) can rewrite `v3` to point at malicious code.
 Pinning to a 40-character commit SHA closes that hole. `actions-warden` finds
-the holes, plans the fix, and applies it — but never without your explicit
+the holes, plans the fix, and applies it - but never without your explicit
 say-so. `--dry-run` is the default for every destructive command.
 
 ## Install
@@ -50,7 +50,7 @@ actions-warden report --format=toon
 
 ## Output formats
 
-### TOON (default — `--format=toon`)
+### TOON (default - `--format=toon`)
 
 Token-Oriented Object Notation. Each line is a labeled record with `key=value`
 fields. Parses cleanly without a schema and ends with a machine-readable
@@ -70,7 +70,7 @@ Structured payload for programmatic integrations.
 
 ### Text (`--format=text`)
 
-Plain human-readable lines — useful when piping through `less`.
+Plain human-readable lines - useful when piping through `less`.
 
 ## Commands
 
@@ -85,7 +85,7 @@ Scan workflows for security findings.
 | `--explain` | `false` | include plain-English remediation hint per finding |
 | `--format <fmt>` | `toon` | `toon`, `json`, or `text` |
 | `--output <dest>` | `stdout` | `stdout` or `file` |
-| `--output-path <path>` | — | required when `--output=file` |
+| `--output-path <path>` | - | required when `--output=file` |
 | `--cwd <dir>` | `.` | working directory |
 
 Exit codes: `0` if no findings, `1` if any finding reported, `2` on usage error.
@@ -101,7 +101,7 @@ tag as an inline `# v3` comment so `upgrade` can find it later.
 | `--write` | `false` | apply changes (otherwise dry-run) |
 | `--dry-run <bool>` | `true` | explicit dry-run toggle |
 | `--token <token>` | `$GITHUB_TOKEN` | GitHub API token |
-| `--fix <id>` | — | apply only the change with this id |
+| `--fix <id>` | - | apply only the change with this id |
 | `--format <fmt>` | `toon` | |
 
 ### `upgrade`
@@ -112,7 +112,7 @@ Bump pinned/tagged actions to the newest version allowed by `--mode`.
 |---|---|---|
 | `--mode <m>` | `minor` | `major`, `minor`, or `patch` |
 | `--write` | `false` | apply changes |
-| `--fix <id>` | — | apply only this change id |
+| `--fix <id>` | - | apply only this change id |
 | `--token <token>` | `$GITHUB_TOKEN` | |
 
 ### `report`
@@ -158,17 +158,17 @@ Inputs (all optional unless noted):
 |---|---|---|---|
 | `command` | `audit` | all | `audit`, `pin`, `upgrade`, `report`, `rules` |
 | `workflow` | discover | all | space-separated paths or globs |
-| `severity` | — | audit/report | `low` / `medium` / `high` / `critical` |
+| `severity` | - | audit/report | `low` / `medium` / `high` / `critical` |
 | `format` | `toon` | all | `toon` / `json` / `text` |
 | `mode` | `minor` | upgrade/report | `major` / `minor` / `patch` |
 | `min-age` | `7` | upgrade/report | cooldown in days before accepting a new tag |
 | `write` | `false` | pin/upgrade | `true` to apply changes |
 | `explain` | `false` | audit | include remediation hints |
 | `offline` | `false` | report | skip network calls |
-| `output-path` | — | all | also save the report to this file |
-| `token` | — | all | GitHub token (pass `${{ github.token }}`) |
+| `output-path` | - | all | also save the report to this file |
+| `token` | - | all | GitHub token (pass `${{ github.token }}`) |
 | `working-directory` | `$GITHUB_WORKSPACE` | all | directory to scan |
-| `node-version` | `20` | — | Node.js version to install |
+| `node-version` | `20` | - | Node.js version to install |
 
 Outputs:
 
@@ -221,7 +221,7 @@ Every command is designed to be safe to invoke from an autonomous agent:
 
 - `pin` and `upgrade` default to `--dry-run=true`. You cannot accidentally
   mutate files without explicitly passing `--write`.
-- Output is deterministic and idempotent — re-running on an unchanged repo
+- Output is deterministic and idempotent - re-running on an unchanged repo
   produces identical bytes.
 - Every finding and every planned change carries a stable `id`. To apply a
   single fix without scope creep, pass `--fix=<id>`.
@@ -273,7 +273,7 @@ The `.github/workflows/release.yml` workflow then:
 - force-updates the floating major tag (e.g. `v0`) to point at the new commit.
 
 Consumers can pin precisely (`@v0.2.0`), float on the major (`@v0`), or
-pin to a commit SHA (recommended — and what `actions-warden pin` will
+pin to a commit SHA (recommended - and what `actions-warden pin` will
 produce when run against their workflow).
 
 ### Publishing to the GitHub Marketplace
@@ -281,12 +281,12 @@ produce when run against their workflow).
 The repo's `action.yml` already declares `branding`, so it is Marketplace-eligible.
 After the first release tag is pushed, open the release on github.com and tick
 "Publish this Action to the GitHub Marketplace" to list it. No automation
-required — the release workflow above handles everything except that opt-in.
+required - the release workflow above handles everything except that opt-in.
 
 ### Publishing to npm
 
 The release workflow includes a `publish-npm` job that publishes to npm with
-provenance via OIDC trusted publishing — no long-lived `NPM_TOKEN` lives in
+provenance via OIDC trusted publishing - no long-lived `NPM_TOKEN` lives in
 GitHub secrets.
 
 **npm does not support pre-publish trusted-publisher configuration** — the
