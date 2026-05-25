@@ -47,7 +47,7 @@ inputs:
     required: false
     default: ''
   token:
-    description: 'GitHub API token. Defaults to ${{ github.token }} via the calling workflow.'
+    description: 'GitHub API token. Pass github.token from the calling workflow.'
     required: false
     default: ''
   working-directory:
