@@ -7,11 +7,15 @@ import { resolve, join, relative } from 'node:path';
 import picomatch from 'picomatch';
 
 /**
- * Default workflow directory globs.
+ * Default workflow and composite-action globs.
  */
 export const DEFAULT_WORKFLOW_PATTERNS = [
   '.github/workflows/*.yml',
   '.github/workflows/*.yaml',
+  'action.yml',
+  'action.yaml',
+  '**/action.yml',
+  '**/action.yaml',
 ];
 
 /**

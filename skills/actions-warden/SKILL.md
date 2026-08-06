@@ -1,6 +1,6 @@
 ---
 name: actions-warden
-description: Audit, pin, and upgrade GitHub Actions workflows. Use when the user asks to scan workflows for supply-chain or injection vulnerabilities, replace tag refs with commit SHAs, bump pinned action versions, or generate a security report on .github/workflows. Triggers include "audit my workflows", "pin my actions", "upgrade actions", "check workflow security", "are my GitHub Actions safe", or any mention of pull_request_target, unpinned actions, script injection in CI.
+description: Audit, pin, and upgrade GitHub Actions workflows and composite actions. Use when the user asks to scan GitHub Actions for supply-chain or injection vulnerabilities, inspect reusable-workflow calls or composite-action dependencies, replace mutable tag or branch refs with commit SHAs, bump pinned action versions, or generate a CI security report. Triggers include "audit my workflows", "pin my actions", "upgrade actions", "check workflow security", "are my GitHub Actions safe", pull_request_target, unpinned actions, reusable workflows, composite actions, or script injection in CI.
 ---
 
 # actions-warden
@@ -50,9 +50,10 @@ usage error.
 
 ## What to do when invoked
 
-1. **Identify the workflow scope.** If the user named a file or directory,
-   pass it via `--workflow`. Otherwise default to `.github/workflows/` in the
-   current repo.
+1. **Identify the Actions scope.** If the user named a file or directory,
+   pass it via `--workflow`. Otherwise let discovery scan `.github/workflows/`
+   plus repository `action.yml` and `action.yaml` files. Default discovery
+   excludes `.git` and `node_modules`.
 
 2. **Pick the right command.**
    - "audit / scan / check security / find issues" → `audit`
@@ -83,7 +84,7 @@ usage error.
 
 | id | severity | catches |
 |---|---|---|
-| `unpinned-action` | high | `uses:` refs that aren't 40-char SHAs |
+| `unpinned-action` | high | workflow-step, reusable-workflow job, and composite-action `uses:` refs that aren't 40-char SHAs |
 | `excessive-permissions` | medium | `write-all` or broad write scopes |
 | `secrets-in-env` | critical | secrets at workflow- or job-level env (leaks to every step) |
 | `script-injection` | critical | `${{ github.event.* }}` interpolated into `run:` |
@@ -115,8 +116,10 @@ const result = await audit({ cwd: '/repo', explain: true });
 // result.status:   'OK' | 'FAIL'
 ```
 
-Other exports: `listRules`, `parseWorkflowFile`, `renderAudit`, `renderPin`,
-`renderUpgrade`, `renderReport`, `format`, `redact`, `parseIgnoreDirectives`.
+Other exports: `listRules`, `discoverWorkflows`, `parseWorkflowFile`,
+`parseWorkflowSource`, `collectUses`, `parseActionRef`, `renderAudit`,
+`renderPin`, `renderUpgrade`, `renderReport`, `format`, `redact`,
+`parseIgnoreDirectives`.
 
 ## Notes
 

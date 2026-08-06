@@ -33,21 +33,56 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - run: echo hi
+  deploy:
+    uses: octo/repo/.github/workflows/deploy.yml@main
 `;
   it('parses jobs and steps with line numbers', () => {
     const doc = parseWorkflowSource(src, 'x.yml');
-    expect(doc.jobs).toHaveLength(1);
+    expect(doc.kind).toBe('workflow');
+    expect(doc.jobs).toHaveLength(2);
     expect(doc.jobs[0].name).toBe('build');
     expect(doc.jobs[0].steps).toHaveLength(2);
     expect(doc.jobs[0].steps[0].uses.raw).toBe('actions/checkout@v3');
     expect(doc.jobs[0].steps[0].uses.line).toBe(9);
   });
 
-  it('collectUses returns all action refs', () => {
+  it('collectUses returns step actions and job-level reusable workflows', () => {
     const doc = parseWorkflowSource(src, 'x.yml');
     const uses = collectUses(doc);
-    expect(uses).toHaveLength(1);
+    expect(uses).toHaveLength(2);
     expect(uses[0].jobName).toBe('build');
+    expect(uses[0].location).toBe('step');
+    expect(uses[1]).toMatchObject({
+      jobName: 'deploy',
+      stepIndex: -1,
+      location: 'job',
+    });
+    expect(uses[1].ref).toMatchObject({
+      raw: 'octo/repo/.github/workflows/deploy.yml@main',
+      kind: 'reusable-workflow',
+      line: 12,
+    });
+  });
+
+  it('collects action references from composite action steps', () => {
+    const doc = parseWorkflowSource(`
+name: composite
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+    - shell: bash
+      run: echo ok
+`, 'action.yml');
+    expect(doc.kind).toBe('composite-action');
+    const uses = collectUses(doc);
+    expect(uses).toHaveLength(1);
+    expect(uses[0]).toMatchObject({
+      jobName: null,
+      stepIndex: 0,
+      location: 'action-step',
+    });
+    expect(uses[0].ref).toMatchObject({ raw: 'actions/setup-node@v4', line: 6 });
   });
 
   it('throws on invalid YAML', () => {

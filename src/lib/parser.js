@@ -37,6 +37,7 @@ import { parseDocument, isMap, isSeq, isPair, isScalar } from 'yaml';
  * @property {object|null} permissions
  * @property {string|null} runsOn
  * @property {object|null} env
+ * @property {ActionRef|null} uses       reusable workflow called at job level
  * @property {StepNode[]} steps
  * @property {number} line
  */
@@ -45,11 +46,13 @@ import { parseDocument, isMap, isSeq, isPair, isScalar } from 'yaml';
  * @typedef {object} WorkflowDoc
  * @property {string} path
  * @property {string} source
+ * @property {'workflow'|'composite-action'|'unknown'} kind
  * @property {string|null} name
  * @property {unknown} on
  * @property {object|null} permissions
  * @property {object|null} env
  * @property {JobNode[]} jobs
+ * @property {StepNode[]} actionSteps    steps from a composite action's `runs` block
  * @property {object} raw         - the parsed plain object (for rules to query)
  */
 
@@ -87,17 +90,6 @@ export function parseActionRef(raw, line) {
   const rest = parts.slice(2).join('/');
   const kind = /\.(yml|yaml)$/.test(rest) ? 'reusable-workflow' : 'external';
   return { ...base, owner, repo, subpath: rest || null, ref, kind };
-}
-
-/**
- * @param {unknown} node
- * @returns {number}
- */
-function lineOf(node) {
-  if (node && typeof node === 'object' && 'range' in node && Array.isArray(node.range)) {
-    // We won't use this path; line is computed externally from the document.
-  }
-  return 0;
 }
 
 /**
@@ -147,6 +139,48 @@ function findPair(map, key) {
 }
 
 /**
+ * Extract a `steps` sequence from a workflow job or composite action `runs`
+ * mapping. Both locations use the same step-level `uses` syntax.
+ *
+ * @param {string} source
+ * @param {object} parentNode
+ * @returns {StepNode[]}
+ */
+function extractSteps(source, parentNode) {
+  const steps = [];
+  const stepsPair = findPair(parentNode, 'steps');
+  if (!stepsPair || !isSeq(stepsPair.value)) return steps;
+
+  for (const stepNode of stepsPair.value.items) {
+    if (!isMap(stepNode)) continue;
+    const usesPair = findPair(stepNode, 'uses');
+    const runPair = findPair(stepNode, 'run');
+    const namePair = findPair(stepNode, 'name');
+    const idPair = findPair(stepNode, 'id');
+    const envPair = findPair(stepNode, 'env');
+    const withPair = findPair(stepNode, 'with');
+
+    const step = {
+      name: namePair && isScalar(namePair.value) ? String(namePair.value.value) : null,
+      id: idPair && isScalar(idPair.value) ? String(idPair.value.value) : null,
+      uses: null,
+      run: runPair && isScalar(runPair.value) ? String(runPair.value.value) : null,
+      env: envPair ? toJs(envPair.value) : null,
+      with_: withPair ? toJs(withPair.value) : null,
+      line: lineFromRange(source, stepNode),
+    };
+    if (usesPair && isScalar(usesPair.value)) {
+      step.uses = parseActionRef(
+        String(usesPair.value.value),
+        lineFromRange(source, usesPair.value),
+      );
+    }
+    steps.push(step);
+  }
+  return steps;
+}
+
+/**
  * @param {string} source
  * @param {object} doc - yaml Document
  * @returns {JobNode[]}
@@ -169,6 +203,7 @@ function extractJobs(source, doc) {
       permissions: null,
       runsOn: null,
       env: null,
+      uses: null,
       steps: [],
       line: jobLine,
     };
@@ -180,36 +215,14 @@ function extractJobs(source, doc) {
       if (runsOn) job.runsOn = toJs(runsOn.value);
       const env = findPair(jobNode, 'env');
       if (env) job.env = toJs(env.value);
-
-      const stepsPair = findPair(jobNode, 'steps');
-      if (stepsPair && isSeq(stepsPair.value)) {
-        for (const stepNode of stepsPair.value.items) {
-          if (!isMap(stepNode)) continue;
-          const usesPair = findPair(stepNode, 'uses');
-          const runPair = findPair(stepNode, 'run');
-          const namePair = findPair(stepNode, 'name');
-          const idPair = findPair(stepNode, 'id');
-          const envPair = findPair(stepNode, 'env');
-          const withPair = findPair(stepNode, 'with');
-
-          const stepLine = lineFromRange(source, stepNode);
-          /** @type {StepNode} */
-          const step = {
-            name: namePair && isScalar(namePair.value) ? String(namePair.value.value) : null,
-            id: idPair && isScalar(idPair.value) ? String(idPair.value.value) : null,
-            uses: null,
-            run: runPair && isScalar(runPair.value) ? String(runPair.value.value) : null,
-            env: envPair ? toJs(envPair.value) : null,
-            with_: withPair ? toJs(withPair.value) : null,
-            line: stepLine,
-          };
-          if (usesPair && isScalar(usesPair.value)) {
-            const usesLine = lineFromRange(source, usesPair.value);
-            step.uses = parseActionRef(String(usesPair.value.value), usesLine);
-          }
-          job.steps.push(step);
-        }
+      const uses = findPair(jobNode, 'uses');
+      if (uses && isScalar(uses.value)) {
+        job.uses = parseActionRef(
+          String(uses.value.value),
+          lineFromRange(source, uses.value),
+        );
       }
+      job.steps = extractSteps(source, jobNode);
     }
     jobs.push(job);
   }
@@ -233,11 +246,13 @@ export function parseWorkflowSource(source, path) {
   const result = {
     path,
     source,
+    kind: 'unknown',
     name: null,
     on: null,
     permissions: null,
     env: null,
     jobs: [],
+    actionSteps: [],
     raw: doc.toJS() ?? {},
   };
   if (!doc.contents || !isMap(doc.contents)) return result;
@@ -249,7 +264,14 @@ export function parseWorkflowSource(source, path) {
   if (permPair) result.permissions = toJs(permPair.value);
   const envPair = findPair(doc.contents, 'env');
   if (envPair) result.env = toJs(envPair.value);
+  const jobsPair = findPair(doc.contents, 'jobs');
+  if (jobsPair) result.kind = 'workflow';
   result.jobs = extractJobs(source, doc);
+  const runsPair = findPair(doc.contents, 'runs');
+  if (runsPair && isMap(runsPair.value)) {
+    if (!jobsPair) result.kind = 'composite-action';
+    result.actionSteps = extractSteps(source, runsPair.value);
+  }
   return result;
 }
 
@@ -266,14 +288,20 @@ export async function parseWorkflowFile(path) {
  * Iterate every action reference in a workflow.
  *
  * @param {WorkflowDoc} workflow
- * @returns {Array<{ref: ActionRef, jobName: string, stepIndex: number}>}
+ * @returns {Array<{ref: ActionRef, jobName: string|null, stepIndex: number, location: 'job'|'step'|'action-step'}>}
  */
 export function collectUses(workflow) {
   const out = [];
-  for (const job of workflow.jobs) {
-    job.steps.forEach((step, i) => {
-      if (step.uses) out.push({ ref: step.uses, jobName: job.name, stepIndex: i });
+  for (const job of workflow.jobs ?? []) {
+    if (job.uses) {
+      out.push({ ref: job.uses, jobName: job.name, stepIndex: -1, location: 'job' });
+    }
+    (job.steps ?? []).forEach((step, i) => {
+      if (step.uses) out.push({ ref: step.uses, jobName: job.name, stepIndex: i, location: 'step' });
     });
   }
+  (workflow.actionSteps ?? []).forEach((step, i) => {
+    if (step.uses) out.push({ ref: step.uses, jobName: null, stepIndex: i, location: 'action-step' });
+  });
   return out;
 }

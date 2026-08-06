@@ -11,7 +11,7 @@
 Audit, pin, and upgrade GitHub Actions workflows. Designed for safe, hands-off
 invocation by humans **or** LLMs.
 
-- **Audit** - scan workflows for supply-chain and injection vulnerabilities
+- **Audit** - scan workflows for supply-chain/injection risks and composite actions for mutable dependencies
 - **Pin** - rewrite tag refs (`@v3`) to immutable commit SHAs
 - **Upgrade** - bump pinned actions to the newest permitted version
 - **Report** - combined audit + dry-run plan, ideal for LLM context
@@ -44,7 +44,7 @@ Requires Node.js 20 or newer.
 ## Quick start
 
 ```sh
-# Audit every workflow under .github/workflows
+# Audit workflows, reusable workflow calls, and composite actions
 actions-warden audit
 
 # Audit a specific file with remediation hints
@@ -95,7 +95,7 @@ Scan workflows for security findings.
 
 | flag | default | description |
 |---|---|---|
-| `-w, --workflow <pattern>` | discover under `.github/workflows/` | repeatable path or glob |
+| `-w, --workflow <pattern>` | discover workflows and `**/action.yml|yaml` | repeatable path or glob |
 | `--severity <level>` | `low` (i.e. include all) | minimum severity to report |
 | `--explain` | `false` | include plain-English remediation hint per finding |
 | `--format <fmt>` | `toon` | `toon`, `json`, or `text` |
@@ -248,14 +248,15 @@ for (const finding of result.findings) {
 ```
 
 Available functions: `audit`, `pin`, `upgrade`, `report`, `listRules`,
-`parseWorkflowFile`, `renderAudit`, `renderPin`, `renderUpgrade`,
-`renderReport`, `format`, `redact`.
+`discoverWorkflows`, `parseWorkflowFile`, `parseWorkflowSource`, `collectUses`,
+`parseActionRef`, `renderAudit`, `renderPin`, `renderUpgrade`, `renderReport`,
+`format`, `redact`.
 
 ## Audit rules
 
 | id | severity | catches |
 |---|---|---|
-| `unpinned-action` | high | `uses:` refs that aren't 40-char SHAs |
+| `unpinned-action` | high | workflow steps, job-level reusable workflows, and composite-action `uses:` refs that aren't 40-char SHAs |
 | `excessive-permissions` | medium | `write-all` and broad write scopes |
 | `secrets-in-env` | critical | secrets at workflow/job env (leaks to every step) |
 | `script-injection` | critical | `github.event.*` interpolated into `run:` |

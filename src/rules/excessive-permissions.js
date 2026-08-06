@@ -44,6 +44,9 @@ function inspect(permissions) {
  * @param {import('../lib/parser.js').WorkflowDoc} workflow
  */
 export function check(workflow) {
+  // Composite actions inherit the calling workflow's token permissions and do
+  // not support a top-level permissions block of their own.
+  if (workflow.kind === 'composite-action') return [];
   const findings = [];
   const topScope = inspect(workflow.permissions);
   if (topScope === 'unset-default') {

@@ -11,7 +11,7 @@ inputs:
     required: false
     default: 'audit'
   workflow:
-    description: 'Workflow path or glob (space-separated for multiple). Defaults to .github/workflows/*.yml'
+    description: 'Workflow/action path or glob (space-separated for multiple). Defaults include .github/workflows and composite action.yml/action.yaml files.'
     required: false
     default: ''
   severity:

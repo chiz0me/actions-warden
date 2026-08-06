@@ -23,6 +23,19 @@ describe('unpinned-action', () => {
     const doc = parse(`name: x\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./local\n`);
     expect(unpinned.check(doc)).toHaveLength(0);
   });
+  it('flags mutable job-level reusable workflows', () => {
+    const doc = parse(`name: x\non: push\njobs:\n  call:\n    uses: octo/repo/.github/workflows/build.yml@main\n`);
+    const findings = unpinned.check(doc);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ line: 5 });
+    expect(findings[0].fields.action).toBe('octo/repo/.github/workflows/build.yml@main');
+  });
+  it('flags mutable actions used inside composite actions', () => {
+    const doc = parseWorkflowSource(`name: x\nruns:\n  using: composite\n  steps:\n    - uses: actions/setup-node@v4\n`, 'action.yml');
+    const findings = unpinned.check(doc);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].fields.action).toBe('actions/setup-node@v4');
+  });
 });
 
 describe('excessive-permissions', () => {
@@ -38,6 +51,10 @@ describe('excessive-permissions', () => {
   });
   it('accepts narrow read-only permissions', () => {
     const doc = parse(`name: x\non: push\npermissions:\n  contents: read\njobs:\n  b:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n    steps: []\n`);
+    expect(perms.check(doc)).toHaveLength(0);
+  });
+  it('does not require a permissions block on composite actions', () => {
+    const doc = parseWorkflowSource('name: x\nruns:\n  using: composite\n  steps: []\n', 'action.yml');
     expect(perms.check(doc)).toHaveLength(0);
   });
 });

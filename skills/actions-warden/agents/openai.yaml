@@ -1,0 +1,4 @@
+interface:
+  display_name: "Actions Warden"
+  short_description: "Harden GitHub Actions supply-chain security"
+  default_prompt: "Use $actions-warden to audit this repository and explain every GitHub Actions security finding."
