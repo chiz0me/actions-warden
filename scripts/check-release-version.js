@@ -149,7 +149,11 @@ function parseArguments(args) {
 }
 
 function runNpm(args) {
-  const npmExecPath = process.env.npm_execpath;
+  // npm_execpath is injected by npm, but environment-key casing is not stable
+  // on Windows. The dedicated override keeps tests and recovery tooling
+  // deterministic without depending on that platform-specific behavior.
+  const npmExecPath = process.env.ACTIONS_WARDEN_NPM_EXEC_PATH
+    ?? process.env.npm_execpath;
   if (npmExecPath) {
     return spawnSync(process.execPath, [npmExecPath, ...args], {
       cwd: process.cwd(),

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, sep } from 'node:path';
 
 import { discoverWorkflows } from '../src/lib/paths.js';
 
@@ -26,7 +26,7 @@ describe('discoverWorkflows', () => {
     await writeFile(join(dependencyDir, 'action.yml'), 'runs: { using: composite, steps: [] }\n');
 
     const files = await discoverWorkflows({ cwd });
-    expect(files.map(file => file.slice(cwd.length + 1))).toEqual([
+    expect(files.map(file => relative(cwd, file).split(sep).join('/'))).toEqual([
       '.github/actions/setup/action.yml',
       '.github/workflows/ci.yml',
       'action.yaml',

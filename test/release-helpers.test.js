@@ -93,7 +93,7 @@ if (args[0] === 'view' && args[2] === 'dist-tags.latest') {
 `, 'utf8');
     const environment = {
       ...process.env,
-      npm_execpath: fakeNpm,
+      ACTIONS_WARDEN_NPM_EXEC_PATH: fakeNpm,
       FAKE_NPM_LATEST: current,
       FAKE_NPM_VERSIONS: JSON.stringify([current]),
       FAKE_NPM_REGISTRY_INTEGRITY: 'sha512-matching',
