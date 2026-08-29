@@ -1,32 +1,33 @@
-const nodeGlobals = {
-  AbortSignal: 'readonly',
-  Buffer: 'readonly',
-  URL: 'readonly',
-  console: 'readonly',
-  fetch: 'readonly',
-  process: 'readonly',
-  setTimeout: 'readonly',
-};
+import js from '@eslint/js';
+import globals from 'globals';
 
 export default [
   {
-    files: ['src/**/*.js', 'test/**/*.js', 'scripts/**/*.js'],
+    ignores: ['node_modules/**', 'coverage/**', 'dist/**'],
+  },
+  js.configs.recommended,
+  {
+    files: ['src/**/*.js', 'scripts/**/*.js', 'test/**/*.js'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',
-      globals: nodeGlobals,
+      globals: {
+        ...globals.node,
+      },
     },
     rules: {
-      'no-dupe-args': 'error',
-      'no-dupe-keys': 'error',
-      'no-redeclare': 'error',
-      'no-undef': 'error',
-      'no-unreachable': 'error',
       'no-unused-vars': ['error', {
         argsIgnorePattern: '^_',
         caughtErrorsIgnorePattern: '^_',
-        varsIgnorePattern: '^_',
       }],
+    },
+  },
+  {
+    files: ['test/**/*.js'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
     },
   },
 ];

@@ -5,10 +5,12 @@
  * Used as a pre-commit hook so broken workflow YAML is caught before push.
  */
 
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { parse } from 'yaml';
 
-const files = process.argv.slice(2);
+const requested = process.argv.slice(2);
+const files = requested.length > 0 ? requested : await discover(process.cwd());
 let failed = 0;
 
 for (const file of files) {
@@ -23,4 +25,18 @@ for (const file of files) {
 if (failed > 0) {
   process.stderr.write(`\n${failed} file(s) failed YAML parsing.\n`);
   process.exit(1);
+}
+
+async function discover(directory, output = []) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    if (['.git', 'node_modules', 'dist', 'coverage'].includes(entry.name)) continue;
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      await discover(path, output);
+    } else if (entry.isFile() && /\.ya?ml$/i.test(entry.name)) {
+      output.push(path);
+    }
+  }
+  return output.sort();
 }

@@ -14,11 +14,11 @@ repos:
   - repo: local
     hooks:
       - id: verify-version-sync
-        name: package.json and plugin.json versions agree
+        name: package, plugin, lockfile, and invocation versions agree
         entry: node scripts/verify-version-sync.js
         language: system
         pass_filenames: false
-        files: '^(package\.json|\.claude-plugin/plugin\.json)$'
+        files: '^(package(-lock)?\.json|\.claude-plugin/plugin\.json|src/version\.js|README\.md|SECURITY\.md|docs/CLI\.md|examples/upgrade-pr\.yml|skills/actions-warden/SKILL\.md)$'
 
       - id: verify-deps-pinned
         name: dependencies pinned to exact versions
@@ -32,6 +32,13 @@ repos:
         entry: node scripts/check-yaml.js
         language: system
         files: '\.(ya?ml)$'
+
+      - id: check-docs
+        name: local documentation links
+        entry: node scripts/check-docs.js
+        language: system
+        pass_filenames: false
+        files: '(^|/)([^/]+\.md|llms\.txt)$'
 
       - id: actions-warden-self-audit
         name: actions-warden audit on changed workflows

@@ -9,7 +9,7 @@ import { collectUses } from '../lib/parser.js';
 
 export const id = 'unpinned-action';
 export const severity = 'high';
-export const description = 'External action is not pinned to a commit SHA.';
+export const description = 'External action or reusable workflow is not pinned to a full commit SHA.';
 
 const SHA_RE = /^[0-9a-f]{40}$/i;
 
@@ -26,13 +26,14 @@ export function check(workflow) {
       id,
       severity,
       line: ref.line,
+      start: ref.start,
       fields: {
         type: id,
         sev: severity,
         action: ref.raw,
         ref: ref.ref ?? '',
       },
-      explain: `pin ${ref.owner}/${ref.repo} to a 40-char commit SHA - tags are mutable`,
+      explain: `replace the mutable ref in \`${ref.raw}\` with a reviewed full 40-character commit SHA, preserving any action or workflow subpath; retain the release tag as update metadata`,
     });
   }
   return findings;

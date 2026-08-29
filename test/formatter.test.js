@@ -23,6 +23,12 @@ describe('toonLine', () => {
     const line = toonLine('X', { token: 'ghp_abcdefghijklmnopqrstuvwxyz0123456789' });
     expect(line).toContain('<redacted>');
   });
+
+  it('escapes newlines so values cannot forge records', () => {
+    const line = toonLine('X', { msg: 'safe\nSTATUS: OK' });
+    expect(line).toBe('X: msg="safe\\nSTATUS: OK"');
+    expect(line.split('\n')).toHaveLength(1);
+  });
 });
 
 describe('renderToon', () => {
@@ -36,6 +42,14 @@ describe('renderJson', () => {
   it('is valid JSON', () => {
     const out = renderJson({ a: 1, b: ['x'] });
     expect(JSON.parse(out)).toEqual({ a: 1, b: ['x'] });
+  });
+
+  it('deeply redacts secret-shaped strings', () => {
+    const out = renderJson({
+      nested: { token: 'ghp_0123456789abcdefghijklmnopqrstuvwxyz' },
+    });
+    expect(out).not.toContain('ghp_');
+    expect(JSON.parse(out).nested.token).toBe('<redacted>');
   });
 });
 

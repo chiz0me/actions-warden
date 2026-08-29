@@ -8,147 +8,270 @@
 [![node](https://img.shields.io/node/v/actions-warden)](https://www.npmjs.com/package/actions-warden)
 [![license: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 
-Audit, pin, and upgrade GitHub Actions workflows. Designed for safe, hands-off
-invocation by humans **or** LLMs.
+Audit GitHub Actions in one repository or across an entire organization, then
+pin, verify, and safely upgrade workflow dependencies.
 
-- **Audit** - scan workflows for supply-chain/injection risks and composite actions for mutable dependencies
-- **Pin** - rewrite tag refs (`@v3`) to immutable commit SHAs
-- **Upgrade** - bump pinned actions to the newest permitted version
-- **Report** - combined audit + dry-run plan, ideal for LLM context
+`actions-warden` is available as a CLI, a bundled GitHub Action, and a
+JavaScript API. It finds supply-chain, permission, injection, artifact, secret,
+container, reusable-workflow, and runner risks without executing the workflows
+it inspects.
 
-Inspired by [`actions-up`](https://github.com/azat-io/actions-up). The
-update/pin core borrows its overall shape - YAML parsing plus regex-based
-source rewrites that preserve formatting - and adds an audit layer, an
-LLM-friendly TOON output format, inline ignore directives, an upgrade
-cooldown, a Claude Code plugin, and a composite GitHub Action so the same
-engine runs locally, in CI, and from inside Claude.
+## Start here
 
-## Why
-
-Tag references in `uses:` are mutable - anyone with write access to the action
-repo (or a stolen maintainer token) can rewrite `v3` to point at malicious code.
-Pinning to a 40-character commit SHA closes that hole. `actions-warden` finds
-the holes, plans the fix, and applies it - but never without your explicit
-say-so. `--dry-run` is the default for every destructive command.
-
-## Install
-
-```sh
-npm install -g actions-warden
-# or one-shot
-npx actions-warden audit
-```
-
-Requires Node.js 20 or newer.
+| I want to… | Start with |
+|---|---|
+| Check this repository | `actions-warden audit --explain` |
+| See every proposed security and dependency change | `actions-warden report` |
+| Scan a GitHub organization | `actions-warden org-scan ORG --format=json` |
+| Pin mutable action refs | `actions-warden pin`, review, then add `--write` |
+| Verify existing SHA pins | `actions-warden verify` |
+| Upgrade pinned actions | `actions-warden upgrade`, review, then add `--write` |
+| Run in GitHub Actions | [GitHub Action guide](./docs/GITHUB-ACTION.md) |
+| Integrate from JavaScript | [JavaScript API](./docs/JAVASCRIPT-API.md) |
+| Use it from a coding agent | [AI and agent guide](./docs/AI-AGENTS.md) |
+| Contribute | [Contributing guide](./CONTRIBUTING.md) |
 
 ## Quick start
 
+Node.js 20 or newer is required.
+
 ```sh
-# Audit workflows, reusable workflow calls, and composite actions
-actions-warden audit
+npm install --global actions-warden
 
-# Audit a specific file with remediation hints
-actions-warden audit -w .github/workflows/release.yml --explain
+# Local and read-only
+actions-warden audit --explain
 
-# Plan a SHA-pinning pass (does NOT write)
+# Network-backed, but still read-only
+actions-warden report --format=json
+
+# Preview pins; this does not change files
 actions-warden pin
 
-# Actually write the pins
+# Apply the reviewed pin plan
 actions-warden pin --write
 
-# Plan upgrades within the same major version
-actions-warden upgrade --mode=minor
-
-# Get one combined LLM-friendly report
-actions-warden report --format=toon
+# Confirm the pins against GitHub
+actions-warden verify
 ```
 
-## Output formats
+For a one-off run without a global install:
 
-### TOON (default - `--format=toon`)
-
-Token-Oriented Object Notation. Each line is a labeled record with `key=value`
-fields. Parses cleanly without a schema and ends with a machine-readable
-`STATUS:` trailer.
-
-```
-SCAN: file=.github/workflows/release.yml
-FINDING: id=18b82e86d7 type=unpinned-action sev=high action=actions/checkout@v3 line=15
-FINDING: id=b50d0d45ab type=secrets-in-env sev=critical key=AWS_SECRET line=4
-SUMMARY: files=1 findings=2 critical=1 high=1 medium=0 low=0
-STATUS: FAIL
+```sh
+npx --yes actions-warden@0.2.0 audit --explain
 ```
 
-### JSON (`--format=json`)
+`audit` returns exit code `1` when it finds issues. That is a completed scan,
+not a malformed command; its JSON, TOON, text, or SARIF output remains the
+report to inspect. Exit code `2` means the command could not be used as
+requested. See [outputs and exit behavior](./docs/OUTPUTS.md).
 
-Structured payload for programmatic integrations.
+## Scan a GitHub organization
 
-### Text (`--format=text`)
+Set a token that can see the repositories you intend to scan, then write a
+versioned JSON report:
 
-Plain human-readable lines - useful when piping through `less`.
+```sh
+export GITHUB_TOKEN="$(gh auth token)"
+
+actions-warden org-scan my-org \
+  --severity=high \
+  --checkpoint=.actions-warden-org-checkpoint.json \
+  --format=json \
+  --output=file \
+  --output-path=actions-warden-org.json
+```
+
+The scanner:
+
+- paginates every repository visible to the token;
+- excludes archived, disabled, and forked repositories by default;
+- reads workflow and composite-action YAML from each default branch;
+- applies the same rules, policy, and baseline model as a local audit;
+- returns per-repository findings, source links, coverage counts, and errors;
+- checkpoints each completed repository when requested and can safely resume;
+- shows live repository and retry progress on stderr without corrupting reports;
+- never clones, checks out, or executes repository code.
+
+Resume an interrupted scan with the same scope and policy:
+
+```sh
+actions-warden org-scan my-org \
+  --severity=high \
+  --resume=.actions-warden-org-checkpoint.json \
+  --format=json \
+  --output=file \
+  --output-path=actions-warden-org.json
+```
+
+Resume still performs fresh organization discovery and checks every selected
+default-branch tree SHA. Only unchanged, error-free repository results are
+reused; changed and previously failed repositories are scanned again. Progress
+defaults to interactive terminals; use `--progress=always` for redirected logs
+or `--progress=never` to disable it.
+
+When a coding agent initiates the scan, use the explicit bounded mode:
+
+```sh
+actions-warden org-scan my-org --agent-mode
+```
+
+It writes a scope-keyed JSON report and checkpoint, resumes compatible state,
+disables progress, and returns only a compact JSON receipt with the report path
+unless explicit CLI options override those defaults.
+
+Limit scope with repository globs and visibility:
+
+```sh
+actions-warden org-scan my-org \
+  --repository 'service-*' 'my-org/platform-*' \
+  --visibility=private \
+  --max-repos=100 \
+  --concurrency=8 \
+  --format=sarif \
+  --output=file \
+  --output-path=actions-warden-org.sarif
+```
+
+Private and internal scans require repository metadata and contents read
+access. A truncated tree, inaccessible repository, oversized workflow, or
+failed blob read is reported as an error so incomplete coverage cannot appear
+clean. See the [organization-scan reference](./docs/CLI.md#org-scan) and the
+[scheduled workflow example](./examples/org-scan.yml).
+
+## Safe by default
+
+The write boundary is deliberately explicit:
+
+```text
+audit/report/pin/upgrade plan → review IDs and diffs → --fix=<id> --write → verify
+```
+
+- `audit`, `report`, `verify`, and `org-scan` do not modify workflows.
+- `pin` and `upgrade` are dry-runs unless `--write` is present.
+- `--write --dry-run` is rejected instead of guessing intent.
+- `--fix=<id>` limits a pin or upgrade to one exact source occurrence.
+- Rewrites preserve surrounding YAML and are reparsed before an atomic write.
+- Paths, output files, and symlinks are constrained to the selected repository.
+- Credential-like values are recursively redacted from every output format.
+- Repository policy is strictly validated; unknown keys and rule IDs fail.
+- Remote organization source is kept in memory and is not persisted in cache.
+
+See [SECURITY.md](./SECURITY.md) for the threat model and vulnerability
+reporting process.
 
 ## Commands
 
-### `audit`
+| command | network | writes by default | purpose |
+|---|---:|---:|---|
+| `audit` | no | no | Scan workflows and composite actions for security findings |
+| `report` | yes | no | Combine audit results with dry-run pin and upgrade plans |
+| `pin` | yes | no | Resolve mutable action refs to immutable commit SHAs |
+| `verify` | yes | no | Verify SHA ownership and human-readable version metadata |
+| `upgrade` | yes | no | Plan or apply cooldown-aware dependency upgrades |
+| `org-scan` | yes | no | Audit eligible repositories across a GitHub organization |
+| `rules` | no | no | Print the live audit-rule catalog |
 
-Scan workflows for security findings.
+Run `actions-warden <command> --help` for live option help, or use the complete
+[CLI reference](./docs/CLI.md).
 
-| flag | default | description |
-|---|---|---|
-| `-w, --workflow <pattern>` | discover workflows and `**/action.yml|yaml` | repeatable path or glob |
-| `--severity <level>` | `low` (i.e. include all) | minimum severity to report |
-| `--explain` | `false` | include plain-English remediation hint per finding |
-| `--format <fmt>` | `toon` | `toon`, `json`, or `text` |
-| `--output <dest>` | `stdout` | `stdout` or `file` |
-| `--output-path <path>` | - | required when `--output=file` |
-| `--cwd <dir>` | `.` | working directory |
+By default, local commands discover:
 
-Exit codes: `0` if no findings, `1` if any finding reported, `2` on usage error.
+```text
+.github/workflows/*.yml
+.github/workflows/*.yaml
+action.yml
+action.yaml
+**/action.yml
+**/action.yaml
+```
 
-### `pin`
+Select exact files, directories, or globs with `--workflow`:
 
-Resolve every tag/branch ref to a 40-char commit SHA. Preserves the original
-tag as an inline `# v3` comment so `upgrade` can find it later.
+```sh
+actions-warden audit -w .github/workflows/release.yml --explain
+actions-warden audit -w '.github/workflows/*.yml' --severity=high
+actions-warden audit -w .github/workflows .github/actions
+```
 
-| flag | default | description |
-|---|---|---|
-| `-w, --workflow <pattern>` | discover | repeatable |
-| `--write` | `false` | apply changes (otherwise dry-run) |
-| `--dry-run <bool>` | `true` | explicit dry-run toggle |
-| `--token <token>` | `$GITHUB_TOKEN` | GitHub API token |
-| `--fix <id>` | - | apply only the change with this id |
-| `--format <fmt>` | `toon` | |
+Explicit targets that match nothing are errors.
 
-### `upgrade`
+## Configuration
 
-Bump pinned/tagged actions to the newest version allowed by `--mode`.
-
-| flag | default | description |
-|---|---|---|
-| `--mode <m>` | `minor` | `major`, `minor`, or `patch` |
-| `--write` | `false` | apply changes |
-| `--fix <id>` | - | apply only this change id |
-| `--token <token>` | `$GITHUB_TOKEN` | |
-
-### `report`
-
-Runs `audit`, plus dry-run `pin` and `upgrade`. Single combined output.
-
-| flag | default | description |
-|---|---|---|
-| `--mode <m>` | `minor` | upgrade scope |
-| `--offline` | `false` | skip network-dependent stages |
-
-### `rules`
-
-Print the rule catalog.
-
-## Use it as a GitHub Action
-
-`actions-warden` ships an `action.yml` at the repo root, so you can drop it
-into any workflow.
+Add `.actions-warden.yml` to make repository policy reviewable:
 
 ```yaml
+version: 1
+baseline: .actions-warden-baseline.json
+
+ignore-paths:
+  - .github/workflows/generated/**
+
+rules:
+  excessive-permissions:
+    severity: high
+  unpinned-container-image:
+    enabled: false
+
+runner-policy:
+  self-hosted-labels:
+    - private-*
+  trusted-groups:
+    - github-hosted-*
+  flag-unknown-groups: true
+```
+
+Create a baseline only after reviewing the current findings:
+
+```sh
+actions-warden audit \
+  --create-baseline=.actions-warden-baseline.json
+```
+
+Protect the policy and baseline with `CODEOWNERS` or branch rules; changing
+either can intentionally alter what fails CI. The [configuration guide](./docs/CONFIGURATION.md)
+covers strict validation, inline ignores, baselines, runner policy, and
+organization-wide path matching.
+
+List the current rules instead of relying on a copied table:
+
+```sh
+actions-warden rules --format=json
+```
+
+## Output built for people and automation
+
+| format | best for |
+|---|---|
+| `toon` | Compact terminal and LLM context; the default |
+| `json` | Versioned programmatic integrations |
+| `text` | Human-readable line-oriented logs |
+| `sarif` | Code scanning and SARIF-compatible systems |
+
+TOON output is one labeled record per line:
+
+```text
+SCAN: file=.github/workflows/release.yml
+FINDING: id=18b82e86d7c14fe2 type=unpinned-action sev=high action=actions/checkout@v5 line=15
+SUMMARY: files=1 findings=1 totalFindings=1 suppressed=0 critical=0 high=1 medium=0 low=0
+STATUS: FAIL
+```
+
+Findings and proposed changes have stable, clone-independent IDs. JSON payloads
+carry `schemaVersion: "1.0"`; SARIF is 2.1.0. See [output contracts](./docs/OUTPUTS.md)
+for schemas, record labels, redaction, status, and shell/CI handling.
+
+## GitHub Action
+
+Pin the Action itself to a reviewed full commit SHA:
+
+```yaml
+name: actions-warden
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
 permissions:
   contents: read
 
@@ -156,161 +279,86 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # actions-warden-ref: v5.0.0
         with:
           persist-credentials: false
-      - uses: <owner>/actions-warden@<commit-sha>   # pin to a SHA
+
+      - uses: chiz0me/actions-warden@<FULL_COMMIT_SHA>
         with:
           command: audit
           severity: high
           explain: 'true'
-          token: ${{ github.token }}
 ```
 
-Inputs (all optional unless noted):
+The committed bundle runs on GitHub's managed Node 24 runtime and installs no
+consumer-side dependencies. Findings become native annotations and a job
+summary. See the [Action inputs, outputs, permissions, and examples](./docs/GITHUB-ACTION.md).
 
-| input | default | applies to | description |
-|---|---|---|---|
-| `command` | `audit` | all | `audit`, `pin`, `upgrade`, `report`, `rules` |
-| `workflow` | discover | all | space-separated paths or globs |
-| `severity` | - | audit/report | `low` / `medium` / `high` / `critical` |
-| `format` | `toon` | all | `toon` / `json` / `text` |
-| `mode` | `minor` | upgrade/report | `major` / `minor` / `patch` |
-| `min-age` | `7` | upgrade/report | cooldown in days before accepting a new tag |
-| `write` | `false` | pin/upgrade | `true` to apply changes |
-| `explain` | `false` | audit | include remediation hints |
-| `offline` | `false` | report | skip network calls |
-| `output-path` | - | all | also save the report to this file |
-| `token` | - | all | GitHub token (pass `${{ github.token }}`) |
-| `working-directory` | `$GITHUB_WORKSPACE` | all | directory to scan |
-| `node-version` | `20` | - | Node.js version to install |
+## AI-assisted use
 
-Outputs:
-
-| output | description |
-|---|---|
-| `status` | `OK` or `FAIL` (mirrors the CLI's exit signal) |
-| `findings` | number of audit findings (audit/report) |
-| `report-path` | absolute path of the saved report, if `output-path` was set |
-
-The action also writes a job summary block with the output of the command,
-making findings visible directly in the GitHub UI.
-
-**Important:** the audit command exits non-zero when findings are reported,
-which fails the job by default. To collect findings without failing the build,
-set `continue-on-error: true` on the step.
-
-## Use it from Claude Code
-
-This repo is also a Claude Code plugin. Once installed, Claude will invoke
-`actions-warden` automatically whenever a prompt asks to audit, pin, or
-upgrade GitHub Actions workflows.
-
-**Option A - via the plugin marketplace (recommended):**
-
-```
-/plugin marketplace add chiz0me/claude-plugins
-/plugin install actions-warden@chiz0me
-```
-
-**Option B - drop the skill in directly (no marketplace):**
+The CLI is non-interactive and flag-driven. For a safe agent loop:
 
 ```sh
-mkdir -p ~/.claude/skills/actions-warden
-curl -fsSL https://raw.githubusercontent.com/chiz0me/actions-warden/main/skills/actions-warden/SKILL.md \
-  -o ~/.claude/skills/actions-warden/SKILL.md
+actions-warden audit --format=json --explain
+actions-warden pin --format=json
+# After the user approves one planned ID:
+actions-warden pin --fix=<ID> --write --format=json
+actions-warden verify --format=json
+actions-warden audit --format=json
 ```
 
-After installation, prompts like *"audit my workflows"*, *"pin my actions to
-SHAs"*, or *"check this workflow for script injection"* will route through the
-skill, which runs the CLI via `npx actions-warden` and explains the TOON
-output back to you.
+Use JSON when the caller has a parser and TOON when context size matters.
+Agents should treat policy changes, baselines, `--write`, and organization
+tokens as security-sensitive boundaries. For an agent-initiated organization
+scan, use `actions-warden org-scan ORG --agent-mode`. It automatically writes a
+scope-keyed report and checkpoint, resumes compatible state, disables progress,
+and returns only a compact JSON receipt unless explicit flags override those
+defaults. The agent then reads bounded summaries and relevant finding batches
+instead of placing the full report in model context. This preserves requested
+coverage while controlling LLM token use. The
+[AI and agent guide](./docs/AI-AGENTS.md#default-for-an-ai-initiated-scan)
+defines the exact command, inspection sequence, decision loop, and parsing
+contract.
+Repository-local guidance is also available in [AGENTS.md](./AGENTS.md), and a
+Claude Code skill ships in [`skills/actions-warden`](./skills/actions-warden/SKILL.md).
 
-Plugin layout (per the Claude Code plugin spec):
+## JavaScript API
 
-```
-.claude-plugin/plugin.json      # plugin manifest
-skills/actions-warden/SKILL.md  # the skill itself
-```
-
-## Programmatic API
-
-Each command is also exported as an async function, so an LLM agent or
-larger Node tool can invoke it without spawning a subprocess.
+Every command is available without spawning a subprocess:
 
 ```js
-import { audit, pin, upgrade, report } from 'actions-warden';
+import { audit, scanOrganization } from 'actions-warden';
 
-const result = await audit({ cwd: '/path/to/repo', explain: true });
-for (const finding of result.findings) {
-  // result.findings[i].id is stable; pass it to pin({ fix: id })
-}
+const local = await audit({
+  cwd: '/path/to/repository',
+  severity: 'high',
+  explain: true,
+});
+
+const organization = await scanOrganization({
+  organization: 'my-org',
+  token: process.env.GITHUB_TOKEN,
+  severity: 'high',
+});
 ```
 
-Available functions: `audit`, `pin`, `upgrade`, `report`, `listRules`,
-`discoverWorkflows`, `parseWorkflowFile`, `parseWorkflowSource`, `collectUses`,
-`parseActionRef`, `renderAudit`, `renderPin`, `renderUpgrade`, `renderReport`,
-`format`, `redact`.
+See the [JavaScript API guide](./docs/JAVASCRIPT-API.md) for command options,
+result shapes, renderers, lower-level exports, and error handling.
 
-## Audit rules
+## Documentation
 
-| id | severity | catches |
-|---|---|---|
-| `unpinned-action` | high | workflow steps, job-level reusable workflows, and composite-action `uses:` refs that aren't 40-char SHAs |
-| `excessive-permissions` | medium | `write-all` and broad write scopes |
-| `secrets-in-env` | critical | secrets at workflow/job env (leaks to every step) |
-| `script-injection` | critical | `github.event.*` interpolated into `run:` |
-| `pull-request-target-checkout` | critical | "pwn-request" pattern |
-
-Run `actions-warden rules` for the live list.
-
-## LLM invocation safety
-
-Every command is designed to be safe to invoke from an autonomous agent:
-
-- `pin` and `upgrade` default to `--dry-run=true`. You cannot accidentally
-  mutate files without explicitly passing `--write`.
-- Output is deterministic and idempotent - re-running on an unchanged repo
-  produces identical bytes.
-- Every finding and every planned change carries a stable `id`. To apply a
-  single fix without scope creep, pass `--fix=<id>`.
-- The CLI never prompts interactively. All decisions are flag-driven.
-- Secrets that leak into log lines (tokens, AWS keys, PEM blocks) are passed
-  through a redactor before output.
-
-## Authentication
-
-```sh
-export GITHUB_TOKEN=$(gh auth token)   # or set GH_TOKEN
-actions-warden pin
-```
-
-The `--token` flag takes precedence. Without a token the GitHub API allows 60
-requests/hour, which is enough for small repos but will rate-limit on larger
-audits.
-
-## Caching
-
-GitHub API responses are cached in `.actions-warden-cache/` (gitignore it).
-TTL defaults to 1 hour. Delete the directory to force a refresh.
-
-## Exit codes
-
-| code | meaning |
-|---|---|
-| `0` | success, no findings |
-| `1` | findings reported, or errors during pin/upgrade |
-| `2` | invalid arguments |
-
-## Security
-
-See [SECURITY.md](./SECURITY.md) for the disclosure policy.
-
-## Maintainers
-
-Release process, npm/marketplace setup, and verification commands live in
-[RELEASING.md](./RELEASING.md).
+- [Documentation index](./docs/README.md)
+- [CLI reference](./docs/CLI.md)
+- [Configuration and baselines](./docs/CONFIGURATION.md)
+- [Output contracts](./docs/OUTPUTS.md)
+- [GitHub Action guide](./docs/GITHUB-ACTION.md)
+- [JavaScript API](./docs/JAVASCRIPT-API.md)
+- [AI and coding-agent guide](./docs/AI-AGENTS.md)
+- [Developer guide](./docs/DEVELOPMENT.md)
+- [Contributing](./CONTRIBUTING.md)
+- [Security policy](./SECURITY.md)
+- [Maintainer and agent release runbook](./RELEASING.md)
 
 ## License
 
-MIT
+[MIT](./LICENSE)

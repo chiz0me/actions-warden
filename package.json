@@ -1,7 +1,7 @@
 {
   "name": "actions-warden",
   "version": "0.2.0",
-  "description": "Audit, pin, and upgrade GitHub Actions workflows. LLM-friendly TOON output, safe-by-default.",
+  "description": "Audit GitHub Actions across repositories and organizations; pin, verify, and upgrade dependencies.",
   "author": "Naveen Yagati",
   "homepage": "https://github.com/chiz0me/actions-warden#readme",
   "repository": {
@@ -18,15 +18,23 @@
     "./commands/audit": "./src/commands/audit.js",
     "./commands/pin": "./src/commands/pin.js",
     "./commands/upgrade": "./src/commands/upgrade.js",
-    "./commands/report": "./src/commands/report.js"
+    "./commands/report": "./src/commands/report.js",
+    "./commands/verify": "./src/commands/verify.js",
+    "./commands/org-scan": "./src/commands/org-scan.js"
   },
   "bin": {
     "actions-warden": "./src/cli.js"
   },
   "files": [
     "src",
+    "docs",
+    "examples",
     "skills",
     "README.md",
+    "CONTRIBUTING.md",
+    "AGENTS.md",
+    "RELEASING.md",
+    "llms.txt",
     "SECURITY.md",
     "LICENSE"
   ],
@@ -40,31 +48,45 @@
   "scripts": {
     "test": "vitest --run",
     "test:watch": "vitest",
-    "lint": "eslint src test",
+    "lint": "eslint src scripts test",
+    "build:action": "ncc build src/action.js -o dist",
+    "check:action-bundle": "node scripts/verify-action-bundle.js",
+    "check:yaml": "node scripts/check-yaml.js",
+    "check:docs": "node scripts/check-docs.js",
+    "check:package": "node scripts/check-package.js",
+    "check:release-version": "node scripts/check-release-version.js",
     "verify-deps": "node scripts/verify-deps.js",
+    "verify-version-sync": "node scripts/verify-version-sync.js",
     "audit": "npm audit --audit-level=high",
-    "release:verify": "npm run verify-deps && npm run lint && npm test && npm audit --audit-level=high && npm pack --dry-run",
-    "prepublishOnly": "npm run release:verify"
+    "release:prepare": "node scripts/set-version.js",
+    "release:check": "npm run check:release-version && npm run verify-version-sync && npm run verify-deps && npm run check:yaml && npm run check:docs && npm run lint && npm test && npm audit --audit-level=high && npm run check:package && npm run check:action-bundle",
+    "prepublishOnly": "npm run verify-version-sync && npm run verify-deps && npm run check:yaml && npm run check:docs && npm run lint && npm test && npm audit --audit-level=high && npm run check:package"
   },
   "dependencies": {
     "commander": "14.0.3",
-    "picomatch": "4.0.4",
-    "semver": "7.8.1",
+    "picomatch": "4.0.5",
+    "semver": "7.8.5",
     "yaml": "2.9.0"
   },
   "devDependencies": {
-    "eslint": "10.8.0",
-    "vitest": "4.1.6"
+    "@eslint/js": "9.39.2",
+    "@vercel/ncc": "0.44.1",
+    "eslint": "9.39.2",
+    "globals": "17.7.0",
+    "vitest": "4.1.10"
   },
   "keywords": [
     "github-actions",
     "security",
     "audit",
+    "organization",
+    "security-report",
     "pin",
     "sha-pin",
     "workflow",
     "supply-chain",
     "toon",
+    "sarif",
     "llm"
   ],
   "license": "MIT"

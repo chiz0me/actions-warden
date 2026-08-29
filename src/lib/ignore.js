@@ -16,12 +16,13 @@
  */
 
 const PREFIX = '(?:actions-warden|aw)';
-const TAIL = '(?::\\s*([\\w,\\s-]+))?\\s*$';
-const RE_FILE = new RegExp(`#\\s*${PREFIX}-ignore-file${TAIL}`);
-const RE_START = new RegExp(`#\\s*${PREFIX}-ignore-start${TAIL}`);
-const RE_END = new RegExp(`#\\s*${PREFIX}-ignore-end\\s*$`);
-const RE_NEXT = new RegExp(`#\\s*${PREFIX}-ignore-next-line${TAIL}`);
-const RE_INLINE = new RegExp(`#\\s*${PREFIX}-ignore(?!-)${TAIL}`);
+const LEAD = '(?:#|;)\\s*';
+const TAIL = '(?::\\s*([\\w,\\s-]+?))?\\s*(?=;|$)';
+const RE_FILE = new RegExp(`${LEAD}${PREFIX}-ignore-file${TAIL}`);
+const RE_START = new RegExp(`${LEAD}${PREFIX}-ignore-start${TAIL}`);
+const RE_END = new RegExp(`${LEAD}${PREFIX}-ignore-end\\s*(?=;|$)`);
+const RE_NEXT = new RegExp(`${LEAD}${PREFIX}-ignore-next-line${TAIL}`);
+const RE_INLINE = new RegExp(`${LEAD}${PREFIX}-ignore(?!-)${TAIL}`);
 
 /**
  * @typedef {object} IgnoreScope

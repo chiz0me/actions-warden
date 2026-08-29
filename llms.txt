@@ -1,0 +1,38 @@
+# actions-warden
+
+> Audit GitHub Actions in one repository or across a GitHub organization, then
+> pin, verify, and upgrade dependencies with explicit write authorization.
+
+Requires Node.js 20+. The CLI is non-interactive. `pin` and `upgrade` are
+dry-run by default. Normal JSON payloads use `schemaVersion: "1.0"`. Exit code
+1 is a completed `FAIL` result to inspect; exit code 2 is an invocation error.
+Organization scans support guarded `--checkpoint` / `--resume` state and
+stderr-only live progress while retaining fresh repository tree validation.
+For agent-initiated organization scans, pass `--agent-mode` or set
+`ACTIONS_WARDEN_MODE=agent`. It defaults to scope-keyed JSON report and
+checkpoint files, compatible resume, no progress, and a bounded stdout receipt.
+Preserve requested scope; do not load the complete report into model context.
+
+## Start
+
+- [README](./README.md): product overview and quick start
+- [CLI reference](./docs/CLI.md): commands, options, organization scans, cache
+- [Configuration](./docs/CONFIGURATION.md): policy, rule IDs, ignores, baselines
+- [Output contracts](./docs/OUTPUTS.md): JSON shapes, TOON, SARIF, status, exits
+- [GitHub Action](./docs/GITHUB-ACTION.md): workflow setup, inputs, outputs
+- [JavaScript API](./docs/JAVASCRIPT-API.md): public functions and renderers
+
+## AI and development
+
+- [AI and coding agents](./docs/AI-AGENTS.md): safe plan/write/verify loop
+- [Repository agent guidance](./AGENTS.md): invariants and validation
+- [Developer guide](./docs/DEVELOPMENT.md): architecture and change recipes
+- [Contributing](./CONTRIBUTING.md): setup and pull request checklist
+- [Security policy](./SECURITY.md): threat model and private reporting
+- [Release process](./RELEASING.md): authoritative maintainer/agent authorization, publication, verification, and recovery runbook
+
+## Copyable examples
+
+- [Organization report workflow](./examples/org-scan.yml)
+- [Upgrade pull request workflow](./examples/upgrade-pr.yml)
+- [Claude Code skill](./skills/actions-warden/SKILL.md)

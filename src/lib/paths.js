@@ -2,12 +2,12 @@
  * Workflow file discovery with safe path handling.
  */
 
-import { readdir, stat } from 'node:fs/promises';
-import { resolve, join, relative } from 'node:path';
+import { readdir, stat, realpath } from 'node:fs/promises';
+import { resolve, join, relative, isAbsolute, sep } from 'node:path';
 import picomatch from 'picomatch';
 
 /**
- * Default workflow and composite-action globs.
+ * Default workflow directory globs.
  */
 export const DEFAULT_WORKFLOW_PATTERNS = [
   '.github/workflows/*.yml',
@@ -25,12 +25,28 @@ export const DEFAULT_WORKFLOW_PATTERNS = [
  * @param {string} cwd
  */
 function assertInside(p, cwd) {
+  if (typeof p !== 'string' || p.includes('\0')) {
+    throw new Error('invalid workflow path');
+  }
+  const root = resolve(cwd);
   const abs = resolve(cwd, p);
-  const rel = relative(cwd, abs);
-  if (rel.startsWith('..') || rel.includes('\0')) {
+  const rel = relative(root, abs);
+  if (isOutside(rel)) {
     throw new Error(`path traversal rejected: ${p}`);
   }
   return abs;
+}
+
+function isOutside(rel) {
+  return rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+}
+
+async function assertRealInside(path, cwd) {
+  const [root, target] = await Promise.all([realpath(resolve(cwd)), realpath(path)]);
+  if (isOutside(relative(root, target))) {
+    throw new Error(`symlink escape rejected: ${path}`);
+  }
+  return target;
 }
 
 /**
@@ -69,12 +85,17 @@ async function walk(dir, acc = []) {
  * @returns {Promise<string[]>}
  */
 export async function discoverWorkflows({ patterns = DEFAULT_WORKFLOW_PATTERNS, cwd = process.cwd() } = {}) {
-  for (const p of patterns) assertInside(p, cwd);
-  const matchers = patterns.map(p => picomatch(p, { dot: true }));
-  const all = await walk(cwd);
+  const root = resolve(cwd);
+  for (const p of patterns) assertInside(p, root);
+  const normalizedPatterns = patterns.map(p => {
+    const pattern = isAbsolute(p) ? relative(root, p) : p;
+    return pattern.split(sep).join('/');
+  });
+  const matchers = normalizedPatterns.map(p => picomatch(p, { dot: true }));
+  const all = await walk(root);
   const out = [];
   for (const file of all) {
-    const rel = relative(cwd, file);
+    const rel = relative(root, file).split(sep).join('/');
     if (matchers.some(m => m(rel))) out.push(file);
   }
   return out.sort();
@@ -92,11 +113,13 @@ export async function resolveWorkflowArg(input, cwd = process.cwd()) {
   const abs = assertInside(input, cwd);
   try {
     const st = await stat(abs);
+    const safePath = await assertRealInside(abs, cwd);
     if (st.isDirectory()) {
-      const files = await walk(abs);
-      return files.filter(f => /\.ya?ml$/.test(f));
+      const files = await walk(safePath);
+      return files.filter(f => /\.ya?ml$/i.test(f)).sort();
     }
-    return [abs];
+    if (!st.isFile()) return [];
+    return [safePath];
   } catch {
     return discoverWorkflows({ patterns: [input], cwd });
   }

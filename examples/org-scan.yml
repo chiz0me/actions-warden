@@ -1,0 +1,42 @@
+name: actions-warden organization report
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 7 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # actions-warden-ref: v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Scan organization workflows
+        uses: chiz0me/actions-warden@<FULL_COMMIT_SHA>
+        with:
+          command: org-scan
+          organization: ${{ github.repository_owner }}
+          token: ${{ secrets.ACTIONS_WARDEN_ORG_TOKEN }}
+          severity: high
+          explain: 'true'
+          format: json
+          output-path: actions-warden-org-report.json
+          checkpoint-path: .actions-warden-org-checkpoint.json
+          fail-on-findings: 'false'
+
+      - name: Upload organization report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # actions-warden-ref: v5.0.0
+        with:
+          name: actions-warden-org-report
+          path: |
+            actions-warden-org-report.json
+            .actions-warden-org-checkpoint.json
+          if-no-files-found: error

@@ -3,23 +3,30 @@
  * permitted by the chosen policy.
  *
  * For SHA-pinned refs, the human-readable version is read from the inline
- * comment (e.g. `# v3.1.0`). If absent, the action is reported as `unknown`
+ * comment (e.g. `# actions-warden-ref: v3.1.0`). Legacy plain semver comments
+ * remain readable. If metadata is absent, the action is reported as `unknown`
  * and skipped.
  */
 
 import { readFile } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
 import semver from 'semver';
 import { parseWorkflowSource, collectUses } from '../lib/parser.js';
-import { discoverWorkflows, resolveWorkflowArg } from '../lib/paths.js';
-import { listTags, pickLatestTag, resolveRefToSha, resolveToken, getCommitDate } from '../lib/resolver.js';
+import {
+  getTagAgeEvidence,
+  listTags,
+  pickLatestTag,
+  resolveRefToSha,
+  resolveToken,
+  verifyCommitInRepo,
+} from '../lib/resolver.js';
 import { writeFileGuarded } from '../lib/writer.js';
 import { parseIgnoreDirectives, isIgnored } from '../lib/ignore.js';
-import { rewriteUses } from './pin.js';
 import { format } from '../lib/formatter.js';
+import { occurrenceId, canonicalPath } from '../lib/identity.js';
+import { applyPatches, planUsesPatches, readVersionComment } from '../lib/patcher.js';
+import { resolveTargets } from '../lib/targets.js';
 
 const SHA_RE = /^[0-9a-f]{40}$/i;
-const INLINE_COMMENT_RE = /uses\s*:[^\n#]*#\s*([^\s]+)/;
 
 /**
  * @typedef {object} UpgradeChange
@@ -54,7 +61,7 @@ export async function upgrade({
   fix,
   minAgeDays = 7,
 } = {}) {
-  const files = await resolveTargets(workflows, cwd);
+  const files = await resolveTargets({ workflows, cwd });
   const tok = resolveToken(token);
   /** @type {UpgradeChange[]} */
   const changes = [];
@@ -62,6 +69,7 @@ export async function upgrade({
   /** @type {object[]} */
   const skipped = [];
   const cooldownMs = Math.max(minAgeDays, 0) * 86_400_000;
+  let matchedFix = false;
 
   for (const file of files) {
     let source;
@@ -71,7 +79,6 @@ export async function upgrade({
       errors.push({ file, error: String(err.message ?? err) });
       continue;
     }
-    const lines = source.split('\n');
     let doc;
     try {
       doc = parseWorkflowSource(source, file);
@@ -85,10 +92,19 @@ export async function upgrade({
     for (const { ref } of collectUses(doc)) {
       if (ref.kind !== 'external' && ref.kind !== 'reusable-workflow') continue;
       if (isIgnored(ignore, ref.line, 'unpinned-action')) continue;
-      const usesLine = lines[ref.line - 1] ?? '';
-      const inlineVersion = readInlineVersion(usesLine);
+      const inlineVersion = readVersionComment(source, ref);
       const currentVersion = ref.ref && SHA_RE.test(ref.ref) ? inlineVersion : ref.ref;
       if (!currentVersion) continue;
+      const id = occurrenceId({
+        kind: 'upgrade',
+        file,
+        cwd,
+        line: ref.line,
+        start: ref.start,
+        subject: ref.raw,
+      });
+      if (fix && fix !== id) continue;
+      if (fix === id) matchedFix = true;
 
       let tags;
       try {
@@ -107,6 +123,7 @@ export async function upgrade({
         token: tok,
         cwd,
         skipped,
+        errors,
         file,
         ref,
       });
@@ -122,17 +139,25 @@ export async function upgrade({
           token: tok,
           cwd,
         });
+        await verifyCommitInRepo({
+          owner: ref.owner,
+          repo: ref.repo,
+          sha: resolved.sha,
+          token: tok,
+          cwd,
+        });
       } catch (err) {
         errors.push({ file, action: ref.raw, error: String(err.message ?? err) });
         continue;
       }
-      planned.push({ ref, latest, sha: resolved.sha, level, currentVersion });
+      planned.push({ id, ref, latest, sha: resolved.sha, level, currentVersion });
     }
 
-    let newSource = source;
-    for (const { ref, latest, sha, level, currentVersion } of planned) {
+    const patches = [];
+    const fileChanges = [];
+    for (const { id, ref, latest, sha, level, currentVersion } of planned) {
       const change = {
-        id: changeId(file, ref.raw, latest.name),
+        id,
         file,
         action: `${ref.owner}/${ref.repo}`,
         fromRef: ref.ref,
@@ -142,14 +167,22 @@ export async function upgrade({
         level,
         line: ref.line,
       };
-      if (fix && fix !== change.id) continue;
-      newSource = rewriteUses(newSource, ref, sha);
-      newSource = fixInlineComment(newSource, ref, latest.name, sha);
-      changes.push(change);
+      patches.push(...planUsesPatches(source, ref, sha, latest.name));
+      fileChanges.push(change);
     }
-    if (newSource !== source) {
-      await writeFileGuarded({ path: file, content: newSource, dryRun, cwd });
+    try {
+      const newSource = applyPatches(source, patches);
+      if (newSource !== source) {
+        parseWorkflowSource(newSource, file);
+        await writeFileGuarded({ path: file, content: newSource, dryRun, cwd });
+      }
+      changes.push(...fileChanges);
+    } catch (err) {
+      errors.push({ file, error: String(err.message ?? err) });
     }
+  }
+  if (fix && !matchedFix) {
+    errors.push({ error: `fix id not found: ${fix}` });
   }
   return { changes, errors, skipped, status: errors.length === 0 ? 'OK' : 'FAIL' };
 }
@@ -158,7 +191,20 @@ export async function upgrade({
  * Walk candidate tags newest-first and return the first whose commit is older
  * than the cooldown threshold. Skipped candidates are recorded.
  */
-async function pickAgedTag({ tags, currentRef, mode, cooldownMs, owner, repo, token, cwd, skipped, file, ref }) {
+async function pickAgedTag({
+  tags,
+  currentRef,
+  mode,
+  cooldownMs,
+  owner,
+  repo,
+  token,
+  cwd,
+  skipped,
+  errors,
+  file,
+  ref,
+}) {
   if (cooldownMs <= 0) {
     return pickLatestTag({ tags, currentRef, mode });
   }
@@ -167,12 +213,25 @@ async function pickAgedTag({ tags, currentRef, mode, cooldownMs, owner, repo, to
   for (;;) {
     const candidate = pickLatestTag({ tags: remaining, currentRef, mode });
     if (!candidate) return null;
-    let dateMs;
+    let evidence;
     try {
-      dateMs = await getCommitDate({ owner, repo, sha: candidate.sha, token, cwd });
-    } catch {
-      return candidate;
+      evidence = await getTagAgeEvidence({
+        owner,
+        repo,
+        tag: candidate.name,
+        sha: candidate.sha,
+        token,
+        cwd,
+      });
+    } catch (err) {
+      errors.push({
+        file,
+        action: ref.raw,
+        error: String(err.message ?? err),
+      });
+      return null;
     }
+    const { dateMs, source: ageSource } = evidence;
     if (dateMs <= cutoff) return candidate;
     skipped.push({
       file,
@@ -180,16 +239,12 @@ async function pickAgedTag({ tags, currentRef, mode, cooldownMs, owner, repo, to
       tag: candidate.name,
       reason: 'cooldown',
       ageDays: Math.round((Date.now() - dateMs) / 86_400_000),
+      ageSource,
     });
     const idx = remaining.findIndex(t => t.name === candidate.name);
     if (idx === -1) return null;
     remaining.splice(idx, 1);
   }
-}
-
-function readInlineVersion(line) {
-  const m = INLINE_COMMENT_RE.exec(line);
-  return m ? m[1] : null;
 }
 
 function bumpLevel(from, to) {
@@ -199,34 +254,6 @@ function bumpLevel(from, to) {
   if (a.major !== b.major) return 'major';
   if (a.minor !== b.minor) return 'minor';
   return 'patch';
-}
-
-function fixInlineComment(source, ref, newTag, sha) {
-  const left = ref.subpath ? `${ref.owner}/${ref.repo}/${ref.subpath}` : `${ref.owner}/${ref.repo}`;
-  const escLeft = escRe(left);
-  const escSha = escRe(sha);
-  const re = new RegExp(
-    `(uses\\s*:\\s*['"]?)${escLeft}@${escSha}(['"]?)\\s*#\\s*[^\\n]+`,
-    'g',
-  );
-  return source.replace(re, (_, prefix, closingQuote) => `${prefix}${left}@${sha}${closingQuote} # ${newTag}`);
-}
-
-function escRe(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function changeId(file, raw, target) {
-  return createHash('sha1').update(`up:${file}:${raw}->${target}`).digest('hex').slice(0, 10);
-}
-
-async function resolveTargets(workflows, cwd) {
-  if (!workflows || workflows.length === 0) return discoverWorkflows({ cwd });
-  const out = new Set();
-  for (const w of workflows) {
-    for (const f of await resolveWorkflowArg(w, cwd)) out.add(f);
-  }
-  return [...out].sort();
 }
 
 /**
@@ -239,11 +266,15 @@ export function renderUpgrade(result, opts) {
     return format('json', [], {
       status: result.status,
       json: {
+        schemaVersion: '1.0',
         dryRun: opts.dryRun,
         mode: opts.mode,
         changes: result.changes.map(c => ({ ...c, file: rel(c.file, cwd) })),
         skipped: (result.skipped ?? []).map(s => ({ ...s, file: rel(s.file ?? '', cwd) })),
-        errors: result.errors,
+        errors: result.errors.map(error => ({
+          ...error,
+          file: error.file ? rel(error.file, cwd) : undefined,
+        })),
         status: result.status,
       },
     });
@@ -266,7 +297,17 @@ export function renderUpgrade(result, opts) {
     });
   }
   for (const s of result.skipped ?? []) {
-    records.push({ label: 'SKIP', fields: { file: rel(s.file ?? '', cwd), action: s.action, tag: s.tag, reason: s.reason, age_days: s.ageDays } });
+    records.push({
+      label: 'SKIP',
+      fields: {
+        file: rel(s.file ?? '', cwd),
+        action: s.action,
+        tag: s.tag,
+        reason: s.reason,
+        age_days: s.ageDays,
+        age_source: s.ageSource,
+      },
+    });
   }
   for (const e of result.errors) {
     records.push({ label: 'ERROR', fields: { file: rel(e.file ?? '', cwd), action: e.action ?? '', msg: e.error } });
@@ -276,6 +317,5 @@ export function renderUpgrade(result, opts) {
 }
 
 function rel(p, cwd) {
-  if (p && p.startsWith(cwd)) return p.slice(cwd.length + 1);
-  return p;
+  return p ? canonicalPath(p, cwd) : p;
 }

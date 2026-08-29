@@ -10,13 +10,19 @@ describe('discoverWorkflows', () => {
     const cwd = await mkdtemp(join(tmpdir(), 'actions-warden-paths-'));
     const workflowDir = join(cwd, '.github', 'workflows');
     const compositeDir = join(cwd, '.github', 'actions', 'setup');
+    const nestedCompositeDir = join(cwd, 'automation', 'actions', 'build');
     const dependencyDir = join(cwd, 'node_modules', 'third-party');
     await mkdir(workflowDir, { recursive: true });
     await mkdir(compositeDir, { recursive: true });
+    await mkdir(nestedCompositeDir, { recursive: true });
     await mkdir(dependencyDir, { recursive: true });
     await writeFile(join(workflowDir, 'ci.yml'), 'jobs: {}\n');
     await writeFile(join(cwd, 'action.yaml'), 'runs: { using: composite, steps: [] }\n');
     await writeFile(join(compositeDir, 'action.yml'), 'runs: { using: composite, steps: [] }\n');
+    await writeFile(
+      join(nestedCompositeDir, 'action.yml'),
+      'runs: { using: composite, steps: [] }\n',
+    );
     await writeFile(join(dependencyDir, 'action.yml'), 'runs: { using: composite, steps: [] }\n');
 
     const files = await discoverWorkflows({ cwd });
@@ -24,6 +30,7 @@ describe('discoverWorkflows', () => {
       '.github/actions/setup/action.yml',
       '.github/workflows/ci.yml',
       'action.yaml',
+      'automation/actions/build/action.yml',
     ]);
   });
 });

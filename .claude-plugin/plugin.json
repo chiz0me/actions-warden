@@ -3,7 +3,7 @@
   "name": "actions-warden",
   "displayName": "Actions Warden",
   "version": "0.2.0",
-  "description": "Audit, pin, and upgrade GitHub Actions workflows. Safe-by-default CLI with LLM-friendly TOON output.",
+  "description": "Audit GitHub Actions across repositories and organizations; pin, verify, and upgrade dependencies.",
   "author": {
     "name": "Naveen Yagati"
   },
@@ -14,9 +14,12 @@
     "github-actions",
     "security",
     "audit",
+    "organization",
+    "security-report",
     "supply-chain",
     "workflow",
     "sha-pin",
-    "toon"
+    "toon",
+    "sarif"
   ]
 }

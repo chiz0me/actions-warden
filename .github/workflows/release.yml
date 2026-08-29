@@ -8,14 +8,20 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: actions-warden-release
+  queue: max
+
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
@@ -25,27 +31,63 @@ jobs:
       - name: Install
         run: npm ci --no-audit --no-fund --ignore-scripts
 
-      - name: Verify tag matches package.json
+      - name: Verify stable tag, package version, and main ancestry
         env:
+          COMMIT_SHA: ${{ github.sha }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          if [[ ! "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release tags must be stable vX.Y.Z versions: $REF_NAME"
+            exit 1
+          fi
           pkg_version="$(node -p "require('./package.json').version")"
           tag="${REF_NAME#v}"
           if [ "$pkg_version" != "$tag" ]; then
             echo "::error::tag $REF_NAME does not match package.json version $pkg_version"
             exit 1
           fi
+          if ! git merge-base --is-ancestor "$COMMIT_SHA" refs/remotes/origin/main; then
+            echo "::error::tag commit $COMMIT_SHA is not contained in origin/main"
+            exit 1
+          fi
+
+      - name: Verify npm release state and retry integrity
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: node scripts/check-release-version.js --tag "$REF_NAME" --allow-existing
 
       - name: Tests
         run: npm test
 
+      - name: Lint
+        run: npm run lint
+
+      - name: Validate YAML
+        run: npm run check:yaml
+
+      - name: Validate documentation links
+        run: npm run check:docs
+
       - name: Verify deps pinned
         run: node scripts/verify-deps.js
 
-  release:
+      - name: Verify all version sources
+        run: node scripts/verify-version-sync.js
+
+      - name: Verify npm package contents
+        run: npm run check:package
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Verify bundled GitHub Action
+        run: npm run check:action-bundle
+
+  release-draft:
     needs: validate
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -54,20 +96,43 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Create GitHub release
+      - name: Create draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          gh release create "$REF_NAME" \
-            --title "$REF_NAME" \
-            --generate-notes \
-            --verify-tag
+          if gh release view "$REF_NAME" >/dev/null 2>&1; then
+            echo "::notice::release $REF_NAME already exists; reusing it"
+          else
+            gh release create "$REF_NAME" \
+              --title "$REF_NAME" \
+              --generate-notes \
+              --verify-tag \
+              --draft
+          fi
+
+  release:
+    needs: publish-npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+        run: gh release edit "$REF_NAME" --draft=false
 
   floating-major-tag:
     needs: release
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -102,8 +167,9 @@ jobs:
           echo "moved $major -> $target_sha (from $REF_NAME)"
 
   publish-npm:
-    needs: validate
+    needs: release-draft
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       id-token: write
@@ -114,13 +180,14 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: '24'
+          node-version: '24.18.0'
           registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
 
       - name: Ensure npm supports trusted publishing
         run: |
           set -euo pipefail
-          npm install -g npm@latest
+          npm install --global npm@12.0.2 --ignore-scripts --no-audit --no-fund
           npm --version
 
       - name: Install
@@ -141,11 +208,12 @@ jobs:
 
       - name: Publish
         if: steps.check.outputs.skip == 'false'
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public --ignore-scripts
 
   sync-marketplace:
     needs: release
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
