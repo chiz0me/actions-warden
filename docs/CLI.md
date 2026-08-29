@@ -21,7 +21,7 @@ actions-warden --version
 For reproducible one-off automation, invoke an exact package version:
 
 ```sh
-npx --yes actions-warden@0.2.0 audit
+npx --yes actions-warden@0.3.0 audit
 ```
 
 Network-backed commands resolve credentials in this order:

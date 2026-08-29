@@ -57,7 +57,7 @@ actions-warden verify
 For a one-off run without a global install:
 
 ```sh
-npx --yes actions-warden@0.2.0 audit --explain
+npx --yes actions-warden@0.3.0 audit --explain
 ```
 
 `audit` returns exit code `1` when it finds issues. That is a completed scan,

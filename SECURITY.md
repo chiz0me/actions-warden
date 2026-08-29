@@ -12,7 +12,7 @@ Please include:
 
 - A clear description of the issue.
 - A minimal reproduction (workflow YAML, command line, expected vs. actual).
-- The version of `actions-warden` (`npx --yes actions-warden@0.2.0 --version`).
+- The version of `actions-warden` (`npx --yes actions-warden@0.3.0 --version`).
 - Any disclosure constraints on your side.
 
 We aim to acknowledge within **3 business days** and to ship a fix or a

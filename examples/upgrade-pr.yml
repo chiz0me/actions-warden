@@ -26,7 +26,7 @@ jobs:
       - name: Apply eligible upgrades
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: npx --yes actions-warden@0.2.0 upgrade --mode=minor --min-age=7 --write
+        run: npx --yes actions-warden@0.3.0 upgrade --mode=minor --min-age=7 --write
 
       - name: Open or update pull request
         env:
