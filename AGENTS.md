@@ -58,10 +58,11 @@ actions-warden org-scan ORG --agent-mode
   checkpoint. It emits only a bounded JSON receipt to stdout. The packaged
   skill should pass the flag; an integration may instead set
   `ACTIONS_WARDEN_MODE=agent` once.
-- Automatic artifact names are derived from the complete checkpoint identity.
-  An exact-scope later run resumes its checkpoint; a changed filter, severity,
-  policy, baseline, tool version, or rule catalog receives a different path.
-  Compatibility validation still fails closed.
+- Automatic artifact names are derived from the checkpoint compatibility
+  identity. An exact-scope later run resumes its checkpoint across compatible
+  package versions; a changed filter, severity, policy, baseline, analysis
+  generation, or rule catalog receives a different path. Compatibility
+  validation still fails closed.
 - Preserve the scope the user requested. Reducing LLM context use is not
   permission to omit repositories, severities, findings, or errors.
 - Explicit CLI choices override agent defaults. If the user asks to watch live
@@ -112,8 +113,13 @@ deprecating a package. A release request does not authorize those actions.
 ## Non-negotiable invariants
 
 - `pin` and `upgrade` are dry-run by default.
+- CLI usage errors return `2`; numeric limits and change IDs are parsed
+  strictly, and contradictory flags fail before command work begins.
 - Writes remain within the real repository root, reject symlink escapes, are
   atomic, preserve permissions, and reparse modified YAML.
+- CLI report, baseline, and checkpoint destinations are preflighted before
+  network or workflow mutation and cannot replace workflow or policy-control
+  files.
 - GitHub ref resolution and commit ownership fail closed.
 - Credentials are redacted in every format, annotation, and top-level error.
 - Finding IDs are clone-independent; pin findings and plans share an ID.
@@ -123,6 +129,10 @@ deprecating a package. A release request does not authorize those actions.
 - Organization resume requires fresh discovery and matching default-branch tree
   SHAs; never reuse failed results. Checkpoints remain guarded, atomic, and free
   of tokens or raw YAML.
+- `ORGANIZATION_ANALYSIS_GENERATION` is the organization-result compatibility
+  boundary. Increment it whenever discovery, parser, finding identity, rule
+  evaluation, or persisted result semantics can change; do not increment it
+  for a version-only compatible release.
 - CLI progress stays on stderr and never corrupts structured report stdout.
 - Attacker-controlled text cannot forge output records or workflow commands.
 

@@ -44,6 +44,9 @@ export async function writeFileGuarded({ path, content, dryRun = true, cwd = pro
     if (entry.isSymbolicLink()) {
       throw new Error(`refusing to write through a symlink: ${path}`);
     }
+    if (!entry.isFile()) {
+      throw new Error(`refusing to replace a non-file path: ${path}`);
+    }
     existingMode = entry.mode & 0o777;
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;

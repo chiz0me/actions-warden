@@ -3,20 +3,20 @@
  * actions-warden CLI entry point.
  *
  * Commands: audit, pin, upgrade, verify, report, org-scan, rules
- * Global flags: --format, --output, --output-path, --workflow, --token
+ * Common command flags include --format, --output, --output-path, and --workflow.
  *
  * Mutating operations (pin, upgrade) only write when --write is present.
  *
  * Exit codes:
- *   0  no findings / no errors
- *   1  findings reported (audit FAIL) or errors during pin/upgrade
- *   2  invalid arguments
+ *   0  completed with status OK (or displayed help/version)
+ *   1  completed with a structured FAIL result
+ *   2  invocation-level failure
  */
 
-import { realpath } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { stat } from 'node:fs/promises';
+import { relative, resolve, sep } from 'node:path';
 import { createRequire } from 'node:module';
-import { Command, Option } from 'commander';
+import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 
 import { audit, renderAudit } from './commands/audit.js';
 import { pin, renderPin } from './commands/pin.js';
@@ -29,6 +29,8 @@ import { format as fmt } from './lib/formatter.js';
 import { writeFileGuarded } from './lib/writer.js';
 import { serializeBaseline } from './lib/baseline.js';
 import { formatOrganizationProgress } from './lib/org-progress.js';
+import { resolveTargets } from './lib/targets.js';
+import { sameFilePath } from './lib/path-equality.js';
 import {
   AGENT_MODE_ENVIRONMENT_VARIABLE,
   createOrganizationAgentArtifacts,
@@ -39,22 +41,56 @@ import {
 const program = new Command();
 const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
+const FIX_ID_RE = /^[0-9a-f]{16}$/i;
+const DEFAULT_CONFIG_PATHS = ['.actions-warden.yml', '.actions-warden.yaml'];
 program
   .name('actions-warden')
   .description('Audit GitHub Actions across repositories and organizations; pin, verify, and upgrade dependencies.')
-  .version(version);
+  .version(version)
+  .exitOverride(error => {
+    if (error.exitCode !== 0) error.exitCode = 2;
+    throw error;
+  });
 
-const formatOption = new Option('--format <fmt>', 'output format').choices(['toon', 'json', 'text', 'sarif']).default('toon');
-const outputOption = new Option('--output <dest>', 'output destination').choices(['stdout', 'file']).default('stdout');
+function createFormatOption() {
+  return new Option('--format <fmt>', 'output format')
+    .choices(['toon', 'json', 'text', 'sarif'])
+    .default('toon');
+}
 
-function addCommonOptions(cmd) {
-  return cmd
-    .option('-w, --workflow <pattern...>', 'workflow path or glob (repeatable)')
-    .option('--cwd <dir>', 'working directory', process.cwd())
-    .option('--token <token>', 'GitHub token (overrides GITHUB_TOKEN / GH_TOKEN)')
-    .addOption(formatOption)
-    .addOption(outputOption)
-    .option('--output-path <path>', 'file path when --output=file');
+function createOutputOption() {
+  return new Option('--output <dest>', 'output destination')
+    .choices(['stdout', 'file'])
+    .default('stdout');
+}
+
+function createOutputPathOption() {
+  return new Option('--output-path <path>', 'report path (implies --output=file)')
+    .argParser(value => parseNonEmpty(value, '--output-path'))
+    .implies({ output: 'file' });
+}
+
+function createCwdOption() {
+  return new Option('--cwd <dir>', 'working directory')
+    .argParser(value => parseNonEmpty(value, '--cwd'))
+    .default(process.cwd(), 'current directory');
+}
+
+function createTokenOption() {
+  return new Option('--token <token>', 'GitHub token override (prefer GITHUB_TOKEN or GH_TOKEN)')
+    .argParser(value => parseNonEmpty(value, '--token'));
+}
+
+function addCommonOptions(cmd, { includeToken = true } = {}) {
+  const configured = cmd
+    .addOption(new Option('-w, --workflow <pattern...>', 'workflow path or glob (repeatable)')
+      .argParser((value, previous) => collectNonEmpty(value, previous, '--workflow')))
+    .addOption(createCwdOption());
+  if (includeToken) configured.addOption(createTokenOption());
+  return configured
+    .addOption(createFormatOption())
+    .addOption(createOutputOption())
+    .addOption(createOutputPathOption());
 }
 
 async function emit(payload, opts) {
@@ -71,22 +107,27 @@ async function emit(payload, opts) {
   process.stdout.write(payload);
 }
 
-addCommonOptions(program.command('audit'))
+addCommonOptions(program.command('audit'), { includeToken: false })
   .description('Scan workflows for security findings')
   .addOption(new Option('--severity <level>', 'minimum severity').choices(['low', 'medium', 'high', 'critical']))
-  .option('--explain', 'include plain-English remediation hint for each finding', false)
-  .option('--config <path>', 'repository policy file (default: .actions-warden.yml)')
-  .option('--ignore-config', 'do not load repository policy', false)
-  .option('--baseline <path>', 'suppress findings recorded in a baseline')
-  .option('--create-baseline <path>', 'write the current findings as a baseline')
+  .option('--explain', 'include plain-English remediation hint for each finding')
+  .addOption(new Option('--config <path>', 'repository policy file (default: .actions-warden.yml)')
+    .argParser(value => parseNonEmpty(value, '--config'))
+    .conflicts('ignoreConfig'))
+  .addOption(new Option('--ignore-config', 'do not load repository policy').conflicts('config'))
+  .addOption(new Option('--baseline <path>', 'suppress findings recorded in a baseline')
+    .argParser(value => parseNonEmpty(value, '--baseline'))
+    .conflicts('createBaseline'))
+  .addOption(new Option('--create-baseline <path>', 'write the current findings as a baseline')
+    .argParser(value => parseNonEmpty(value, '--create-baseline'))
+    .conflicts('baseline'))
   .action(async (opts) => {
     const createBaseline = opts.createBaseline;
-    if (createBaseline && opts.baseline) {
-      throw new Error('--baseline and --create-baseline cannot be used together');
-    }
-    if (opts.ignoreConfig && opts.config) {
-      throw new Error('--config and --ignore-config cannot be used together');
-    }
+    const destinations = await preflightRepositoryCommand(opts, {
+      additionalDestinations: createBaseline
+        ? [{ option: '--create-baseline', path: createBaseline }]
+        : [],
+    });
     const result = await audit({
       cwd: opts.cwd,
       workflows: opts.workflow,
@@ -96,6 +137,10 @@ addCommonOptions(program.command('audit'))
       baseline: opts.baseline,
       ignoreBaseline: Boolean(createBaseline),
     });
+    await assertDestinationsDoNotReplaceControls(destinations, [
+      { label: 'active config', path: result.configPath },
+      ...(!createBaseline ? [{ label: 'active baseline', path: result.baseline.path }] : []),
+    ]);
     if (createBaseline) {
       await writeFileGuarded({
         path: resolve(opts.cwd, createBaseline),
@@ -129,15 +174,11 @@ addCommonOptions(program.command('audit'))
 
 addCommonOptions(program.command('pin'))
   .description('Pin tag/branch refs to immutable commit SHAs')
-  .option('--write', 'apply changes (disables dry-run)', false)
-  .option('--dry-run', 'explicitly keep dry-run mode (the default)', false)
-  .option('--fix <id>', 'apply only the change with this id')
+  .addOption(new Option('--write', 'apply changes (disables dry-run)').conflicts('dryRun'))
+  .addOption(new Option('--dry-run', 'explicitly keep dry-run mode (the default)').conflicts('write'))
+  .addOption(new Option('--fix <id>', 'select only the 16-hex change id').argParser(parseFixId))
   .action(async (opts) => {
-    if (opts.write && opts.dryRun) {
-      process.stderr.write('error: --write and --dry-run cannot be used together\n');
-      process.exitCode = 2;
-      return;
-    }
+    await preflightRepositoryCommand(opts);
     const dryRun = !opts.write;
     const result = await pin({
       cwd: opts.cwd,
@@ -153,24 +194,16 @@ addCommonOptions(program.command('pin'))
 
 addCommonOptions(program.command('upgrade'))
   .description('Upgrade pinned/tagged actions to a newer version')
-  .option('--write', 'apply changes (disables dry-run)', false)
-  .option('--dry-run', 'explicitly keep dry-run mode (the default)', false)
+  .addOption(new Option('--write', 'apply changes (disables dry-run)').conflicts('dryRun'))
+  .addOption(new Option('--dry-run', 'explicitly keep dry-run mode (the default)').conflicts('write'))
   .addOption(new Option('--mode <m>', 'upgrade scope').choices(['major', 'minor', 'patch']).default('minor'))
-  .option('--min-age <days>', 'cooldown: only accept tags older than this many days', '7')
-  .option('--fix <id>', 'apply only the change with this id')
+  .addOption(new Option('--min-age <days>', 'cooldown: only accept tags older than this many days')
+    .argParser(value => parseInteger(value, '--min-age', { min: 0 }))
+    .default(7))
+  .addOption(new Option('--fix <id>', 'select only the 16-hex change id').argParser(parseFixId))
   .action(async (opts) => {
-    if (opts.write && opts.dryRun) {
-      process.stderr.write('error: --write and --dry-run cannot be used together\n');
-      process.exitCode = 2;
-      return;
-    }
+    await preflightRepositoryCommand(opts);
     const dryRun = !opts.write;
-    const minAgeDays = Number.parseInt(opts.minAge, 10);
-    if (Number.isNaN(minAgeDays) || minAgeDays < 0) {
-      process.stderr.write('error: --min-age must be a non-negative integer\n');
-      process.exitCode = 2;
-      return;
-    }
     const result = await upgrade({
       cwd: opts.cwd,
       workflows: opts.workflow,
@@ -178,7 +211,7 @@ addCommonOptions(program.command('upgrade'))
       token: opts.token,
       mode: opts.mode,
       fix: opts.fix,
-      minAgeDays,
+      minAgeDays: opts.minAge,
     });
     const payload = renderUpgrade(result, { format: opts.format, dryRun, mode: opts.mode, cwd: opts.cwd });
     await emit(payload, opts);
@@ -189,22 +222,20 @@ addCommonOptions(program.command('report'))
   .description('Combined audit + pin (dry) + upgrade (dry) report')
   .addOption(new Option('--mode <m>', 'upgrade scope').choices(['major', 'minor', 'patch']).default('minor'))
   .addOption(new Option('--severity <level>', 'minimum audit severity').choices(['low', 'medium', 'high', 'critical']))
-  .option('--explain', 'include remediation hints in audit findings', false)
-  .option('--min-age <days>', 'cooldown for upgrades (days)', '7')
-  .option('--offline', 'skip network calls (audit only)', false)
-  .option('--config <path>', 'repository policy file (default: .actions-warden.yml)')
-  .option('--ignore-config', 'do not load repository policy', false)
-  .option('--baseline <path>', 'suppress audit findings recorded in a baseline')
+  .option('--explain', 'include remediation hints in audit findings')
+  .addOption(new Option('--min-age <days>', 'cooldown for upgrades (days)')
+    .argParser(value => parseInteger(value, '--min-age', { min: 0 }))
+    .default(7))
+  .addOption(new Option('--offline', 'skip network calls (audit only)')
+    .conflicts(['token', 'mode', 'minAge']))
+  .addOption(new Option('--config <path>', 'repository policy file (default: .actions-warden.yml)')
+    .argParser(value => parseNonEmpty(value, '--config'))
+    .conflicts('ignoreConfig'))
+  .addOption(new Option('--ignore-config', 'do not load repository policy').conflicts('config'))
+  .addOption(new Option('--baseline <path>', 'suppress audit findings recorded in a baseline')
+    .argParser(value => parseNonEmpty(value, '--baseline')))
   .action(async (opts) => {
-    const minAgeDays = Number.parseInt(opts.minAge, 10);
-    if (Number.isNaN(minAgeDays) || minAgeDays < 0) {
-      process.stderr.write('error: --min-age must be a non-negative integer\n');
-      process.exitCode = 2;
-      return;
-    }
-    if (opts.ignoreConfig && opts.config) {
-      throw new Error('--config and --ignore-config cannot be used together');
-    }
+    const destinations = await preflightRepositoryCommand(opts);
     const result = await report({
       cwd: opts.cwd,
       workflows: opts.workflow,
@@ -213,10 +244,14 @@ addCommonOptions(program.command('report'))
       severity: opts.severity,
       explain: Boolean(opts.explain),
       skipResolve: Boolean(opts.offline),
-      minAgeDays,
+      minAgeDays: opts.minAge,
       configPath: opts.ignoreConfig ? false : opts.config,
       baseline: opts.baseline,
     });
+    await assertDestinationsDoNotReplaceControls(destinations, [
+      { label: 'active config', path: result.audit.configPath },
+      { label: 'active baseline', path: result.audit.baseline.path },
+    ]);
     const payload = renderReport(result, { format: opts.format, mode: opts.mode, cwd: opts.cwd });
     await emit(payload, opts);
     process.exitCode = result.status === 'OK' ? 0 : 1;
@@ -225,6 +260,7 @@ addCommonOptions(program.command('report'))
 addCommonOptions(program.command('verify'))
   .description('Verify pinned SHAs and version metadata against GitHub')
   .action(async (opts) => {
+    await preflightRepositoryCommand(opts);
     const result = await verify({
       cwd: opts.cwd,
       workflows: opts.workflow,
@@ -237,39 +273,44 @@ addCommonOptions(program.command('verify'))
 
 program.command('org-scan <organization>')
   .description('Scan workflow security across a GitHub organization')
-  .option('-r, --repository <pattern...>', 'repository name or glob (repeatable)')
+  .addOption(new Option('-r, --repository <pattern...>', 'repository name or glob (repeatable)')
+    .argParser((value, previous) => collectNonEmpty(value, previous, '--repository')))
   .addOption(new Option('--visibility <visibility>', 'repository visibility').choices(['all', 'public', 'private', 'internal']).default('all'))
-  .option('--include-archived', 'include archived repositories', false)
-  .option('--include-disabled', 'include disabled repositories', false)
-  .option('--include-forks', 'include forked repositories', false)
-  .option('--max-repos <count>', 'scan at most this many repositories')
-  .option('--concurrency <count>', 'concurrent repository scans (1-16)', '4')
+  .option('--include-archived', 'include archived repositories')
+  .option('--include-disabled', 'include disabled repositories')
+  .option('--include-forks', 'include forked repositories')
+  .addOption(new Option('--max-repos <count>', 'scan at most this many repositories')
+    .argParser(value => parseInteger(value, '--max-repos', { min: 1 })))
+  .addOption(new Option('--concurrency <count>', 'concurrent repository scans (1-16)')
+    .argParser(value => parseInteger(value, '--concurrency', { min: 1, max: 16 }))
+    .default(4))
   .addOption(new Option('--severity <level>', 'minimum severity').choices(['low', 'medium', 'high', 'critical']))
-  .option('--explain', 'include plain-English remediation hint for each finding', false)
-  .option('--config <path>', 'organization-wide policy file (default: .actions-warden.yml)')
-  .option('--ignore-config', 'do not load organization-wide policy', false)
-  .option('--baseline <path>', 'suppress findings recorded in an organization baseline')
-  .option('--checkpoint <path>', 'create or replace a resumable scan checkpoint')
-  .option('--resume <path>', 'resume from and update an existing checkpoint')
+  .option('--explain', 'include plain-English remediation hint for each finding')
+  .addOption(new Option('--config <path>', 'organization-wide policy file (default: .actions-warden.yml)')
+    .argParser(value => parseNonEmpty(value, '--config'))
+    .conflicts('ignoreConfig'))
+  .addOption(new Option('--ignore-config', 'do not load organization-wide policy').conflicts('config'))
+  .addOption(new Option('--baseline <path>', 'suppress findings recorded in an organization baseline')
+    .argParser(value => parseNonEmpty(value, '--baseline')))
+  .addOption(new Option('--checkpoint <path>', 'create or replace a resumable scan checkpoint')
+    .argParser(value => parseNonEmpty(value, '--checkpoint'))
+    .conflicts('resume'))
+  .addOption(new Option('--resume <path>', 'resume from and update an existing checkpoint')
+    .argParser(value => parseNonEmpty(value, '--resume'))
+    .conflicts('checkpoint'))
   .addOption(new Option('--progress <mode>', 'live progress on stderr').choices(['auto', 'always', 'never']).default('auto'))
   .option('--agent-mode', 'use bounded AI-agent output and automatic artifacts')
   .option('--no-agent-mode', 'disable agent mode from the environment')
-  .option('--cwd <dir>', 'working directory', process.cwd())
-  .option('--token <token>', 'GitHub token (overrides GITHUB_TOKEN / GH_TOKEN)')
-  .addOption(formatOption)
-  .addOption(outputOption)
-  .option('--output-path <path>', 'file path when --output=file')
+  .addOption(createCwdOption())
+  .addOption(createTokenOption())
+  .addOption(createFormatOption())
+  .addOption(createOutputOption())
+  .addOption(createOutputPathOption())
   .action(async (organization, opts, command) => {
-    if (opts.ignoreConfig && opts.config) {
-      throw new Error('--config and --ignore-config cannot be used together');
-    }
-    if (opts.checkpoint && opts.resume) {
-      throw new Error('--checkpoint and --resume cannot be used together');
-    }
-    const concurrency = parsePositiveInteger(opts.concurrency, '--concurrency');
-    const maxRepositories = opts.maxRepos === undefined
-      ? undefined
-      : parsePositiveInteger(opts.maxRepos, '--max-repos');
+    await validateWorkingDirectory(opts.cwd);
+    assertMutuallyExclusiveFlags('--agent-mode', '--no-agent-mode');
+    const concurrency = opts.concurrency;
+    const maxRepositories = opts.maxRepos;
     const agentMode = resolveAgentMode({
       optionValue: opts.agentMode,
       optionSource: command.getOptionValueSource('agentMode'),
@@ -301,20 +342,32 @@ program.command('org-scan <organization>')
     if (agentMode && effective.output === 'file' && !effective.outputPath) {
       effective.outputPath = agentArtifacts.reportPath;
     }
+    const outputDestination = await validateOutputDestination(effective);
+    await assertDestinationsUseSafeNames(
+      outputDestination ? [outputDestination] : [],
+      effective.cwd,
+    );
     let checkpointPath = effective.resume ?? effective.checkpoint;
     let resume = Boolean(effective.resume);
     if (agentMode && !checkpointPath) {
       checkpointPath = agentArtifacts.checkpointPath;
       resume = agentArtifacts.resume;
     }
+    const checkpointDestination = checkpointPath
+      ? await validateWriteDestination({
+          option: resume ? '--resume' : '--checkpoint',
+          path: checkpointPath,
+          cwd: effective.cwd,
+        })
+      : null;
+    await assertDestinationsUseSafeNames(
+      checkpointDestination ? [checkpointDestination] : [],
+      effective.cwd,
+    );
     if (
-      checkpointPath
-      && effective.output === 'file'
-      && effective.outputPath
-      && await samePath(
-        resolve(effective.cwd, checkpointPath),
-        resolve(effective.cwd, effective.outputPath),
-      )
+      checkpointDestination
+      && outputDestination
+      && await sameFilePath(checkpointDestination.path, outputDestination.path)
     ) {
       throw new Error('checkpoint and report output paths must be different');
     }
@@ -342,6 +395,13 @@ program.command('org-scan <organization>')
           }
         : undefined,
     });
+    await assertDestinationsDoNotReplaceControls(
+      outputDestination ? [outputDestination] : [],
+      [
+        { label: 'active config', path: result.configPath },
+        { label: 'active baseline', path: result.baseline.path },
+      ],
+    );
     const payload = renderOrganizationScan(result, {
       format: effective.format,
       cwd: effective.cwd,
@@ -361,7 +421,7 @@ program.command('org-scan <organization>')
 
 program.command('rules')
   .description('List available audit rules')
-  .addOption(formatOption)
+  .addOption(createFormatOption())
   .action((opts) => {
     const rules = listRules();
     const payload = fmt(opts.format, rules.map(r => ({ label: 'RULE', fields: r })), {
@@ -372,29 +432,162 @@ program.command('rules')
   });
 
 program.parseAsync(process.argv).catch((err) => {
+  if (err instanceof CommanderError) {
+    process.exitCode = err.exitCode;
+    return;
+  }
   process.stderr.write(`error: ${err.message}\n`);
   process.exitCode = 2;
 });
 
-function parsePositiveInteger(value, option) {
-  if (!/^\d+$/.test(value) || Number.parseInt(value, 10) < 1) {
-    throw new Error(`${option} must be a positive integer`);
+function parseNonEmpty(value, option) {
+  if (value.length === 0) {
+    throw new InvalidArgumentError(`${option} must be non-empty`);
   }
-  return Number.parseInt(value, 10);
+  return value;
+}
+
+function collectNonEmpty(value, previous, option) {
+  return [...(Array.isArray(previous) ? previous : []), parseNonEmpty(value, option)];
+}
+
+function parseInteger(value, option, { min, max = Number.MAX_SAFE_INTEGER }) {
+  if (!/^\d+$/.test(value)) {
+    throw new InvalidArgumentError(`${option} must be an integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    if (min === 0 && max === Number.MAX_SAFE_INTEGER) {
+      throw new InvalidArgumentError(`${option} must be a non-negative integer`);
+    }
+    if (min === 1 && max === Number.MAX_SAFE_INTEGER) {
+      throw new InvalidArgumentError(`${option} must be a positive integer`);
+    }
+    throw new InvalidArgumentError(`${option} must be an integer from ${min} to ${max}`);
+  }
+  return parsed;
+}
+
+function parseFixId(value) {
+  if (!FIX_ID_RE.test(value)) {
+    throw new InvalidArgumentError('--fix must be a 16-character hexadecimal change id');
+  }
+  return value.toLowerCase();
 }
 
 function progressEnabled(mode) {
   return mode === 'always' || (mode === 'auto' && Boolean(process.stderr.isTTY));
 }
 
-async function samePath(left, right) {
-  const [leftParent, rightParent] = await Promise.all([
-    realpath(dirname(left)),
-    realpath(dirname(right)),
-  ]);
-  const leftTarget = join(leftParent, basename(left));
-  const rightTarget = join(rightParent, basename(right));
-  return process.platform === 'win32'
-    ? leftTarget.toLowerCase() === rightTarget.toLowerCase()
-    : leftTarget === rightTarget;
+async function preflightRepositoryCommand(opts, { additionalDestinations = [] } = {}) {
+  await validateWorkingDirectory(opts.cwd);
+  const outputDestination = await validateOutputDestination(opts);
+  const destinations = outputDestination ? [outputDestination] : [];
+  for (const destination of additionalDestinations) {
+    destinations.push(await validateWriteDestination({
+      ...destination,
+      cwd: opts.cwd,
+    }));
+  }
+  await assertDestinationsAreDistinct(destinations);
+  await assertDestinationsUseSafeNames(destinations, opts.cwd);
+  if (destinations.length > 0) {
+    const workflows = await resolveTargets({ workflows: opts.workflow, cwd: opts.cwd });
+    await assertDestinationsDoNotReplaceControls(
+      destinations,
+      workflows.map(path => ({ label: 'selected workflow', path })),
+    );
+  }
+  return destinations;
+}
+
+async function assertDestinationsUseSafeNames(destinations, cwd) {
+  await assertDestinationsDoNotReplaceControls(
+    destinations,
+    DEFAULT_CONFIG_PATHS.map(path => ({ label: 'reserved config path', path: resolve(cwd, path) })),
+  );
+  for (const destination of destinations) {
+    if (isDefaultWorkflowPath(destination.path, cwd)) {
+      throw new Error(`${destination.option} cannot use a default workflow discovery path`);
+    }
+  }
+}
+
+async function validateWorkingDirectory(cwd) {
+  if (typeof cwd !== 'string' || cwd.length === 0 || cwd.includes('\0')) {
+    throw new Error('--cwd must be an existing directory');
+  }
+  let metadata;
+  try {
+    metadata = await stat(resolve(cwd));
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+      throw new Error('--cwd must be an existing directory');
+    }
+    throw error;
+  }
+  if (!metadata.isDirectory()) throw new Error('--cwd must be an existing directory');
+}
+
+async function validateOutputDestination(opts) {
+  if (opts.outputPath && opts.output !== 'file') {
+    throw new Error('--output-path cannot be used with --output=stdout');
+  }
+  if (opts.output !== 'file') return null;
+  if (!opts.outputPath) throw new Error('--output-path is required when --output=file');
+  return validateWriteDestination({
+    option: '--output-path',
+    path: opts.outputPath,
+    cwd: opts.cwd ?? process.cwd(),
+  });
+}
+
+async function validateWriteDestination({ option, path, cwd }) {
+  if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) {
+    throw new Error(`${option} must be a non-empty path`);
+  }
+  try {
+    await writeFileGuarded({ path, content: '', dryRun: true, cwd });
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+      throw new Error(`parent directory for ${option} must exist`);
+    }
+    throw error;
+  }
+  return { option, path: resolve(cwd, path) };
+}
+
+async function assertDestinationsAreDistinct(destinations) {
+  for (let left = 0; left < destinations.length; left += 1) {
+    for (let right = left + 1; right < destinations.length; right += 1) {
+      if (await sameFilePath(destinations[left].path, destinations[right].path)) {
+        throw new Error(
+          `${destinations[left].option} and ${destinations[right].option} must use different paths`,
+        );
+      }
+    }
+  }
+}
+
+async function assertDestinationsDoNotReplaceControls(destinations, controls) {
+  for (const destination of destinations) {
+    for (const control of controls) {
+      if (control.path && await sameFilePath(destination.path, resolve(control.path))) {
+        throw new Error(`${destination.option} cannot replace the ${control.label}`);
+      }
+    }
+  }
+}
+
+function assertMutuallyExclusiveFlags(left, right) {
+  const args = process.argv.slice(2);
+  if (args.includes(left) && args.includes(right)) {
+    throw new Error(`${left} and ${right} cannot be used together`);
+  }
+}
+
+function isDefaultWorkflowPath(path, cwd) {
+  const localPath = relative(resolve(cwd), path).split(sep).join('/');
+  return /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(localPath)
+    || /(^|\/)action\.ya?ml$/i.test(localPath);
 }

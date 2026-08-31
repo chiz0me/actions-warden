@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -24,7 +25,48 @@ describe('CLI safety contract', () => {
       '--dry-run=false',
       '-w',
       'test/fixtures/clean.yml',
-    ], { cwd })).rejects.toMatchObject({ code: 1 });
+    ], { cwd })).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("unknown option '--dry-run=false'"),
+    });
+  });
+
+  it('uses exit code 2 for command-line usage errors', async () => {
+    await expect(execFileAsync(process.execPath, [
+      cli,
+      'audit',
+      '--not-an-option',
+    ], { cwd })).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("unknown option '--not-an-option'"),
+    });
+
+    await expect(execFileAsync(process.execPath, [
+      cli,
+      'audit',
+      '--token',
+      'not-needed',
+    ], { cwd })).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("unknown option '--token'"),
+    });
+  });
+
+  it('collects repeated variadic workflow options', async () => {
+    const { stdout } = await execFileAsync(process.execPath, [
+      cli,
+      'audit',
+      '--workflow',
+      'test/fixtures/clean.yml',
+      '--workflow',
+      'test/fixtures/clean workflow.yml',
+      '--format',
+      'json',
+    ], { cwd });
+    expect(JSON.parse(stdout).files).toEqual([
+      'test/fixtures/clean workflow.yml',
+      'test/fixtures/clean.yml',
+    ]);
   });
 
   it('returns usage error for an unmatched explicit target', async () => {
@@ -53,6 +95,158 @@ describe('CLI safety contract', () => {
     });
   });
 
+  it('validates output before an authorized workflow write can run', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'aw-cli-preflight-'));
+    const workflowDirectory = join(repo, '.github/workflows');
+    const workflowPath = join(workflowDirectory, 'ci.yml');
+    const original = 'on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: octo/action@v1\n';
+    await mkdir(workflowDirectory, { recursive: true });
+    await writeFile(workflowPath, original);
+    try {
+      await expect(execFileAsync(process.execPath, [
+        cli,
+        'pin',
+        '--cwd',
+        repo,
+        '--write',
+        '--output',
+        'file',
+      ], { cwd })).rejects.toMatchObject({
+        code: 2,
+        stderr: expect.stringContaining('--output-path is required'),
+      });
+      expect(await readFile(workflowPath, 'utf8')).toBe(original);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('lets --output-path imply file output and rejects contradictory output flags', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'aw-cli-output-'));
+    await mkdir(join(repo, '.github/workflows'), { recursive: true });
+    await writeFile(
+      join(repo, '.github/workflows/ci.yml'),
+      await readFile(join(cwd, 'test/fixtures/clean.yml'), 'utf8'),
+    );
+    try {
+      const written = await execFileAsync(process.execPath, [
+        cli,
+        'audit',
+        '--cwd',
+        repo,
+        '--format',
+        'json',
+        '--output-path',
+        'report.json',
+      ], { cwd });
+      expect(written.stdout).toBe('');
+      expect(JSON.parse(await readFile(join(repo, 'report.json'), 'utf8')))
+        .toMatchObject({ status: 'OK' });
+
+      await expect(execFileAsync(process.execPath, [
+        cli,
+        'audit',
+        '--cwd',
+        repo,
+        '--output',
+        'stdout',
+        '--output-path',
+        'ignored.json',
+      ], { cwd })).rejects.toMatchObject({
+        code: 2,
+        stderr: expect.stringContaining('--output-path cannot be used with --output=stdout'),
+      });
+      await expect(access(join(repo, 'ignored.json'))).rejects.toThrow();
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses report and baseline destinations that could replace control or workflow files', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'aw-cli-collision-'));
+    const workflowDirectory = join(repo, '.github/workflows');
+    const workflowPath = join(workflowDirectory, 'ci.yml');
+    const original = 'permissions: read-all\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n';
+    await mkdir(workflowDirectory, { recursive: true });
+    await writeFile(workflowPath, original);
+    try {
+      await expect(execFileAsync(process.execPath, [
+        cli,
+        'audit',
+        '--cwd',
+        repo,
+        '--output-path',
+        '.github/workflows/ci.yml',
+      ], { cwd })).rejects.toMatchObject({
+        code: 2,
+        stderr: expect.stringContaining('cannot use a default workflow discovery path'),
+      });
+      expect(await readFile(workflowPath, 'utf8')).toBe(original);
+
+      await expect(execFileAsync(process.execPath, [
+        cli,
+        'audit',
+        '--cwd',
+        repo,
+        '--create-baseline',
+        'same.json',
+        '--output-path',
+        'same.json',
+      ], { cwd })).rejects.toMatchObject({
+        code: 2,
+        stderr: expect.stringContaining('must use different paths'),
+      });
+      await expect(access(join(repo, 'same.json'))).rejects.toThrow();
+
+      await expect(execFileAsync(process.execPath, [
+        cli,
+        'audit',
+        '--cwd',
+        repo,
+        '--create-baseline',
+        '.actions-warden.yml',
+      ], { cwd })).rejects.toMatchObject({
+        code: 2,
+        stderr: expect.stringContaining('cannot replace the reserved config path'),
+      });
+      await expect(access(join(repo, '.actions-warden.yml'))).rejects.toThrow();
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('strictly validates numeric limits and stable change ids before work starts', async () => {
+    const cases = [
+      {
+        args: ['upgrade', '--min-age', '7days'],
+        message: '--min-age must be an integer',
+      },
+      {
+        args: ['report', '--min-age', '1.5'],
+        message: '--min-age must be an integer',
+      },
+      {
+        args: ['org-scan', 'octo-org', '--max-repos', '999999999999999999999999999'],
+        message: '--max-repos must be a positive integer',
+      },
+      {
+        args: ['pin', '--fix', 'not-an-id'],
+        message: '--fix must be a 16-character hexadecimal change id',
+      },
+      {
+        args: ['audit', '--output-path', ''],
+        message: '--output-path must be non-empty',
+      },
+    ];
+    for (const testCase of cases) {
+      await expect(execFileAsync(process.execPath, [cli, ...testCase.args], { cwd }))
+        .rejects.toMatchObject({
+          code: 2,
+          stderr: expect.stringContaining(testCase.message),
+        });
+    }
+  });
+
   it('validates organization scan limits before making network requests', async () => {
     await expect(execFileAsync(process.execPath, [
       cli,
@@ -62,7 +256,31 @@ describe('CLI safety contract', () => {
       '0',
     ], { cwd })).rejects.toMatchObject({
       code: 2,
-      stderr: expect.stringContaining('--concurrency must be a positive integer'),
+      stderr: expect.stringContaining('--concurrency must be an integer from 1 to 16'),
+    });
+  });
+
+  it('rejects contradictory agent and offline options', async () => {
+    await expect(execFileAsync(process.execPath, [
+      cli,
+      'org-scan',
+      'octo-org',
+      '--agent-mode',
+      '--no-agent-mode',
+    ], { cwd })).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining('--agent-mode and --no-agent-mode cannot be used together'),
+    });
+
+    await expect(execFileAsync(process.execPath, [
+      cli,
+      'report',
+      '--offline',
+      '--token',
+      'unused-token',
+    ], { cwd })).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("option '--offline' cannot be used with option '--token"),
     });
   });
 
@@ -77,7 +295,7 @@ describe('CLI safety contract', () => {
       'previous.json',
     ], { cwd })).rejects.toMatchObject({
       code: 2,
-      stderr: expect.stringContaining('--checkpoint and --resume cannot be used together'),
+      stderr: expect.stringContaining("option '--checkpoint <path>' cannot be used with option '--resume <path>'"),
     });
 
     await expect(execFileAsync(process.execPath, [
@@ -203,7 +421,36 @@ describe('CLI safety contract', () => {
       const checkpoint = JSON.parse(
         await readFile(join(root, firstReceipt.checkpoint.path), 'utf8'),
       );
-      expect(checkpoint.kind).toBe('actions-warden-org-scan');
+      expect(checkpoint).toMatchObject({
+        schemaVersion: '1.1',
+        kind: 'actions-warden-org-scan',
+        toolVersion: pkg.version,
+        identity: { analysisGeneration: 1 },
+      });
+      const legacyIdentity = {
+        toolVersion: '0.3.0',
+        rulesHash: checkpoint.identity.rulesHash,
+        organization: checkpoint.identity.organization,
+        scope: checkpoint.identity.scope,
+        configHash: checkpoint.identity.configHash,
+        baselineHash: checkpoint.identity.baselineHash,
+      };
+      const legacyKey = createHash('sha256')
+        .update(JSON.stringify(legacyIdentity))
+        .digest('hex')
+        .slice(0, 32)
+        .match(/.{8}/g)
+        .join('.');
+      expect(firstReceipt.checkpoint.path)
+        .toBe(`.actions-warden-agent.${legacyKey}.checkpoint.json`);
+      expect(firstReceipt.report.path)
+        .toBe(`.actions-warden-agent.${legacyKey}.report.json`);
+      await writeFile(join(root, firstReceipt.checkpoint.path), `${JSON.stringify({
+        schemaVersion: '1.0',
+        kind: checkpoint.kind,
+        identity: legacyIdentity,
+        repositories: checkpoint.repositories,
+      })}\n`);
 
       const resumed = await execFileAsync(process.execPath, [
         ...common,
@@ -217,6 +464,15 @@ describe('CLI safety contract', () => {
         resumed: true,
       });
       expect(resumed.stderr).toContain('[1/1] resumed octo-org/app');
+      const migratedCheckpoint = JSON.parse(
+        await readFile(join(root, firstReceipt.checkpoint.path), 'utf8'),
+      );
+      expect(migratedCheckpoint).toMatchObject({
+        schemaVersion: '1.1',
+        toolVersion: pkg.version,
+        identity: { analysisGeneration: 1 },
+      });
+      expect(migratedCheckpoint.identity).not.toHaveProperty('toolVersion');
 
       const changedScope = await execFileAsync(process.execPath, [
         ...common,

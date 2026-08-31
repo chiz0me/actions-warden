@@ -3,8 +3,7 @@
  * fetch workflow YAML from each default branch, and aggregate audit findings.
  */
 
-import { realpath } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import picomatch from 'picomatch';
 import { auditSources } from './audit.js';
 import { loadBaseline } from '../lib/baseline.js';
@@ -27,6 +26,7 @@ import {
 } from '../lib/org-checkpoint.js';
 import { resolveToken } from '../lib/resolver.js';
 import { listRules, RULES } from '../rules/index.js';
+import { sameFilePath } from '../lib/path-equality.js';
 
 const VISIBILITIES = new Set(['all', 'public', 'private', 'internal']);
 const ORGANIZATION_RE = /^[A-Za-z0-9_.-]+$/;
@@ -126,7 +126,7 @@ export async function scanOrganization({
   });
   const loadedCheckpoint = resume
     ? await loadOrganizationCheckpoint({ path: checkpointPath, cwd, identity: checkpointIdentity })
-    : { results: new Map() };
+    : { results: new Map(), migrationRequired: false };
   if (resume) {
     await emitProgress(onProgress, {
       type: 'checkpoint-loaded',
@@ -177,9 +177,9 @@ export async function scanOrganization({
     identity: checkpointIdentity,
     results: checkpointResults,
   });
-  if (checkpointPath && !resume) {
+  if (checkpointPath && (!resume || loadedCheckpoint.migrationRequired)) {
     await persistCheckpoint();
-    await emitProgress(onProgress, { type: 'checkpoint-created' });
+    if (!resume) await emitProgress(onProgress, { type: 'checkpoint-created' });
   }
 
   let completed = 0;
@@ -495,16 +495,11 @@ function createCheckpointWriter({ path, cwd, identity, results }) {
 
 async function assertCheckpointDoesNotReplaceControlFile(path, cwd, controlFiles) {
   const requested = resolve(cwd, path);
-  const checkpoint = comparablePath(join(await realpath(dirname(requested)), basename(requested)));
   for (const controlFile of controlFiles) {
-    if (controlFile && comparablePath(resolve(controlFile)) === checkpoint) {
+    if (controlFile && await sameFilePath(requested, resolve(controlFile))) {
       throw new Error('checkpoint path cannot replace the active config or baseline');
     }
   }
-}
-
-function comparablePath(path) {
-  return process.platform === 'win32' ? path.toLowerCase() : path;
 }
 
 async function emitRetryProgress(onProgress, retry, repository) {

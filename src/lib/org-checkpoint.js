@@ -18,7 +18,14 @@ import { listRules } from '../rules/index.js';
 import { VERSION } from '../version.js';
 
 const CHECKPOINT_KIND = 'actions-warden-org-scan';
-const CHECKPOINT_SCHEMA_VERSION = '1.0';
+const CHECKPOINT_SCHEMA_VERSION = '1.1';
+const LEGACY_CHECKPOINT_SCHEMA_VERSION = '1.0';
+const FIRST_ANALYSIS_GENERATION_TOOL_VERSION = '0.3.0';
+const TOOL_VERSION_RE = /^\d+\.\d+\.\d+$/;
+// Increment this whenever organization discovery, parsing, finding identity,
+// rule evaluation, or persisted result semantics can change. Package releases
+// that leave those behaviors compatible must keep the generation unchanged.
+export const ORGANIZATION_ANALYSIS_GENERATION = 1;
 export const MAX_ORGANIZATION_CHECKPOINT_BYTES = 256 * 1024 * 1024;
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const SHA_RE = /^[0-9a-f]{40}$/i;
@@ -41,7 +48,7 @@ export function createOrganizationCheckpointIdentity({
   baselineData,
 }) {
   return {
-    toolVersion: VERSION,
+    analysisGeneration: ORGANIZATION_ANALYSIS_GENERATION,
     rulesHash: RULES_HASH,
     organization: organization.toLowerCase(),
     scope: {
@@ -66,6 +73,42 @@ export function createOrganizationCheckpointIdentity({
   };
 }
 
+/**
+ * Create the stable key used by automatic agent artifacts.
+ *
+ * Generation 1 deliberately retains the exact identity serialization used by
+ * v0.3.0 so existing automatic checkpoints remain discoverable after an
+ * upgrade. Later generations use the version-independent compatibility
+ * identity directly.
+ */
+export function createOrganizationCheckpointArtifactKey(identity) {
+  const compatibleIdentity = identity.analysisGeneration === 1
+    ? {
+        toolVersion: FIRST_ANALYSIS_GENERATION_TOOL_VERSION,
+        rulesHash: identity.rulesHash,
+        organization: identity.organization,
+        scope: {
+          repositories: identity.scope.repositories,
+          visibility: identity.scope.visibility,
+          includeArchived: identity.scope.includeArchived,
+          includeDisabled: identity.scope.includeDisabled,
+          includeForks: identity.scope.includeForks,
+          maxRepositories: identity.scope.maxRepositories,
+          severity: identity.scope.severity,
+          explain: identity.scope.explain,
+        },
+        configHash: identity.configHash,
+        baselineHash: identity.baselineHash,
+      }
+    : identity;
+  return createHash('sha256')
+    .update(identity.analysisGeneration === 1
+      ? JSON.stringify(compatibleIdentity)
+      : stableStringify(compatibleIdentity))
+    .digest('hex')
+    .slice(0, 32);
+}
+
 export async function loadOrganizationCheckpoint({ path, cwd, identity }) {
   const resolvedPath = await resolveRepositoryFile(path, cwd);
   const metadata = await stat(resolvedPath);
@@ -83,13 +126,21 @@ export async function loadOrganizationCheckpoint({ path, cwd, identity }) {
     if (error instanceof SyntaxError) throw new Error('organization checkpoint is not valid JSON');
     throw error;
   }
-  if (!isRecord(checkpoint) || checkpoint.schemaVersion !== CHECKPOINT_SCHEMA_VERSION) {
-    throw new Error(`organization checkpoint schemaVersion must be "${CHECKPOINT_SCHEMA_VERSION}"`);
+  if (
+    !isRecord(checkpoint)
+    || ![CHECKPOINT_SCHEMA_VERSION, LEGACY_CHECKPOINT_SCHEMA_VERSION]
+      .includes(checkpoint.schemaVersion)
+  ) {
+    throw new Error(
+      `organization checkpoint schemaVersion must be "${CHECKPOINT_SCHEMA_VERSION}"`
+      + ` or "${LEGACY_CHECKPOINT_SCHEMA_VERSION}"`,
+    );
   }
   if (checkpoint.kind !== CHECKPOINT_KIND) {
     throw new Error('file is not an actions-warden organization checkpoint');
   }
-  validateIdentity(checkpoint.identity, identity);
+  const storedIdentity = normalizeCheckpointIdentity(checkpoint);
+  validateIdentity(storedIdentity, identity);
   if (!Array.isArray(checkpoint.repositories)) {
     throw new Error('organization checkpoint repositories must be an array');
   }
@@ -101,7 +152,12 @@ export async function loadOrganizationCheckpoint({ path, cwd, identity }) {
     if (results.has(key)) throw new Error(`duplicate checkpoint repository: ${result.repository}`);
     results.set(key, result);
   }
-  return { path: resolvedPath, results };
+  return {
+    path: resolvedPath,
+    results,
+    migrationRequired: checkpoint.schemaVersion !== CHECKPOINT_SCHEMA_VERSION
+      || checkpoint.toolVersion !== VERSION,
+  };
 }
 
 export async function validateOrganizationCheckpointPath({ path, cwd }) {
@@ -120,6 +176,7 @@ export async function writeOrganizationCheckpoint({
   const content = `${JSON.stringify(redactDeep({
     schemaVersion: CHECKPOINT_SCHEMA_VERSION,
     kind: CHECKPOINT_KIND,
+    toolVersion: VERSION,
     identity,
     repositories,
   }), null, 2)}\n`;
@@ -188,7 +245,7 @@ function serializeCheckpointResult(result, cwd) {
 function validateIdentity(actual, expected) {
   if (!isRecord(actual)) throw new Error('organization checkpoint identity is invalid');
   for (const field of [
-    'toolVersion',
+    'analysisGeneration',
     'rulesHash',
     'organization',
     'scope',
@@ -199,6 +256,32 @@ function validateIdentity(actual, expected) {
       throw new Error(`organization checkpoint does not match current ${field}`);
     }
   }
+}
+
+function normalizeCheckpointIdentity(checkpoint) {
+  if (!isRecord(checkpoint.identity)) {
+    throw new Error('organization checkpoint identity is invalid');
+  }
+  if (checkpoint.schemaVersion === CHECKPOINT_SCHEMA_VERSION) {
+    if (typeof checkpoint.toolVersion !== 'string' || !TOOL_VERSION_RE.test(checkpoint.toolVersion)) {
+      throw new Error('organization checkpoint toolVersion is invalid');
+    }
+    return checkpoint.identity;
+  }
+  if (checkpoint.identity.toolVersion !== FIRST_ANALYSIS_GENERATION_TOOL_VERSION) {
+    throw new Error(
+      `organization checkpoint toolVersion ${String(checkpoint.identity.toolVersion)}`
+      + ' has no compatible analysis generation',
+    );
+  }
+  return {
+    analysisGeneration: 1,
+    rulesHash: checkpoint.identity.rulesHash,
+    organization: checkpoint.identity.organization,
+    scope: checkpoint.identity.scope,
+    configHash: checkpoint.identity.configHash,
+    baselineHash: checkpoint.identity.baselineHash,
+  };
 }
 
 function validateCheckpointResult(value, identity) {

@@ -1,6 +1,6 @@
 {
   "name": "actions-warden",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Audit GitHub Actions across repositories and organizations; pin, verify, and upgrade dependencies.",
   "author": "Naveen Yagati",
   "homepage": "https://github.com/chiz0me/actions-warden#readme",

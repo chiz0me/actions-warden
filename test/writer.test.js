@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeFileGuarded, assertSafePath } from '../src/lib/writer.js';
@@ -40,6 +40,15 @@ describe('writeFileGuarded', () => {
     })).rejects.toThrow(/symlink/);
     expect(await readFile(target, 'utf8')).toBe('original');
     await rm(outside, { recursive: true, force: true });
+  });
+
+  it('refuses to replace a directory, including during dry-run validation', async () => {
+    await mkdir(join(dir, 'reports'));
+    await expect(writeFileGuarded({
+      path: 'reports',
+      content: 'changed',
+      cwd: dir,
+    })).rejects.toThrow(/non-file/);
   });
 });
 

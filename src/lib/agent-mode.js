@@ -6,13 +6,15 @@
  * derived from the same identity used to validate resumable checkpoints.
  */
 
-import { createHash } from 'node:crypto';
 import { lstat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { loadBaseline } from './baseline.js';
 import { loadConfig } from './config.js';
 import { format } from './formatter.js';
-import { createOrganizationCheckpointIdentity } from './org-checkpoint.js';
+import {
+  createOrganizationCheckpointArtifactKey,
+  createOrganizationCheckpointIdentity,
+} from './org-checkpoint.js';
 import { RULES } from '../rules/index.js';
 
 export const AGENT_MODE_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_MODE';
@@ -99,10 +101,7 @@ export async function createOrganizationAgentArtifacts({
     config,
     baselineData,
   });
-  const key = createHash('sha256')
-    .update(JSON.stringify(identity))
-    .digest('hex')
-    .slice(0, 32);
+  const key = createOrganizationCheckpointArtifactKey(identity);
   const groupedKey = key.match(/.{8}/g).join('.');
   const checkpointPath = `.actions-warden-agent.${groupedKey}.checkpoint.json`;
   const reportExtension = REPORT_EXTENSIONS[reportFormat];

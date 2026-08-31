@@ -103,6 +103,55 @@ describe('GitHub organization source discovery', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it('forwards the same bearer token through repository, tree, and blob requests', async () => {
+    const token = 'authenticated-test-token';
+    const workflow = 'on: push\npermissions: {}\njobs: {}\n';
+    const workflowSha = 'a'.repeat(40);
+    const treeSha = 'b'.repeat(40);
+    vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+      expect(options.headers.authorization).toBe(`Bearer ${token}`);
+      const value = String(url);
+      if (value.includes('/orgs/octo-org/repos?')) {
+        return jsonResponse([repository('app')]);
+      }
+      if (value.includes('/git/trees/')) {
+        return jsonResponse({
+          sha: treeSha,
+          truncated: false,
+          tree: [blob('.github/workflows/ci.yml', workflowSha, workflow)],
+        });
+      }
+      if (value.endsWith(`/git/blobs/${workflowSha}`)) {
+        return blobResponse(workflow, workflowSha);
+      }
+      return jsonResponse({}, 404);
+    }));
+
+    const [discovered] = await listOrganizationRepositories({
+      organization: 'octo-org',
+      token,
+      cwd,
+    });
+    const workflowTree = await fetchRepositoryWorkflowTree({
+      repository: discovered,
+      token,
+      cwd,
+    });
+    const result = await fetchRepositoryWorkflows({
+      repository: discovered,
+      token,
+      cwd,
+      workflowTree,
+    });
+
+    expect(result.sources).toHaveLength(1);
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      expect.stringContaining('/orgs/octo-org/repos?'),
+      expect.stringContaining('/repos/octo-org/app/git/trees/main'),
+      expect.stringContaining(`/repos/octo-org/app/git/blobs/${workflowSha}`),
+    ]);
+  });
+
   it('fails closed on a truncated repository tree', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
       sha: 'a'.repeat(40),

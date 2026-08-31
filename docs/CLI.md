@@ -21,7 +21,7 @@ actions-warden --version
 For reproducible one-off automation, invoke an exact package version:
 
 ```sh
-npx --yes actions-warden@0.3.0 audit
+npx --yes actions-warden@0.4.0 audit
 ```
 
 Network-backed commands resolve credentials in this order:
@@ -38,16 +38,20 @@ metadata and contents read access needed for the requested scope.
 ## Target and output options
 
 The repository commands (`audit`, `pin`, `verify`, `upgrade`, and `report`)
-share these options:
+share these target and output options:
 
 | option | default | behavior |
 |---|---|---|
 | `-w, --workflow <pattern...>` | discovery | One or more files, directories, or globs |
 | `--cwd <dir>` | current directory | Repository and path-safety root |
-| `--token <token>` | environment | GitHub API credential for network-backed work |
 | `--format <format>` | `toon` | `toon`, `json`, `text`, or `sarif` |
 | `--output <destination>` | `stdout` | `stdout` or `file` |
-| `--output-path <path>` | none | Required with `--output=file`; resolved inside `--cwd` |
+| `--output-path <path>` | none | Report path inside `--cwd`; implies `--output=file` |
+
+`pin`, `verify`, `upgrade`, and online `report` also accept `--token`. `audit`
+is entirely local and does not accept a token. `report --offline` rejects an
+explicit token, mode, or cooldown because those options would otherwise be
+silently unused.
 
 Without `--workflow`, actions-warden discovers:
 
@@ -72,19 +76,28 @@ actions-warden audit --cwd ../service
 ```
 
 Output files are created atomically and must remain within the real working
-directory after symlinks are resolved:
+directory after symlinks are resolved. Their parent directory must already
+exist. `--output=file` without a path and an explicit
+`--output=stdout --output-path=...` are invocation errors. Report, baseline,
+and checkpoint destinations are preflighted before network or mutation work;
+they cannot be directories, symlinks, selected workflows, default workflow
+discovery paths, or the reserved `.actions-warden.yml` and
+`.actions-warden.yaml` policy paths. Active configuration and baseline paths
+are checked again before any report or baseline destination is written.
 
 ```sh
 actions-warden audit \
   --format=sarif \
-  --output=file \
   --output-path=reports/actions-warden.sarif
 ```
+
+`--output=file --output-path=...` remains valid when an explicit destination
+is clearer in automation.
 
 ## `audit`
 
 Scan local workflows and composite actions without making network calls or
-changing files.
+changing workflows. It writes only an explicitly requested report or baseline.
 
 ```sh
 actions-warden audit \
@@ -105,8 +118,10 @@ actions-warden audit \
   --create-baseline=.actions-warden-baseline.json
 ```
 
-`--create-baseline` cannot be combined with `--baseline`. Parser failures are
-never written into the baseline. See [configuration and baselines](./CONFIGURATION.md).
+`--create-baseline` cannot be combined with `--baseline`, cannot share the
+report output path, and is validated before the audit begins. Parser failures
+are never written into the baseline. See
+[configuration and baselines](./CONFIGURATION.md).
 
 Exit code `0` means no unsuppressed findings; `1` means findings were reported;
 `2` means the scan could not be invoked safely or correctly.
@@ -141,7 +156,9 @@ or one exact stable ID:
 actions-warden pin --fix=18b82e86d7c14fe2 --write
 ```
 
-`--write` and `--dry-run` together are rejected.
+`--write` and `--dry-run` together are rejected. `--fix` must be one exact
+16-character hexadecimal ID from a current plan; uppercase input is normalized
+for convenience.
 
 ## `verify`
 
@@ -176,7 +193,9 @@ Defaults are `--mode=minor --min-age=7` and dry-run. Tag discovery is paginated;
 prereleases and downgrades are excluded. A candidate tag must be older than the
 cooldown. The age comes from GitHub release publication data when available,
 then from locally recorded first-seen evidence for the exact tag-to-SHA mapping.
-Missing evidence fails closed.
+Missing evidence fails closed. `--min-age` accepts only a non-negative integer;
+values such as `7days`, `1.5`, and values outside JavaScript's safe integer
+range are rejected rather than truncated.
 
 SHA-pinned references need `actions-warden-ref` metadata to establish the
 current semantic version. Legacy plain-semver comments remain readable.
@@ -207,7 +226,8 @@ actions-warden report \
 The audit determines the target set; pin and upgrade use exactly that same
 scope. A location with an upgrade is not duplicated as a pin proposal.
 `--offline` skips both network-backed planning phases and returns only the
-local audit.
+local audit. Because they cannot affect an offline report, explicitly combining
+`--offline` with `--token`, `--mode`, or `--min-age` is rejected.
 
 Use report for review, issue generation, or an AI planning step. It never
 accepts `--write`.
@@ -244,7 +264,9 @@ Defaults:
 
 Repository patterns match either `name` or `owner/name`, case-insensitively.
 An explicit pattern set that matches no eligible repository is an error.
-Selection is stable before `--max-repos` is applied.
+Selection is stable before `--max-repos` is applied. `--max-repos` must be a
+positive safe integer, and `--concurrency` must be an integer from 1 through
+16; malformed, fractional, or imprecise values fail before any API request.
 
 ```sh
 actions-warden org-scan my-org \
@@ -287,8 +309,9 @@ When the corresponding options were not explicitly supplied, agent mode sets:
 
 The artifact key includes the organization, repository filters, inclusion
 flags, repository limit, severity, explanation setting, normalized policy,
-baseline contents, package version, and rule catalog. A scope or security
-control change therefore selects a different checkpoint rather than
+baseline contents, analysis generation, and rule catalog. A compatible package
+upgrade therefore keeps the same paths, while a scope, security-control, or
+analysis-behavior change selects a different checkpoint rather than
 overwriting incompatible state. Generated paths have these shapes:
 
 ```text
@@ -321,7 +344,8 @@ an invocation error. Explicit `--format`, `--output`, `--output-path`,
 `--progress`, `--checkpoint`, and `--resume` choices override agent defaults.
 With explicit `--output=stdout`, stdout is the complete selected report and no
 receipt is added. Use `--no-agent-mode` to override an inherited environment
-marker. `ACTIONS_WARDEN_MODE` must be exactly `agent` when set.
+marker. Passing both agent-mode flags is rejected. `ACTIONS_WARDEN_MODE` must
+be exactly `agent` when set.
 
 ### Progress and resume
 
@@ -345,8 +369,8 @@ actions-warden org-scan my-org \
 ```
 
 Resume with the same organization, filters, inclusion flags, repository limit,
-severity, explanation setting, configuration, baseline, tool version, and rule
-catalog:
+severity, explanation setting, configuration, baseline, analysis generation,
+and rule catalog:
 
 ```sh
 actions-warden org-scan my-org \
@@ -358,11 +382,18 @@ actions-warden org-scan my-org \
 ```
 
 The token, concurrency, output format, progress mode, and report destination do
-not affect checkpoint compatibility. A resumed scan always lists repositories
-again and fetches a fresh default-branch tree for each selected repository.
-An error-free result is reused only when repository identity, default branch,
-and tree SHA still match. Changed repositories and any checkpointed result with
-an operational error are scanned again.
+not affect checkpoint compatibility. Neither does a package-version-only
+upgrade: the producing version is retained as checkpoint metadata, and a
+compatible older checkpoint is rewritten atomically on its first successful
+resume. The
+explicit analysis generation is advanced when discovery, parsing, finding
+identity, rule evaluation, or persisted result behavior changes. An
+incompatible generation fails closed; automatic agent mode selects a new keyed
+path. A resumed scan always lists repositories again and fetches a fresh
+default-branch tree for each selected repository. An error-free result is
+reused only when repository identity, default branch, and tree SHA still match.
+Changed repositories and any checkpointed result with an operational error are
+scanned again.
 
 `--checkpoint` starts a new checkpoint and replaces an existing file at that
 path. `--resume` requires a valid existing checkpoint and updates it. The
@@ -372,6 +403,11 @@ baseline. Checkpoints contain redacted report evidence and revision metadata,
 not the token or raw YAML, but can still reveal private repository names,
 paths, findings, and security posture; protect and retain them accordingly.
 Checkpoint reads and writes are capped at 256 MiB.
+
+Version-only upgrades no longer create extra agent artifacts. When an analysis
+generation intentionally changes, the older keyed report and checkpoint are
+retained rather than deleted automatically because they may be needed as audit
+evidence; remove them according to the consuming repository's retention policy.
 
 The scanner reads the default-branch Git tree and YAML blobs in memory. It
 never clones, checks out, or executes remote content. It fails closed on
@@ -397,6 +433,23 @@ actions-warden rules --format=json
 ```
 
 This command has no repository or network dependency.
+
+## Exit status and invocation errors
+
+Every command uses the same process contract:
+
+- `0`: completed with status `OK`, or displayed help/version information;
+- `1`: completed with a structured `FAIL` result, such as findings or
+  operational errors;
+- `2`: could not start or complete safely because the command line, paths,
+  configuration, inputs, or environment were invalid.
+
+Commander-level failures such as unknown flags, missing values, invalid
+choices, conflicts, excess arguments, and a missing command also return `2`.
+Argument parsing and destination preflight run before network requests and
+before authorized workflow writes; active-control collisions are checked again
+before output. On exit `2`, treat stderr as the error channel and do not assume
+stdout contains a complete structured result.
 
 ## Cache and network behavior
 

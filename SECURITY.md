@@ -12,7 +12,7 @@ Please include:
 
 - A clear description of the issue.
 - A minimal reproduction (workflow YAML, command line, expected vs. actual).
-- The version of `actions-warden` (`npx --yes actions-warden@0.3.0 --version`).
+- The version of `actions-warden` (`npx --yes actions-warden@0.4.0 --version`).
 - Any disclosure constraints on your side.
 
 We aim to acknowledge within **3 business days** and to ship a fix or a
@@ -50,16 +50,21 @@ Out of scope:
   install dependencies in consumer workflows.
 - Repository policy and baseline files should be protected with CODEOWNERS or
   branch rules; changes to them can intentionally alter which findings fail CI.
+- CLI report, baseline, and checkpoint destinations are guarded and preflighted;
+  they cannot replace selected/default-discovery workflows or reserved policy
+  paths, and active control-file collisions are rejected before output writes.
 - Parser failures are operational errors and cannot be suppressed by a finding
   baseline.
 - Organization scans read count- and size-bounded Git blobs in memory and never
   clone, check out, or execute code from scanned repositories. Truncated trees,
   exceeded limits, and unreadable blobs are operational errors.
 - Organization checkpoints are opt-in, guarded atomic writes. They omit tokens
-  and raw workflow YAML, validate tool/rule/scope/policy identity, and reuse an
-  error-free result only after a fresh repository/default-branch tree-SHA
-  match. They still contain redacted repository and finding evidence and should
-  be protected like organization reports.
+  and raw workflow YAML, validate analysis-generation/rule/scope/policy
+  identity, and reuse an error-free result only after a fresh
+  repository/default-branch tree-SHA match. The producing package version is
+  metadata rather than a compatibility boundary. They still contain redacted
+  repository and finding evidence and should be protected like organization
+  reports.
 - Explicit CLI agent mode creates scope-keyed report and checkpoint files with
   the same guarded writer and `0600` creation mode. Its stdout receipt contains
   only paths and bounded counts; the artifact files remain sensitive.

@@ -47,8 +47,10 @@ The CLI maps results to process codes:
 | `1` | Semantic status `FAIL`; inspect the emitted report |
 | `2` | Invalid arguments, invalid policy, unsafe paths, or another invocation-level failure |
 
-An invocation-level failure is written to stderr as `error: <message>`. It may
-occur before a structured payload can be rendered, so do not assume stdout
+An invocation-level failure is written to stderr as `error: <message>`. Unknown
+options, missing values, invalid choices, conflicting flags, malformed numeric
+values, unsafe destinations, and a missing command all return `2`. The failure
+may occur before a structured payload can be rendered, so do not assume stdout
 contains JSON when the process exits `2`.
 
 Organization-scan live progress is also a stderr-only channel. It never becomes
@@ -119,15 +121,18 @@ node -e '
 '
 ```
 
-Writing reports through `--output=file` is safer than shell redirection when
-repository path containment matters:
+Writing reports through a guarded output path is safer than shell redirection
+when repository path containment matters. `--output-path` implies file output:
 
 ```sh
 actions-warden audit \
   --format=json \
-  --output=file \
   --output-path=reports/actions-warden.json
 ```
+
+The parent directory must exist. Destination safety is checked before command
+work, then active policy and baseline collisions are checked again before the
+report is written. Explicit `--output=stdout --output-path=...` is rejected.
 
 ## TOON
 

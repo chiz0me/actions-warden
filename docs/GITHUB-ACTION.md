@@ -182,7 +182,9 @@ emission.
     if-no-files-found: error
 ```
 
-The output path must remain inside `working-directory`.
+The output path must remain inside `working-directory`, its parent directory
+must already exist, and an existing destination must be a regular file rather
+than a directory or symlink.
 
 ## Organization report
 
@@ -249,12 +251,14 @@ those inputs directly when an agent generates a workflow.
 the working directory before the actions-warden step, remove
 `checkpoint-path`, and set `resume-from` to the restored path. The Action does
 not itself retain files between ephemeral runners; use a protected artifact or
-other caller-managed storage. Scope, policy, baseline, package, and rule
-identity must match. Fresh repository discovery and tree checks still occur,
-and changed or previously failed repositories are rescanned. Checkpoints hold
-redacted report evidence about repositories and findings, so protect them like
-the organization report. `checkpoint-path` and `resume-from` are mutually
-exclusive and cannot equal `output-path`.
+other caller-managed storage. Scope, policy, baseline, analysis generation, and
+rule identity must match; a compatible package-version change is allowed and
+atomically refreshes checkpoint metadata on the first successful resume. Fresh
+repository discovery and tree checks still occur, and changed or previously
+failed repositories are rescanned. Checkpoints hold redacted report evidence
+about repositories and findings, so protect them like the organization report.
+`checkpoint-path` and `resume-from` are mutually exclusive and cannot equal
+`output-path`.
 
 ## Mutation workflows
 

@@ -6,6 +6,8 @@ import {
   renderOrganizationScan,
   scanOrganization,
 } from '../src/commands/org-scan.js';
+import { ORGANIZATION_ANALYSIS_GENERATION } from '../src/lib/org-checkpoint.js';
+import { VERSION } from '../src/version.js';
 
 describe('organization scan command', () => {
   let cwd;
@@ -117,6 +119,23 @@ describe('organization scan command', () => {
       .toBe('octo-org/app/.github/workflows/ci.yml');
   });
 
+  it('forwards one resolved token through organization, tree, and blob requests', async () => {
+    const token = 'org-scan-test-token';
+    vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+      expect(options.headers.authorization).toBe(`Bearer ${token}`);
+      const value = String(url);
+      if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
+      if (value.includes('/git/trees/')) return treeResponse(treeSha, workflowSha, workflow);
+      if (value.endsWith(`/git/blobs/${workflowSha}`)) return blobResponse(workflowSha, workflow);
+      return response({}, 404);
+    }));
+
+    const result = await scanOrganization({ organization: 'octo-org', cwd, token });
+
+    expect(result.repositories).toHaveLength(1);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
   it('continues after an inaccessible repository and reports an operational failure', async () => {
     vi.stubGlobal('fetch', vi.fn(async url => {
       const value = String(url);
@@ -204,9 +223,14 @@ describe('organization scan command', () => {
     const checkpointSource = await readFile(join(cwd, checkpointPath), 'utf8');
     const checkpoint = JSON.parse(checkpointSource);
     expect(checkpoint).toMatchObject({
-      schemaVersion: '1.0',
+      schemaVersion: '1.1',
       kind: 'actions-warden-org-scan',
+      toolVersion: VERSION,
+      identity: {
+        analysisGeneration: ORGANIZATION_ANALYSIS_GENERATION,
+      },
     });
+    expect(checkpoint.identity).not.toHaveProperty('toolVersion');
     expect(checkpoint.repositories).toHaveLength(1);
     expect(checkpointSource).not.toContain(token);
     expect(checkpointSource).not.toContain(workflow);
@@ -241,6 +265,114 @@ describe('organization scan command', () => {
       }),
       expect.objectContaining({ type: 'scan-completed', reused: 1 }),
     ]));
+  });
+
+  it('resumes across compatible package versions and refreshes producer metadata', async () => {
+    const checkpointPath = 'scan-checkpoint.json';
+    vi.stubGlobal('fetch', organizationFetch({ treeSha, workflowSha, workflow }));
+    await scanOrganization({ organization: 'octo-org', cwd, checkpointPath });
+
+    const checkpoint = JSON.parse(await readFile(join(cwd, checkpointPath), 'utf8'));
+    checkpoint.toolVersion = '0.3.1';
+    await writeFile(join(cwd, checkpointPath), `${JSON.stringify(checkpoint)}\n`);
+    vi.stubGlobal('fetch', vi.fn(async url => {
+      const value = String(url);
+      if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
+      if (value.includes('/git/trees/')) return treeResponse(treeSha, workflowSha, workflow);
+      return response({}, 500);
+    }));
+
+    const result = await scanOrganization({
+      organization: 'octo-org',
+      cwd,
+      checkpointPath,
+      resume: true,
+    });
+
+    expect(result.status).toBe('FAIL');
+    expect(result.findings).toHaveLength(1);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const migrated = JSON.parse(await readFile(join(cwd, checkpointPath), 'utf8'));
+    expect(migrated).toMatchObject({
+      schemaVersion: '1.1',
+      toolVersion: VERSION,
+      identity: { analysisGeneration: ORGANIZATION_ANALYSIS_GENERATION },
+    });
+  });
+
+  it('atomically migrates a compatible v0.3.0 checkpoint before reusing it', async () => {
+    const checkpointPath = 'scan-checkpoint.json';
+    vi.stubGlobal('fetch', organizationFetch({ treeSha, workflowSha, workflow }));
+    await scanOrganization({ organization: 'octo-org', cwd, checkpointPath });
+
+    const current = JSON.parse(await readFile(join(cwd, checkpointPath), 'utf8'));
+    await writeFile(
+      join(cwd, checkpointPath),
+      `${JSON.stringify(asLegacyCheckpoint(current))}\n`,
+    );
+    vi.stubGlobal('fetch', vi.fn(async url => {
+      const value = String(url);
+      if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
+      if (value.includes('/git/trees/')) return treeResponse(treeSha, workflowSha, workflow);
+      return response({}, 500);
+    }));
+
+    const result = await scanOrganization({
+      organization: 'octo-org',
+      cwd,
+      checkpointPath,
+      resume: true,
+    });
+
+    expect(result.findings).toHaveLength(1);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const migrated = JSON.parse(await readFile(join(cwd, checkpointPath), 'utf8'));
+    expect(migrated).toMatchObject({
+      schemaVersion: '1.1',
+      toolVersion: VERSION,
+      identity: { analysisGeneration: ORGANIZATION_ANALYSIS_GENERATION },
+    });
+    expect(migrated.identity).not.toHaveProperty('toolVersion');
+  });
+
+  it('rejects a legacy checkpoint without a known analysis-generation mapping', async () => {
+    const checkpointPath = 'scan-checkpoint.json';
+    vi.stubGlobal('fetch', organizationFetch({ treeSha, workflowSha, workflow }));
+    await scanOrganization({ organization: 'octo-org', cwd, checkpointPath });
+
+    const current = JSON.parse(await readFile(join(cwd, checkpointPath), 'utf8'));
+    await writeFile(
+      join(cwd, checkpointPath),
+      `${JSON.stringify(asLegacyCheckpoint(current, '0.2.0'))}\n`,
+    );
+    vi.stubGlobal('fetch', vi.fn());
+
+    await expect(scanOrganization({
+      organization: 'octo-org',
+      cwd,
+      checkpointPath,
+      resume: true,
+    })).rejects.toThrow(/has no compatible analysis generation/);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects checkpoints from an incompatible analysis generation before discovery', async () => {
+    const checkpointPath = 'scan-checkpoint.json';
+    vi.stubGlobal('fetch', organizationFetch({ treeSha, workflowSha, workflow }));
+    await scanOrganization({ organization: 'octo-org', cwd, checkpointPath });
+
+    const checkpoint = JSON.parse(await readFile(join(cwd, checkpointPath), 'utf8'));
+    checkpoint.identity.analysisGeneration += 1;
+    await writeFile(join(cwd, checkpointPath), `${JSON.stringify(checkpoint)}\n`);
+    vi.stubGlobal('fetch', vi.fn());
+
+    await expect(scanOrganization({
+      organization: 'octo-org',
+      cwd,
+      checkpointPath,
+      resume: true,
+    })).rejects.toThrow(/does not match current analysisGeneration/);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it('rescans a checkpointed repository when its default-branch tree changes', async () => {
@@ -506,4 +638,20 @@ function organizationFetch({ treeSha: revision, workflowSha: blobSha, workflow: 
     if (value.endsWith(`/git/blobs/${blobSha}`)) return blobResponse(blobSha, source);
     return response({}, 404);
   });
+}
+
+function asLegacyCheckpoint(checkpoint, toolVersion = '0.3.0') {
+  return {
+    schemaVersion: '1.0',
+    kind: checkpoint.kind,
+    identity: {
+      toolVersion,
+      rulesHash: checkpoint.identity.rulesHash,
+      organization: checkpoint.identity.organization,
+      scope: checkpoint.identity.scope,
+      configHash: checkpoint.identity.configHash,
+      baselineHash: checkpoint.identity.baselineHash,
+    },
+    repositories: checkpoint.repositories,
+  };
 }

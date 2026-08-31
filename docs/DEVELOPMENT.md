@@ -81,6 +81,7 @@ src/
   lib/
     parser.js               YAML-to-normalized-workflow model
     targets.js, paths.js    repository target discovery
+    path-equality.js        real-path destination/control comparisons
     config.js, baseline.js  policy and accepted-finding controls
     resolver.js, cache.js   GitHub API, caching, ref and ownership checks
     github-org.js           read-only organization/tree/blob access
@@ -139,11 +140,17 @@ Changes must preserve these boundaries:
 
 - `pin` and `upgrade` default to dry-run at the command and API layers.
 - CLI and Action mutation require an explicit write option.
+- CLI integers and 16-hex change IDs use strict whole-value parsing. Commander
+  usage failures and application-level invocation failures both exit `2`.
 - A resolver failure must not fall back to a guessed tag or SHA.
 - Commits must be verified as belonging to the referenced repository.
 - Workflow rewrites operate on parsed scalar ranges and reparse before write.
 - Writes and configured paths remain inside the real repository root.
 - Symlink escapes and explicit targets that match nothing fail.
+- CLI report, baseline, and checkpoint destinations are preflighted before
+  network or workflow mutation, cannot replace selected/default-discovery
+  workflows or reserved policy paths, and are checked against active controls
+  again before output is written.
 - Credentials are redacted in JSON, TOON, text, SARIF, annotations, and
   top-level errors.
 - Finding and change IDs exclude absolute checkout paths.
@@ -154,14 +161,19 @@ Changes must preserve these boundaries:
 - Organization resume never trusts a stale result without fresh discovery and
   a matching repository identity, default branch, and tree SHA. Failed results
   are never reused.
+- Organization result compatibility is controlled by
+  `ORGANIZATION_ANALYSIS_GENERATION`, not by the package version. Producer
+  versions remain checkpoint metadata and compatible checkpoints migrate
+  through the guarded atomic writer.
 - Checkpoints use guarded atomic writes, remain inside the working directory,
   omit tokens and raw YAML, and cannot replace active policy or baseline files.
 - Progress stays outside deterministic report serialization; CLI progress is
   stderr-only and Action progress cannot form workflow commands.
 - Agent mode is an explicit opt-in, never a TTY, parent-process, CI, or
   vendor-environment heuristic. Explicit CLI output and progress options win.
-  Its automatic artifact key uses the validated checkpoint identity, and its
-  stdout receipt never includes findings or repository result arrays.
+  Its automatic artifact key uses the validated checkpoint compatibility
+  identity, and its stdout receipt never includes findings or repository result
+  arrays.
 - Attacker-controlled values cannot forge TOON lines or GitHub annotations.
 
 Tests should demonstrate the fail-closed behavior for any change touching these
@@ -275,6 +287,17 @@ checkpoint schema and identity mismatches, hostile fields, changed tree SHAs,
 previous repository errors, output equivalence, and concurrent completions.
 Persist each completed result before emitting its completion event so an
 observer failure or process interruption loses at most in-flight work.
+
+`ORGANIZATION_ANALYSIS_GENERATION` in `src/lib/org-checkpoint.js` is the manual
+semantic compatibility switch. Increment it whenever organization workflow
+selection, parsing, finding identity, rule evaluation, suppression, summaries,
+or other persisted repository-result semantics can change. Keep it unchanged
+for documentation, release metadata, progress rendering, authentication,
+concurrency, or internal refactors that preserve those results. The rule
+catalog hash independently invalidates catalog changes. A generation change
+must add tests proving the old checkpoint fails closed and agent mode selects a
+new artifact key; a compatible format migration must prove the old checkpoint
+is validated, rewritten atomically, and still subject to fresh tree checks.
 
 ## Output compatibility
 

@@ -88,6 +88,15 @@ found something. Parse and present the report.
 
 Exit code `2` is an invocation-level problem. Read stderr, do not assume stdout
 contains valid JSON, and do not retry by weakening policy or changing paths.
+Unknown options, conflicting flags, malformed numeric values, invalid change
+IDs, unsafe destinations, and a missing command all use this exit code. These
+checks happen before network requests or authorized workflow mutations whenever
+the required path information is available.
+
+When saving a report, `--output-path=<path>` is sufficient and implies file
+output. Do not combine it with explicit `--output=stdout`. Create the parent
+directory first, and never select a workflow, policy, baseline, or checkpoint
+path as the report destination.
 
 For an organization scan, report coverage before findings:
 
@@ -260,18 +269,25 @@ Agent mode is an explicit contract, not heuristic detection. By default it:
 - selects JSON and writes the full report to a guarded hidden file;
 - disables progress;
 - creates a guarded hidden checkpoint on the first run;
-- resumes that checkpoint on a later run with the exact same checkpoint
-  identity;
+- resumes that checkpoint on a later run with the same compatibility identity,
+  including across package-version-only upgrades;
 - emits only a bounded JSON receipt containing status, coverage summary,
   report path, report format, checkpoint path, and whether resume was used.
 
 The automatic artifact key covers the organization, repository filters,
 inclusion flags, repository limit, severity, explanation setting, normalized
-policy, baseline contents, tool version, and rule catalog. A changed scope or
-security control therefore receives a different path instead of replacing an
-incompatible checkpoint. The generated files begin
+policy, baseline contents, analysis generation, and rule catalog. A compatible
+package upgrade keeps the same path and atomically migrates older checkpoint
+metadata on the first successful resume. A changed scope, security control, or
+analysis behavior receives a different path instead of replacing an
+incompatible checkpoint.
+The generated files begin
 `.actions-warden-agent.`; protect them as sensitive report artifacts and add
 that pattern to the consuming repository's ignore rules when appropriate.
+
+Version-only upgrades do not accumulate new automatic artifacts. A deliberate
+analysis-generation change does retain the older keyed files as audit evidence;
+remove them only under the consuming repository's retention policy.
 
 Explicit CLI options take precedence over agent defaults. Use
 `--progress=always` when the user requests live progress. Use

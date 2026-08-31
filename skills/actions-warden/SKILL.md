@@ -33,27 +33,31 @@ Invoke `actions-warden` when the user:
 The package is on npm as `actions-warden`. Invoke the reviewed version exactly:
 
 ```sh
-npx --yes actions-warden@0.3.0 audit
-npx --yes actions-warden@0.3.0 audit --severity=high --explain
-npx --yes actions-warden@0.3.0 audit --create-baseline=.actions-warden-baseline.json
-npx --yes actions-warden@0.3.0 audit --baseline=.actions-warden-baseline.json
-npx --yes actions-warden@0.3.0 audit --format=sarif
-npx --yes actions-warden@0.3.0 pin
-npx --yes actions-warden@0.3.0 pin --write
-npx --yes actions-warden@0.3.0 upgrade --mode=minor
-npx --yes actions-warden@0.3.0 upgrade --min-age=14 --write
-npx --yes actions-warden@0.3.0 verify
-npx --yes actions-warden@0.3.0 report --offline
-npx --yes actions-warden@0.3.0 org-scan my-org --severity=high --format=json
-npx --yes actions-warden@0.3.0 org-scan my-org --severity=high --agent-mode
-npx --yes actions-warden@0.3.0 org-scan my-org --severity=high --checkpoint=.actions-warden-org-checkpoint.json
-npx --yes actions-warden@0.3.0 org-scan my-org --severity=high --resume=.actions-warden-org-checkpoint.json
-npx --yes actions-warden@0.3.0 rules
+npx --yes actions-warden@0.4.0 audit
+npx --yes actions-warden@0.4.0 audit --severity=high --explain
+npx --yes actions-warden@0.4.0 audit --create-baseline=.actions-warden-baseline.json
+npx --yes actions-warden@0.4.0 audit --baseline=.actions-warden-baseline.json
+npx --yes actions-warden@0.4.0 audit --format=sarif
+npx --yes actions-warden@0.4.0 pin
+npx --yes actions-warden@0.4.0 pin --write
+npx --yes actions-warden@0.4.0 upgrade --mode=minor
+npx --yes actions-warden@0.4.0 upgrade --min-age=14 --write
+npx --yes actions-warden@0.4.0 verify
+npx --yes actions-warden@0.4.0 report --offline
+npx --yes actions-warden@0.4.0 org-scan my-org --severity=high --format=json
+npx --yes actions-warden@0.4.0 org-scan my-org --severity=high --agent-mode
+npx --yes actions-warden@0.4.0 org-scan my-org --severity=high --checkpoint=.actions-warden-org-checkpoint.json
+npx --yes actions-warden@0.4.0 org-scan my-org --severity=high --resume=.actions-warden-org-checkpoint.json
+npx --yes actions-warden@0.4.0 rules
 ```
 
-Useful global flags: `--workflow <path-or-glob>` (repeatable), `--cwd <dir>`,
-`--format toon|json|text|sarif`, `--output stdout|file`, `--output-path <path>`,
-`--token <gh-token>` (also reads `GITHUB_TOKEN` / `GH_TOKEN`).
+Useful shared command flags: `--workflow <path-or-glob>` (repeatable),
+`--cwd <dir>`, `--format toon|json|text|sarif`, `--output stdout|file`, and
+`--output-path <path>`. An output path implies file output; never combine it
+with explicit `--output=stdout`, and create its parent directory first.
+Network-backed commands accept `--token <gh-token>` and also read
+`GITHUB_TOKEN` / `GH_TOKEN`; prefer the environment. Local `audit` does not
+accept or need a token.
 Audit, report, and org-scan also accept `--config <path>` and `--baseline <path>`.
 `.actions-warden.yml` is loaded automatically when present.
 Organization scans accept `--repository <glob...>`, `--visibility`,
@@ -69,7 +73,10 @@ precedence.
 Exit codes: `0` for a normal `OK` result, `1` for a normal structured `FAIL`
 result (findings or operational errors), and `2` for an invocation-level error.
 For code `1`, inspect the report. For code `2`, read stderr and do not assume
-stdout contains a complete structured payload.
+stdout contains a complete structured payload. Do not retry code `2` by
+guessing alternative flags: fix the named conflict, integer, ID, working
+directory, or destination. The CLI rejects those errors before network or
+authorized workflow mutation whenever the needed path information is known.
 
 ## What to do when invoked
 
@@ -124,7 +131,7 @@ stdout contains a complete structured payload.
    agent-initiated broad scan must use the explicit agent mode:
 
    ```sh
-   npx --yes actions-warden@0.3.0 org-scan my-org \
+   npx --yes actions-warden@0.4.0 org-scan my-org \
      --agent-mode
    ```
 
@@ -144,7 +151,9 @@ stdout contains a complete structured payload.
    inference tokens to plan, monitor, and summarize; output admitted to its
    context adds to that usage. Resume primarily saves GitHub API/blob work and
    elapsed time. A changed scope or security control receives a different
-   artifact key rather than overwriting an incompatible checkpoint.
+   artifact key rather than overwriting an incompatible checkpoint. Compatible
+   package upgrades retain the same key and resume state; an analysis-behavior
+   change receives a new key.
 
 ## Audit rules
 

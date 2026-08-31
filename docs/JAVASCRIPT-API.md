@@ -205,11 +205,13 @@ possible; failures that prevent organization discovery throw.
 `checkpointPath` explicitly enables atomic checkpoint writes inside `cwd`.
 Set `resume: true` to require, validate, and update an existing checkpoint at
 that path. The organization, selection and audit options, normalized policy,
-baseline contents, package version, and rule catalog must match. Concurrency
-and token changes are allowed. Resume performs fresh discovery and tree reads;
-it reuses only error-free results whose repository, default branch, and tree
-SHA remain unchanged. Checkpoints contain redacted report data and revision
-metadata, never tokens or raw YAML.
+baseline contents, analysis generation, and rule catalog must match.
+Concurrency, token, and compatible package-version changes are allowed. The
+producing package version remains metadata, and compatible older checkpoints
+are atomically migrated on the first successful resume. Resume performs fresh
+discovery and tree reads; it reuses only error-free results whose repository,
+default branch, and tree SHA remain unchanged. Checkpoints contain redacted
+report data and revision metadata, never tokens or raw YAML.
 
 `onProgress` may be synchronous or asynchronous and is awaited in event order
 at each emission point. A callback error rejects the scan; repository results

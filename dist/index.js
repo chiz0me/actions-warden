@@ -17910,6 +17910,9 @@ async function writeFileGuarded({ path, content, dryRun = true, cwd = process.cw
     if (entry.isSymbolicLink()) {
       throw new Error(`refusing to write through a symlink: ${path}`);
     }
+    if (!entry.isFile()) {
+      throw new Error(`refusing to replace a non-file path: ${path}`);
+    }
     existingMode = entry.mode & 0o777;
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
@@ -19487,7 +19490,7 @@ function validateRef(value) {
 ;// CONCATENATED MODULE: ./src/version.js
 // Runtime version embedded in the GitHub Action bundle. The version-sync check
 // keeps this value aligned with package.json, the lockfile, and plugin metadata.
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 
 ;// CONCATENATED MODULE: ./src/lib/org-checkpoint.js
 /**
@@ -19510,7 +19513,14 @@ const VERSION = '0.3.0';
 
 
 const CHECKPOINT_KIND = 'actions-warden-org-scan';
-const CHECKPOINT_SCHEMA_VERSION = '1.0';
+const CHECKPOINT_SCHEMA_VERSION = '1.1';
+const LEGACY_CHECKPOINT_SCHEMA_VERSION = '1.0';
+const FIRST_ANALYSIS_GENERATION_TOOL_VERSION = '0.3.0';
+const TOOL_VERSION_RE = /^\d+\.\d+\.\d+$/;
+// Increment this whenever organization discovery, parsing, finding identity,
+// rule evaluation, or persisted result semantics can change. Package releases
+// that leave those behaviors compatible must keep the generation unchanged.
+const ORGANIZATION_ANALYSIS_GENERATION = 1;
 const MAX_ORGANIZATION_CHECKPOINT_BYTES = 256 * 1024 * 1024;
 const org_checkpoint_NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const org_checkpoint_SHA_RE = /^[0-9a-f]{40}$/i;
@@ -19533,7 +19543,7 @@ function createOrganizationCheckpointIdentity({
   baselineData,
 }) {
   return {
-    toolVersion: VERSION,
+    analysisGeneration: ORGANIZATION_ANALYSIS_GENERATION,
     rulesHash: RULES_HASH,
     organization: organization.toLowerCase(),
     scope: {
@@ -19558,6 +19568,42 @@ function createOrganizationCheckpointIdentity({
   };
 }
 
+/**
+ * Create the stable key used by automatic agent artifacts.
+ *
+ * Generation 1 deliberately retains the exact identity serialization used by
+ * v0.3.0 so existing automatic checkpoints remain discoverable after an
+ * upgrade. Later generations use the version-independent compatibility
+ * identity directly.
+ */
+function createOrganizationCheckpointArtifactKey(identity) {
+  const compatibleIdentity = identity.analysisGeneration === 1
+    ? {
+        toolVersion: FIRST_ANALYSIS_GENERATION_TOOL_VERSION,
+        rulesHash: identity.rulesHash,
+        organization: identity.organization,
+        scope: {
+          repositories: identity.scope.repositories,
+          visibility: identity.scope.visibility,
+          includeArchived: identity.scope.includeArchived,
+          includeDisabled: identity.scope.includeDisabled,
+          includeForks: identity.scope.includeForks,
+          maxRepositories: identity.scope.maxRepositories,
+          severity: identity.scope.severity,
+          explain: identity.scope.explain,
+        },
+        configHash: identity.configHash,
+        baselineHash: identity.baselineHash,
+      }
+    : identity;
+  return createHash('sha256')
+    .update(identity.analysisGeneration === 1
+      ? JSON.stringify(compatibleIdentity)
+      : stableStringify(compatibleIdentity))
+    .digest('hex')
+    .slice(0, 32);
+}
+
 async function loadOrganizationCheckpoint({ path, cwd, identity }) {
   const resolvedPath = await resolveRepositoryFile(path, cwd);
   const metadata = await (0,promises_namespaceObject.stat)(resolvedPath);
@@ -19575,13 +19621,21 @@ async function loadOrganizationCheckpoint({ path, cwd, identity }) {
     if (error instanceof SyntaxError) throw new Error('organization checkpoint is not valid JSON');
     throw error;
   }
-  if (!org_checkpoint_isRecord(checkpoint) || checkpoint.schemaVersion !== CHECKPOINT_SCHEMA_VERSION) {
-    throw new Error(`organization checkpoint schemaVersion must be "${CHECKPOINT_SCHEMA_VERSION}"`);
+  if (
+    !org_checkpoint_isRecord(checkpoint)
+    || ![CHECKPOINT_SCHEMA_VERSION, LEGACY_CHECKPOINT_SCHEMA_VERSION]
+      .includes(checkpoint.schemaVersion)
+  ) {
+    throw new Error(
+      `organization checkpoint schemaVersion must be "${CHECKPOINT_SCHEMA_VERSION}"`
+      + ` or "${LEGACY_CHECKPOINT_SCHEMA_VERSION}"`,
+    );
   }
   if (checkpoint.kind !== CHECKPOINT_KIND) {
     throw new Error('file is not an actions-warden organization checkpoint');
   }
-  validateIdentity(checkpoint.identity, identity);
+  const storedIdentity = normalizeCheckpointIdentity(checkpoint);
+  validateIdentity(storedIdentity, identity);
   if (!Array.isArray(checkpoint.repositories)) {
     throw new Error('organization checkpoint repositories must be an array');
   }
@@ -19593,7 +19647,12 @@ async function loadOrganizationCheckpoint({ path, cwd, identity }) {
     if (results.has(key)) throw new Error(`duplicate checkpoint repository: ${result.repository}`);
     results.set(key, result);
   }
-  return { path: resolvedPath, results };
+  return {
+    path: resolvedPath,
+    results,
+    migrationRequired: checkpoint.schemaVersion !== CHECKPOINT_SCHEMA_VERSION
+      || checkpoint.toolVersion !== VERSION,
+  };
 }
 
 async function validateOrganizationCheckpointPath({ path, cwd }) {
@@ -19612,6 +19671,7 @@ async function writeOrganizationCheckpoint({
   const content = `${JSON.stringify(redactDeep({
     schemaVersion: CHECKPOINT_SCHEMA_VERSION,
     kind: CHECKPOINT_KIND,
+    toolVersion: VERSION,
     identity,
     repositories,
   }), null, 2)}\n`;
@@ -19680,7 +19740,7 @@ function serializeCheckpointResult(result, cwd) {
 function validateIdentity(actual, expected) {
   if (!org_checkpoint_isRecord(actual)) throw new Error('organization checkpoint identity is invalid');
   for (const field of [
-    'toolVersion',
+    'analysisGeneration',
     'rulesHash',
     'organization',
     'scope',
@@ -19691,6 +19751,32 @@ function validateIdentity(actual, expected) {
       throw new Error(`organization checkpoint does not match current ${field}`);
     }
   }
+}
+
+function normalizeCheckpointIdentity(checkpoint) {
+  if (!org_checkpoint_isRecord(checkpoint.identity)) {
+    throw new Error('organization checkpoint identity is invalid');
+  }
+  if (checkpoint.schemaVersion === CHECKPOINT_SCHEMA_VERSION) {
+    if (typeof checkpoint.toolVersion !== 'string' || !TOOL_VERSION_RE.test(checkpoint.toolVersion)) {
+      throw new Error('organization checkpoint toolVersion is invalid');
+    }
+    return checkpoint.identity;
+  }
+  if (checkpoint.identity.toolVersion !== FIRST_ANALYSIS_GENERATION_TOOL_VERSION) {
+    throw new Error(
+      `organization checkpoint toolVersion ${String(checkpoint.identity.toolVersion)}`
+      + ' has no compatible analysis generation',
+    );
+  }
+  return {
+    analysisGeneration: 1,
+    rulesHash: checkpoint.identity.rulesHash,
+    organization: checkpoint.identity.organization,
+    scope: checkpoint.identity.scope,
+    configHash: checkpoint.identity.configHash,
+    baselineHash: checkpoint.identity.baselineHash,
+  };
 }
 
 function validateCheckpointResult(value, identity) {
@@ -19869,6 +19955,38 @@ function org_checkpoint_isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+;// CONCATENATED MODULE: ./src/lib/path-equality.js
+
+
+
+/**
+ * Compare two existing or prospective file paths after resolving their real
+ * parents. Existing entries are fully resolved so a control-file symlink is
+ * compared with its target rather than only with the symlink name.
+ */
+async function sameFilePath(left, right) {
+  const [leftPath, rightPath] = await Promise.all([
+    path_equality_canonicalPath(left),
+    path_equality_canonicalPath(right),
+  ]);
+  return comparablePath(leftPath) === comparablePath(rightPath);
+}
+
+async function path_equality_canonicalPath(path) {
+  try {
+    return await (0,promises_namespaceObject.realpath)(path);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    return (0,external_node_path_namespaceObject.join)(await (0,promises_namespaceObject.realpath)((0,external_node_path_namespaceObject.dirname)(path)), (0,external_node_path_namespaceObject.basename)(path));
+  }
+}
+
+function comparablePath(path) {
+  return process.platform === 'win32' || process.platform === 'darwin'
+    ? path.toLowerCase()
+    : path;
+}
+
 ;// CONCATENATED MODULE: ./src/commands/org-scan.js
 /**
  * Organization scan command - enumerate repositories through the GitHub API,
@@ -19987,7 +20105,7 @@ async function scanOrganization({
   });
   const loadedCheckpoint = resume
     ? await loadOrganizationCheckpoint({ path: checkpointPath, cwd, identity: checkpointIdentity })
-    : { results: new Map() };
+    : { results: new Map(), migrationRequired: false };
   if (resume) {
     await emitProgress(onProgress, {
       type: 'checkpoint-loaded',
@@ -20038,9 +20156,9 @@ async function scanOrganization({
     identity: checkpointIdentity,
     results: checkpointResults,
   });
-  if (checkpointPath && !resume) {
+  if (checkpointPath && (!resume || loadedCheckpoint.migrationRequired)) {
     await persistCheckpoint();
-    await emitProgress(onProgress, { type: 'checkpoint-created' });
+    if (!resume) await emitProgress(onProgress, { type: 'checkpoint-created' });
   }
 
   let completed = 0;
@@ -20356,16 +20474,11 @@ function createCheckpointWriter({ path, cwd, identity, results }) {
 
 async function assertCheckpointDoesNotReplaceControlFile(path, cwd, controlFiles) {
   const requested = (0,external_node_path_namespaceObject.resolve)(cwd, path);
-  const checkpoint = comparablePath((0,external_node_path_namespaceObject.join)(await (0,promises_namespaceObject.realpath)((0,external_node_path_namespaceObject.dirname)(requested)), (0,external_node_path_namespaceObject.basename)(requested)));
   for (const controlFile of controlFiles) {
-    if (controlFile && comparablePath((0,external_node_path_namespaceObject.resolve)(controlFile)) === checkpoint) {
+    if (controlFile && await sameFilePath(requested, (0,external_node_path_namespaceObject.resolve)(controlFile))) {
       throw new Error('checkpoint path cannot replace the active config or baseline');
     }
   }
-}
-
-function comparablePath(path) {
-  return process.platform === 'win32' ? path.toLowerCase() : path;
 }
 
 async function emitRetryProgress(onProgress, retry, repository) {
@@ -20771,6 +20884,7 @@ function truncate(value, maxLength) {
 
 
 
+
 const FORMATS = new Set(['toon', 'json', 'text', 'sarif']);
 const MODES = new Set(['major', 'minor', 'patch']);
 const action_SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
@@ -20869,7 +20983,7 @@ async function main() {
       if (
         (resumeFrom ?? checkpointPath)
         && input('output-path')
-        && await samePath(
+        && await sameFilePath(
           (0,external_node_path_namespaceObject.resolve)(cwd, resumeFrom ?? checkpointPath),
           (0,external_node_path_namespaceObject.resolve)(cwd, input('output-path')),
         )
@@ -21002,18 +21116,6 @@ function action_positiveInteger(value, name) {
 
 function optionalPositiveInteger(value, name) {
   return value ? action_positiveInteger(value, name) : undefined;
-}
-
-async function samePath(left, right) {
-  const [leftParent, rightParent] = await Promise.all([
-    (0,promises_namespaceObject.realpath)((0,external_node_path_namespaceObject.dirname)(left)),
-    (0,promises_namespaceObject.realpath)((0,external_node_path_namespaceObject.dirname)(right)),
-  ]);
-  const leftTarget = (0,external_node_path_namespaceObject.join)(leftParent, (0,external_node_path_namespaceObject.basename)(left));
-  const rightTarget = (0,external_node_path_namespaceObject.join)(rightParent, (0,external_node_path_namespaceObject.basename)(right));
-  return process.platform === 'win32'
-    ? leftTarget.toLowerCase() === rightTarget.toLowerCase()
-    : leftTarget === rightTarget;
 }
 
 async function setOutput(name, value) {

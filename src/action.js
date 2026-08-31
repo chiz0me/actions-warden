@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { appendFile, realpath } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { appendFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { audit, renderAudit } from './commands/audit.js';
 import { pin, renderPin } from './commands/pin.js';
@@ -15,6 +15,7 @@ import { redact } from './lib/redact.js';
 import { writeFileGuarded } from './lib/writer.js';
 import { shouldFailAction } from './lib/action-status.js';
 import { formatOrganizationProgress } from './lib/org-progress.js';
+import { sameFilePath } from './lib/path-equality.js';
 import {
   collectAnnotations,
   limitAnnotations,
@@ -119,7 +120,7 @@ async function main() {
       if (
         (resumeFrom ?? checkpointPath)
         && input('output-path')
-        && await samePath(
+        && await sameFilePath(
           resolve(cwd, resumeFrom ?? checkpointPath),
           resolve(cwd, input('output-path')),
         )
@@ -252,18 +253,6 @@ function positiveInteger(value, name) {
 
 function optionalPositiveInteger(value, name) {
   return value ? positiveInteger(value, name) : undefined;
-}
-
-async function samePath(left, right) {
-  const [leftParent, rightParent] = await Promise.all([
-    realpath(dirname(left)),
-    realpath(dirname(right)),
-  ]);
-  const leftTarget = join(leftParent, basename(left));
-  const rightTarget = join(rightParent, basename(right));
-  return process.platform === 'win32'
-    ? leftTarget.toLowerCase() === rightTarget.toLowerCase()
-    : leftTarget === rightTarget;
 }
 
 async function setOutput(name, value) {

@@ -57,7 +57,7 @@ actions-warden verify
 For a one-off run without a global install:
 
 ```sh
-npx --yes actions-warden@0.3.0 audit --explain
+npx --yes actions-warden@0.4.0 audit --explain
 ```
 
 `audit` returns exit code `1` when it finds issues. That is a completed scan,
@@ -109,6 +109,12 @@ reused; changed and previously failed repositories are scanned again. Progress
 defaults to interactive terminals; use `--progress=always` for redirected logs
 or `--progress=never` to disable it.
 
+Compatible package upgrades reuse the same checkpoint. The producing package
+version is recorded as metadata, while an explicit analysis generation plus
+the rule catalog controls compatibility. A parser, discovery, or rule behavior
+change advances that generation and requires a fresh scan. Compatible older
+checkpoints are rewritten atomically on their first successful resume.
+
 When a coding agent initiates the scan, use the explicit bounded mode:
 
 ```sh
@@ -150,8 +156,14 @@ audit/report/pin/upgrade plan → review IDs and diffs → --fix=<id> --write �
 - `pin` and `upgrade` are dry-runs unless `--write` is present.
 - `--write --dry-run` is rejected instead of guessing intent.
 - `--fix=<id>` limits a pin or upgrade to one exact source occurrence.
+- Numeric limits and change IDs are parsed strictly; partial, fractional, and
+  imprecise values fail before network or write work begins.
 - Rewrites preserve surrounding YAML and are reparsed before an atomic write.
-- Paths, output files, and symlinks are constrained to the selected repository.
+- `--output-path` implies file output; contradictory or incomplete output flags
+  are rejected before a scan or authorized mutation begins.
+- Paths, output files, and symlinks are constrained to the selected repository,
+  and report/baseline/checkpoint destinations cannot replace workflows or
+  policy controls.
 - Credential-like values are recursively redacted from every output format.
 - Repository policy is strictly validated; unknown keys and rule IDs fail.
 - Remote organization source is kept in memory and is not persisted in cache.

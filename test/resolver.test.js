@@ -14,8 +14,22 @@ import {
   listTags,
   pickLatestTag,
   resolveRefToSha,
+  resolveToken,
 } from '../src/lib/resolver.js';
 import { cacheDir } from '../src/lib/cache.js';
+
+describe('resolveToken', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('prefers an explicit token, then GITHUB_TOKEN, then GH_TOKEN', () => {
+    vi.stubEnv('GITHUB_TOKEN', 'github-token');
+    vi.stubEnv('GH_TOKEN', 'gh-token');
+    expect(resolveToken('explicit-token')).toBe('explicit-token');
+    expect(resolveToken()).toBe('github-token');
+    vi.stubEnv('GITHUB_TOKEN', '');
+    expect(resolveToken()).toBe('gh-token');
+  });
+});
 
 describe('pickLatestTag', () => {
   it('ignores non-version tags and prefers a specific release tag over aliases', () => {
