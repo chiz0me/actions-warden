@@ -54,10 +54,15 @@ out of the model transcript by default:
 actions-warden org-scan ORG --agent-mode
 ```
 
-- `--agent-mode` defaults to JSON file output, no progress, and a guarded
-  checkpoint. It emits only a bounded JSON receipt to stdout. The packaged
+- Every organization scan defaults to JSON file output, a guarded scope-keyed
+  checkpoint, compatible automatic resume, and a bounded JSON receipt. This is
+  the fallback even if a caller forgets agent mode.
+- `--agent-mode` additionally disables implicit progress and selects the agent
+  receipt kind. It shares `.actions-warden-org-scan.*` artifacts with normal
+  execution so a context switch retains compatible resume state. The packaged
   skill should pass the flag; an integration may instead set
-  `ACTIONS_WARDEN_MODE=agent` once.
+  `ACTIONS_WARDEN_CONTEXT=agent` once. `ACTIONS_WARDEN_MODE=agent` is a legacy
+  alias.
 - Automatic artifact names are derived from the checkpoint compatibility
   identity. An exact-scope later run resumes its checkpoint across compatible
   package versions; a changed filter, severity, policy, baseline, analysis
@@ -66,14 +71,23 @@ actions-warden org-scan ORG --agent-mode
 - Preserve the scope the user requested. Reducing LLM context use is not
   permission to omit repositories, severities, findings, or errors.
 - Explicit CLI choices override agent defaults. If the user asks to watch live
-  progress, add `--progress=always`. The report path from the receipt, rather
+  progress, add `--progress=plain`; use `--progress=json` only when the caller
+  will parse JSON Lines. The report path from the receipt, rather
   than stdout or progress lines, is the complete evidence contract.
+- Repeat the same command to resume. An explicit `--checkpoint` also resumes
+  when its file exists; use `--fresh` to replace state, `--resume` when a
+  restored file must exist, and `--no-auto-checkpoint` only for an intentional
+  stateless scan.
 - Omit `--explain` on a broad first pass unless remediation prose was
   requested. Add it to a targeted follow-up when needed.
 - Inspect the saved JSON locally in bounded passes: first `status`, `scope`,
   `summary`, and error counts; then error details and severity/rule aggregates;
   finally only the finding batches needed for the task. Do not paste or read an
   unbounded organization report into model context.
+- For a broad report that will be inspected repository by repository, prefer
+  `--report-dir=<dedicated-directory>`. Read its compact aggregate and manifest
+  first, then only the relevant complete repository artifacts. The manifest is
+  authoritative; this layout bounds downstream reads, not scanner memory.
 - The scanner process itself uses GitHub API quota and local compute; it does
   not call a language model. The surrounding agent still uses inference tokens
   to plan, monitor, and summarize, and large command output or report excerpts
@@ -127,13 +141,17 @@ deprecating a package. A release request does not authorize those actions.
 - Organization scans never clone, check out, import, or execute remote code.
 - Incomplete organization coverage produces visible errors and status `FAIL`.
 - Organization resume requires fresh discovery and matching default-branch tree
-  SHAs; never reuse failed results. Checkpoints remain guarded, atomic, and free
-  of tokens or raw YAML.
+  SHAs; never reuse failed results or parse errors. Checkpoints remain guarded,
+  atomic, and free of tokens or raw YAML.
 - `ORGANIZATION_ANALYSIS_GENERATION` is the organization-result compatibility
   boundary. Increment it whenever discovery, parser, finding identity, rule
   evaluation, or persisted result semantics can change; do not increment it
   for a version-only compatible release.
 - CLI progress stays on stderr and never corrupts structured report stdout.
+- Organization CLI and Action defaults keep complete reports in guarded files,
+  generate scope-keyed checkpoint state, and automatically resume only after
+  the full compatibility and fresh-revision checks pass. Explicit stdout,
+  fresh, and checkpoint opt-outs remain available.
 - Attacker-controlled text cannot forge output records or workflow commands.
 
 ## Validate proportionally
@@ -151,6 +169,21 @@ For documentation or public behavior:
 npm run check:docs
 npm run check:yaml
 ```
+
+`check:docs` must report 100% coverage. It derives the inventory from package
+exports, live CLI help, Action metadata, the rule catalog, focused guides, and
+examples; every exported runtime function/class and package-root export also
+requires direct JSDoc. Do not bypass the check with a stale manual allowlist.
+
+HTML reporting changes must preserve redaction, escaping, the no-external-asset
+content security policy, safe HTTPS links, deterministic bytes, and the report
+size bound. Organization comparison must never classify an unmatched prior
+finding as resolved when the current repository is missing or has a coverage
+error; analysis identity mismatches fail closed.
+
+CSV reporting changes must preserve deterministic columns, CRLF records,
+credential redaction, control-character escaping, spreadsheet-formula
+neutralization, one physical line per record, and the explicit status row.
 
 For dependency or version metadata:
 
@@ -189,7 +222,7 @@ relevant surfaces:
 2. CLI and exit semantics;
 3. package exports;
 4. Action adapter and `action.yml`;
-5. annotations and all four formats;
+5. annotations and all supported formats;
 6. tests;
 7. CLI, output, Action, API, and AI documentation;
 8. Claude skill;

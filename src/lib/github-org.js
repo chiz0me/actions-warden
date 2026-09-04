@@ -11,15 +11,39 @@ import { ghFetch } from './resolver.js';
 const API = 'https://api.github.com';
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const SHA_RE = /^[0-9a-f]{40}$/i;
+
+/** Maximum decoded bytes accepted for one remote workflow YAML blob. */
 export const MAX_WORKFLOW_BYTES = 2 * 1024 * 1024;
+
+/** Maximum workflow and composite-action files accepted per repository. */
 export const MAX_WORKFLOW_FILES = 1000;
+
+/** Maximum cumulative decoded workflow bytes accepted per repository. */
 export const MAX_REPOSITORY_WORKFLOW_BYTES = 32 * 1024 * 1024;
 
 /**
  * List every repository visible to the supplied token for an organization.
+ * The optional page observer receives only bounded counters and sanitized
+ * GitHub rate-limit metadata; repository objects remain in the final result.
+ *
+ * @param {object} [options]
+ * @param {string} options.organization
+ * @param {string} [options.token]
+ * @param {string} [options.cwd]
+ * @param {(event: object) => void|Promise<void>} [options.onRetry]
+ * @param {(event: object) => void|Promise<void>} [options.onPage]
  */
-export async function listOrganizationRepositories({ organization, token, cwd, onRetry } = {}) {
+export async function listOrganizationRepositories({
+  organization,
+  token,
+  cwd,
+  onRetry,
+  onPage,
+} = {}) {
   const org = validateName(organization, 'organization');
+  if (onPage !== undefined && typeof onPage !== 'function') {
+    throw new Error('onPage must be a function');
+  }
   const repositories = [];
   const seen = new Set();
 
@@ -31,12 +55,16 @@ export async function listOrganizationRepositories({ organization, token, cwd, o
       per_page: '100',
       page: String(page),
     });
+    let responseMetadata;
     const response = await ghFetch({
       url: `${API}/orgs/${encodeURIComponent(org)}/repos?${query}`,
       token,
       cwd,
       useCache: false,
       onRetry,
+      onResponse: event => {
+        responseMetadata = event;
+      },
     });
     if (response.status !== 200) {
       throw new Error(`could not list repositories for ${org} (HTTP ${response.status})`);
@@ -51,6 +79,13 @@ export async function listOrganizationRepositories({ organization, token, cwd, o
       if (seen.has(key)) continue;
       seen.add(key);
       repositories.push(repository);
+    }
+    if (onPage) {
+      await onPage(Object.freeze({
+        page,
+        repositoriesDiscovered: repositories.length,
+        rateLimit: responseMetadata?.rateLimit ?? null,
+      }));
     }
     if (response.body.length < 100) {
       return repositories.sort((left, right) => left.fullName.localeCompare(right.fullName));
@@ -216,6 +251,13 @@ export async function fetchRepositoryWorkflows({
   };
 }
 
+/**
+ * Return whether a validated Git tree path belongs to the supported workflow
+ * or composite-action discovery scope.
+ *
+ * @param {unknown} path
+ * @returns {boolean}
+ */
 export function isWorkflowPath(path) {
   if (
     typeof path !== 'string'

@@ -32,6 +32,76 @@ const { audit } = await import('actions-warden');
 The raw API result does not include `schemaVersion`; renderers add the versioned
 wire format.
 
+## Complete root export reference
+
+The package root deliberately exposes a finite public surface. Every export is
+listed here; adding an export without a non-empty reference entry fails
+`npm run check:docs`.
+
+| export | category | contract |
+|---|---|---|
+| `audit` | command | Audit discovered or selected local workflow files |
+| `auditSources` | command | Audit caller-supplied YAML sources entirely in memory |
+| `renderAudit` | renderer | Serialize an audit result in a supported output format |
+| `pin` | command | Plan or explicitly apply immutable SHA pins |
+| `renderPin` | renderer | Serialize a pin result in a supported output format |
+| `rewriteUses` | rewrite utility | Return source with one parsed action reference rewritten to a SHA |
+| `upgrade` | command | Plan or explicitly apply cooldown-aware dependency upgrades |
+| `renderUpgrade` | renderer | Serialize an upgrade result in a supported output format |
+| `report` | command | Combine audit, dry-run pin, and dry-run upgrade results |
+| `renderReport` | renderer | Serialize a combined report result |
+| `verify` | command | Verify SHA ownership and version metadata against GitHub |
+| `renderVerify` | renderer | Serialize a verification result |
+| `scanOrganization` | command | Audit eligible organization repositories through read-only GitHub APIs |
+| `renderOrganizationScan` | renderer | Serialize an organization scan result |
+| `compareOrganizationReports` | comparison | Classify new, resolved, unchanged, and unknown findings across compatible organization reports |
+| `loadOrganizationReport` | comparison | Safely load and validate a bounded organization JSON report inside the working directory |
+| `listRules` | rule catalog | Return the live rule IDs, default severities, and descriptions |
+| `parseWorkflowFile` | parser | Read and parse one workflow or composite-action YAML file |
+| `parseWorkflowSource` | parser | Parse one supplied YAML string without executing it |
+| `collectUses` | parser utility | Return external, reusable, local, and Docker action references from a parsed document |
+| `collectImages` | parser utility | Return job, service, and Docker-action image references from a parsed document |
+| `parseActionRef` | parser utility | Classify one `uses` scalar while preserving source location metadata |
+| `format` | formatter | Dispatch records to TOON, JSON, text, CSV, SARIF, or HTML rendering |
+| `renderToon` | formatter | Render line-oriented TOON records |
+| `renderJson` | formatter | Render recursively redacted, indented JSON |
+| `renderText` | formatter | Render escaped human-readable records |
+| `renderCsv` | formatter | Render deterministic, control-safe, spreadsheet-safe CSV records |
+| `renderSarif` | formatter | Render SARIF 2.1.0 results |
+| `renderHtml` | formatter | Render a deterministic, self-contained, searchable HTML report |
+| `summarize` | formatter utility | Count findings by severity |
+| `SEVERITY_ORDER` | constant | Lowest-to-highest severity ordering |
+| `discoverWorkflows` | discovery | Discover default or caller-selected workflow paths inside a repository |
+| `redact` | security utility | Replace credential-like substrings in one value |
+| `parseIgnoreDirectives` | ignore utility | Parse line, block, next-line, and file ignore directives |
+| `isIgnored` | ignore utility | Test whether a rule occurrence is inside an ignore scope |
+| `loadConfig` | policy | Discover, load, and strictly normalize repository policy |
+| `DEFAULT_CONFIG` | policy constant | Normalized built-in policy used when no config file is active |
+| `listOrganizationRepositories` | GitHub reader | List every organization repository visible to the supplied token |
+| `fetchRepositoryWorkflowTree` | GitHub reader | Fetch and validate a default-branch workflow tree snapshot |
+| `fetchRepositoryWorkflows` | GitHub reader | Fetch bounded workflow YAML blobs from a validated tree |
+| `isWorkflowPath` | GitHub reader utility | Test whether a Git tree path is in remote workflow discovery scope |
+| `MAX_WORKFLOW_BYTES` | limit | Maximum decoded bytes accepted for one remote YAML file |
+| `MAX_WORKFLOW_FILES` | limit | Maximum remote workflow files accepted per repository |
+| `MAX_REPOSITORY_WORKFLOW_BYTES` | limit | Maximum cumulative decoded YAML bytes accepted per repository |
+| `loadBaseline` | baseline | Load and validate accepted finding IDs and fingerprints |
+| `serializeBaseline` | baseline | Serialize reviewed findings deterministically, excluding parser failures |
+| `assignBaselineFingerprints` | baseline | Attach stable semantic fingerprints to finding objects |
+
+## Package entry points
+
+The command modules are also available as explicit package subpaths. Each
+subpath exposes the exports declared by its referenced command module.
+
+| entry point | primary exports |
+|---|---|
+| `actions-warden/commands/audit` | `audit`, `auditSources`, `renderAudit` |
+| `actions-warden/commands/pin` | `pin`, `renderPin`, `rewriteUses` |
+| `actions-warden/commands/upgrade` | `upgrade`, `renderUpgrade` |
+| `actions-warden/commands/report` | `report`, `renderReport` |
+| `actions-warden/commands/verify` | `verify`, `renderVerify` |
+| `actions-warden/commands/org-scan` | `scanOrganization`, `renderOrganizationScan` |
+
 ## Command functions
 
 ### `audit(options)`
@@ -92,6 +162,30 @@ does not execute supplied YAML.
 
 When passing a custom config, use the normalized shape returned by `loadConfig`,
 not raw YAML keys.
+
+#### Embedding in a broader repository scanner
+
+If a caller already owns GitHub discovery and has downloaded a bounded,
+revision-identified evidence snapshot, call `auditSources` for the workflow
+files in that snapshot. Do not also call `scanOrganization` for the same
+repositories: two independent discovery passes can consume extra API quota and
+can observe different tree revisions.
+
+The ownership boundary is:
+
+- the embedding scanner owns authentication, organization inventory, Git tree
+  completeness, blob-size limits, snapshot identity, cache/checkpoint policy,
+  non-workflow checks, and aggregate reporting;
+- actions-warden owns YAML parsing, ignore-directive behavior, finding
+  identity, severity/baseline filtering, and the complete rule catalog returned
+  by `listRules()`;
+- repository source remains data: neither side should import or execute it.
+
+Pass unique paths rooted under one stable virtual `cwd` so finding IDs and
+relative paths remain deterministic. Cache identity must include the exact
+actions-warden version and live rule catalog, in addition to the repository
+revision and caller policy. A rule upgrade must not reuse results from a prior
+catalog.
 
 ### `pin(options)`
 
@@ -184,7 +278,9 @@ Returns:
 ```js
 {
   organization,
+  analysis,
   scope,
+  coverage,
   repositories,
   findings,
   errors,
@@ -197,6 +293,11 @@ Returns:
 
 `findings` and `errors` are flattened for ingestion. `repositories` retains
 per-repository identity, revision, files, findings, errors, summary, and status.
+`analysis` contains a compatibility generation and stable public identity that
+covers scan scope, policy, baseline contents, and the rule catalog.
+`coverage` distinguishes successful coverage of selected repositories from
+complete coverage of every eligible repository; `maxRepositories` can make it
+incomplete without changing an otherwise clean selected result to `FAIL`.
 
 The organization scan is read-only and does not clone, check out, execute, or
 persist raw remote workflow sources. Repository failures are accumulated when
@@ -224,10 +325,13 @@ objects are shallow-frozen and use these `type` values:
 | `checkpoint-loaded` | `repositories` |
 | `checkpoint-created` | none |
 | `discovery-started` | `organization` |
+| `discovery-page` | `organization`, `page`, `repositoriesDiscovered`, optional `rateLimitRemaining` |
 | `discovery-completed` | `discovered`, `eligible`, `selected` |
-| `repository-started` | `repository`, `position`, `total` |
+| `repository-started` | `repository`, `position`, `total`, `completed`, `active`, `concurrency` |
+| `repository-phase` | `repository`, `position`, `total`, `completed`, `active`, `concurrency`, `phase` |
 | `request-retry` | optional `repository`, `attempt`, `maxRetries`, `reason`, `delayMs`, optional `status` |
-| `repository-completed` | `repository`, `completed`, `total`, `reused`, `status`, `files`, `findings`, `errors` |
+| `checkpoint-written` | `repository`, `position`, `total`, `repositories` |
+| `repository-completed` | `repository`, `completed`, `total`, `reused`, `status`, `files`, `findings`, `errors`, `active`, `concurrency` |
 | `scan-completed` | `organization`, `status`, `completed`, `total`, `reused`, `findings`, `errors`, `elapsedMs` |
 
 Progress is observational and is not included in the returned result or its
@@ -239,6 +343,47 @@ paths, progress callbacks, rendering, persistence, and how much of the returned
 object enters an AI context. Implement the same bounded behavior by saving the
 rendered report and returning only `status`, `summary`, and the saved path to
 the agent.
+
+### Comparing organization reports
+
+Load a prior JSON report, create the current JSON contract, and compare their
+semantic finding fingerprints:
+
+```js
+import {
+  compareOrganizationReports,
+  loadOrganizationReport,
+  renderOrganizationScan,
+  scanOrganization,
+} from 'actions-warden';
+
+const previous = await loadOrganizationReport({
+  path: 'reports/org.previous.json',
+  cwd: '/repo',
+});
+const currentResult = await scanOrganization({
+  organization: 'my-org',
+  cwd: '/repo',
+  token: process.env.GITHUB_TOKEN,
+  severity: 'high',
+});
+const current = JSON.parse(renderOrganizationScan(currentResult, {
+  format: 'json',
+  cwd: '/repo',
+}));
+const comparison = compareOrganizationReports({ previous, current });
+const html = renderOrganizationScan(currentResult, {
+  format: 'html',
+  cwd: '/repo',
+  comparison,
+});
+```
+
+Comparison requires matching analysis identities. It returns deterministically
+ordered `new`, `resolved`, `unchanged`, and `unknown` finding arrays. A prior
+finding is resolved only when the current report successfully covered that
+repository without parse failures; missing, failed, or unparseable repositories
+make resolution unknown.
 
 ## Renderers
 
@@ -274,7 +419,18 @@ Command/render pairs are:
 | `scanOrganization` | `renderOrganizationScan` |
 
 Lower-level formatters are also exported: `format`, `renderToon`, `renderJson`,
-`renderText`, `renderSarif`, `summarize`, and `SEVERITY_ORDER`.
+`renderText`, `renderCsv`, `renderSarif`, `renderHtml`, `summarize`, and
+`SEVERITY_ORDER`.
+
+`renderCsv(records, options)` accepts labeled records plus optional `status`.
+It emits a deterministic union header, one physical row per record, and a final
+status row. Nested values become compact JSON cells, control characters are
+escaped, formula-like strings are neutralized, and credentials are redacted.
+
+`renderHtml(records, options)` accepts the same labeled records used by TOON
+and text plus optional `status`, `title`, and `metadata`. It redacts and escapes
+dynamic values, permits only HTTPS links, loads no external assets, and rejects
+documents larger than 32 MiB.
 
 Every renderer applies credential redaction. See [output contracts](./OUTPUTS.md)
 before depending on the serialized structure.
@@ -305,7 +461,8 @@ size limits. A validated workflow-tree snapshot can be supplied to
 [src/index.js](../src/index.js) for the exact export list in the checked-out
 version.
 
-Command entry points are also available as explicit package subpaths:
+The [package entry-point table](#package-entry-points) is exhaustive. Example
+subpath imports:
 
 ```js
 import { audit } from 'actions-warden/commands/audit';

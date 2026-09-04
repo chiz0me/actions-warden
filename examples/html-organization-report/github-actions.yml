@@ -1,0 +1,61 @@
+name: actions-warden HTML organization report
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '41 7 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  organization-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # actions-warden-ref: v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Generate HTML organization report
+        id: warden
+        uses: chiz0me/actions-warden@<FULL_COMMIT_SHA>
+        with:
+          command: org-scan
+          organization: ${{ github.repository_owner }}
+          token: ${{ secrets.ACTIONS_WARDEN_ORG_TOKEN }}
+          severity: high
+          explain: 'true'
+          format: html
+          output-path: actions-warden-org.html
+          auto-checkpoint: 'false'
+          fail-on-findings: 'false'
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # actions-warden-ref: v5.0.0
+        with:
+          name: actions-warden-html-organization-report
+          path: actions-warden-org.html
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Enforce organization policy after upload
+        if: always()
+        shell: bash
+        env:
+          WARDEN_STATUS: ${{ steps.warden.outputs.status }}
+          WARDEN_FINDINGS: ${{ steps.warden.outputs.findings }}
+          WARDEN_ERRORS: ${{ steps.warden.outputs.errors }}
+          WARDEN_FAILED_REPOSITORIES: ${{ steps.warden.outputs['repositories-failed'] }}
+          WARDEN_COVERAGE_COMPLETE: ${{ steps.warden.outputs['coverage-complete'] }}
+        run: |
+          if [ "$WARDEN_COVERAGE_COMPLETE" != 'true' ] || \
+             [ "$WARDEN_ERRORS" != '0' ] || \
+             [ "$WARDEN_FAILED_REPOSITORIES" != '0' ]; then
+            printf 'Organization coverage is incomplete; review the HTML artifact.\n' >&2
+            exit 1
+          fi
+          if [ "$WARDEN_STATUS" != 'OK' ] || [ "$WARDEN_FINDINGS" != '0' ]; then
+            printf 'Organization findings require review; open the HTML artifact.\n' >&2
+            exit 1
+          fi

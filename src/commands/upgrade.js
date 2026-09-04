@@ -258,7 +258,8 @@ function bumpLevel(from, to) {
 
 /**
  * @param {Awaited<ReturnType<typeof upgrade>>} result
- * @param {{format: 'toon'|'json'|'text', dryRun: boolean, mode: string, cwd?: string}} opts
+ * @param {{format: 'toon'|'json'|'text'|'csv'|'sarif'|'html', dryRun: boolean,
+ *   mode: string, cwd?: string}} opts
  */
 export function renderUpgrade(result, opts) {
   const cwd = opts.cwd ?? process.cwd();
@@ -313,7 +314,11 @@ export function renderUpgrade(result, opts) {
     records.push({ label: 'ERROR', fields: { file: rel(e.file ?? '', cwd), action: e.action ?? '', msg: e.error } });
   }
   records.push({ label: 'SUMMARY', fields: { changes: result.changes.length, skipped: (result.skipped ?? []).length, errors: result.errors.length, mode: opts.mode, dry_run: opts.dryRun } });
-  return format(opts.format, records, { status: result.status });
+  return format(opts.format, records, {
+    status: result.status,
+    title: opts.dryRun ? 'Action upgrade plan' : 'Applied action upgrades',
+    metadata: { mode: opts.mode, operation: opts.dryRun ? 'dry run' : 'write' },
+  });
 }
 
 function rel(p, cwd) {

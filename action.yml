@@ -19,9 +19,9 @@ inputs:
     required: false
     default: ''
   format:
-    description: 'Output format: toon | json | text | sarif'
+    description: 'Output format: auto | toon | json | text | csv | sarif | html. Auto uses JSON for org-scan and TOON otherwise.'
     required: false
-    default: 'toon'
+    default: 'auto'
   mode:
     description: 'Upgrade scope (upgrade/report): major | minor | patch'
     required: false
@@ -43,7 +43,7 @@ inputs:
     required: false
     default: 'false'
   output-path:
-    description: 'Write output to this file in addition to stdout.'
+    description: 'Save output to this file. Org-scan generates a scope-specific path when omitted; CSV/HTML require it for other commands.'
     required: false
     default: ''
   token:
@@ -115,11 +115,23 @@ inputs:
     required: false
     default: '4'
   checkpoint-path:
-    description: 'For org-scan: create or replace a resumable checkpoint inside the working directory.'
+    description: 'For org-scan: create or automatically resume a compatible checkpoint inside the working directory.'
     required: false
     default: ''
   resume-from:
     description: 'For org-scan: resume from and update an existing checkpoint inside the working directory.'
+    required: false
+    default: ''
+  fresh:
+    description: 'For org-scan: ignore reusable results and replace the selected checkpoint.'
+    required: false
+    default: 'false'
+  auto-checkpoint:
+    description: 'For org-scan: create or resume a scope-specific checkpoint when no checkpoint path is supplied.'
+    required: false
+    default: 'true'
+  previous-report:
+    description: 'For org-scan: compare against a previous actions-warden organization JSON report.'
     required: false
     default: ''
   progress:
@@ -131,9 +143,45 @@ outputs:
   status:
     description: 'OK or FAIL'
   findings:
-    description: 'Number of findings (audit/report/org-scan only).'
+    description: 'Unsuppressed finding count after severity filtering (audit/report/org-scan; otherwise 0).'
+  total-findings:
+    description: 'Finding count before baseline suppression and after severity filtering (audit/report/org-scan; otherwise 0).'
+  critical:
+    description: 'Unsuppressed critical finding count (audit/report/org-scan; otherwise 0).'
+  high:
+    description: 'Unsuppressed high finding count (audit/report/org-scan; otherwise 0).'
+  medium:
+    description: 'Unsuppressed medium finding count (audit/report/org-scan; otherwise 0).'
+  low:
+    description: 'Unsuppressed low finding count (audit/report/org-scan; otherwise 0).'
+  suppressed:
+    description: 'Finding count suppressed by the active baseline (audit/report/org-scan; otherwise 0).'
+  errors:
+    description: 'Operational error count, including workflow parse failures.'
+  repositories-discovered:
+    description: 'Repositories visible during org-scan discovery (otherwise 0).'
+  repositories-selected:
+    description: 'Repositories selected by org-scan scope and limits (otherwise 0).'
+  repositories-scanned:
+    description: 'Repositories completed by org-scan (otherwise 0).'
+  repositories-resumed:
+    description: 'Repositories reused from a verified org-scan checkpoint (otherwise 0).'
+  repositories-failed:
+    description: 'Repositories with organization access or coverage errors (otherwise 0).'
+  coverage-complete:
+    description: 'true when org-scan covered every eligible repository in the requested scope without limits or operational gaps; empty for other commands.'
+  new-findings:
+    description: 'Findings added since previous-report during org-scan comparison (otherwise 0).'
+  resolved-findings:
+    description: 'Findings safely resolved since previous-report during org-scan comparison (otherwise 0).'
+  unchanged-findings:
+    description: 'Findings unchanged since previous-report during org-scan comparison (otherwise 0).'
+  unknown-findings:
+    description: 'Previous findings whose resolution is unknown because current coverage was incomplete (otherwise 0).'
   report-path:
-    description: 'Absolute path of the written report file, if output-path was set.'
+    description: 'Absolute path of the written report file. Org-scan always writes a report.'
+  checkpoint-path:
+    description: 'Absolute path of the active org-scan checkpoint, or empty when automatic checkpointing was disabled.'
   annotations:
     description: 'Number of native GitHub annotations emitted.'
   annotations-skipped:

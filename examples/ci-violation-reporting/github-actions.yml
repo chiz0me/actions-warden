@@ -1,0 +1,55 @@
+name: report GitHub Actions violations
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actions-warden:
+    name: Report GitHub Actions violations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Audit workflows
+        id: warden
+        uses: chiz0me/actions-warden@<FULL_COMMIT_SHA>
+        with:
+          command: audit
+          severity: high
+          explain: 'true'
+          format: json
+          output-path: actions-warden-report.json
+          annotations: 'true'
+          # Defer the policy failure until after the report artifact is uploaded.
+          # Operational scanner errors still fail this step.
+          fail-on-findings: 'false'
+
+      - name: Upload violation report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: actions-warden-report-${{ github.run_id }}
+          path: actions-warden-report.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Enforce Actions Warden result
+        if: always() && steps.warden.outputs.status == 'FAIL'
+        shell: bash
+        env:
+          ACTIONS_WARDEN_FINDINGS: ${{ steps.warden.outputs.findings }}
+        run: |
+          printf 'actions-warden reported %s blocking finding(s).\n' \
+            "${ACTIONS_WARDEN_FINDINGS:-unknown}" >&2
+          printf 'Review the annotations and downloaded JSON report.\n' >&2
+          exit 1

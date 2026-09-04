@@ -154,7 +154,8 @@ git diff --cached
 ```
 
 `release:check` verifies registry version monotonicity, version synchronization,
-exact dependencies, YAML, documentation links, lint, tests, dependency audit,
+exact dependencies, YAML, documentation links and public-surface coverage,
+lint, tests, dependency audit,
 the exact npm tarball manifest, and the staged/working Action bundle against a
 clean rebuild. On a workflow retry, the registry guard also requires the local
 tarball integrity to equal the already-published immutable artifact. The gate

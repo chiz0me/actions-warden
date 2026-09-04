@@ -75,4 +75,45 @@ describe('redact', () => {
     expect(redact('reusable-workflow-secrets-inherit'))
       .toBe('reusable-workflow-secrets-inherit');
   });
+
+  it('preserves public organization report schema discriminators', () => {
+    for (const value of [
+      'actions-warden-agent-receipt',
+      'actions-warden-org-scan-receipt',
+      'actions-warden-org-scan-directory',
+      'actions-warden-org-scan-manifest',
+      'actions-warden-org-scan-progress',
+      'actions-warden-org-scan-repository',
+    ]) {
+      expect(redact(value)).toBe(value);
+    }
+  });
+
+  it('redacts Dates, Errors, Sets, and Maps safely in redactDeep', () => {
+    const date = new Date('2026-09-04T00:00:00.000Z');
+    const error = new Error('error with ghp_0123456789abcdefghijklmnopqrstuvwxyz');
+    const set = new Set(['hello', 'ghp_0123456789abcdefghijklmnopqrstuvwxyz']);
+    const map = new Map([
+      ['secret_token', 'my-secret'],
+      ['safe_key', 'safe_value'],
+    ]);
+
+    expect(redactDeep({
+      date,
+      error,
+      set,
+      map,
+    })).toEqual({
+      date: '2026-09-04T00:00:00.000Z',
+      error: {
+        name: 'Error',
+        message: 'error with <redacted>',
+      },
+      set: ['hello', '<redacted>'],
+      map: {
+        secret_token: '<redacted>',
+        safe_key: 'safe_value',
+      },
+    });
+  });
 });

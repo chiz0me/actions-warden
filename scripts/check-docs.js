@@ -2,6 +2,7 @@
 
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { checkDocumentationCoverage } from './doc-coverage.js';
 
 const ROOT = process.cwd();
 const SKIP_DIRECTORIES = new Set(['.git', 'dist', 'node_modules']);
@@ -70,11 +71,17 @@ for (const document of documents) {
   }
 }
 
+const coverage = await checkDocumentationCoverage({ root: ROOT });
+errors.push(...coverage.errors);
+
 if (errors.length > 0) {
   process.stderr.write(`${errors.join('\n')}\n`);
   process.exitCode = 1;
 } else {
   process.stdout.write(`documentation links OK (${documents.length} files)\n`);
+  process.stdout.write(
+    `documentation coverage 100% (${coverage.covered}/${coverage.total} documented surfaces)\n`,
+  );
 }
 
 async function walk(directory) {

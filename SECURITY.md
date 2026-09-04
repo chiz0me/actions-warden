@@ -12,7 +12,7 @@ Please include:
 
 - A clear description of the issue.
 - A minimal reproduction (workflow YAML, command line, expected vs. actual).
-- The version of `actions-warden` (`npx --yes actions-warden@0.4.0 --version`).
+- The version of `actions-warden` (`npx --yes actions-warden@0.5.0 --version`).
 - Any disclosure constraints on your side.
 
 We aim to acknowledge within **3 business days** and to ship a fix or a
@@ -65,9 +65,21 @@ Out of scope:
   metadata rather than a compatibility boundary. They still contain redacted
   repository and finding evidence and should be protected like organization
   reports.
-- Explicit CLI agent mode creates scope-keyed report and checkpoint files with
-  the same guarded writer and `0600` creation mode. Its stdout receipt contains
-  only paths and bounded counts; the artifact files remain sensitive.
+- Explicit CLI agent mode shares the normal scope-keyed report and checkpoint
+  identity, uses the same guarded writer and `0600` creation mode, and changes
+  only presentation defaults plus the bounded receipt kind. Compatible legacy
+  `.actions-warden-agent.*` checkpoints are copied into the common namespace
+  on a compatible automatic-checkpoint run through validation and guarded
+  atomic writing; the legacy evidence is left intact.
+- `--report-dir` accepts only a dedicated directory inside the working tree,
+  rejects symbolic-link and control-file overlap, creates directories with
+  mode `0700` and files with mode `0600`, and writes its integrity manifest
+  last. Existing unrelated regular files are preserved, so consumers must use
+  the manifest as the authoritative artifact set.
+- The scanner itself sends runtime requests only to `api.github.com`.
+  Webhook and ProjectDiscovery Notify examples run as separate, explicitly
+  configured CI steps and receive bounded summaries by default; their
+  destinations and credentials are owned by the calling workflow.
 
 ## Responsible-disclosure timeline
 

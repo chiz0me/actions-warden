@@ -16,6 +16,8 @@ import {
   isScalar,
 } from 'yaml';
 
+const MAX_PARALLEL_DEPTH = 10;
+
 /**
  * @typedef {object} ActionRef
  * @property {string} raw            - e.g. `actions/checkout@v3` or `./local`
@@ -300,6 +302,9 @@ function extractSteps(source, stepsNode, doc, parallelDepth = 0) {
     }
     steps.push(step);
     if (parallelPair && isSeq(parallelPair.value)) {
+      if (parallelDepth >= MAX_PARALLEL_DEPTH) {
+        throw new Error(`parallel step nesting exceeded maximum depth of ${MAX_PARALLEL_DEPTH}`);
+      }
       steps.push(...extractSteps(source, parallelPair.value, doc, parallelDepth + 1));
     }
   }

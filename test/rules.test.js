@@ -335,6 +335,24 @@ jobs:
       expect.objectContaining({ severity: 'high' }),
     ]);
   });
+  it('detects workspace execution from diverse modern build runners', () => {
+    for (const command of [
+      'pip install .',
+      'uv run test.py',
+      'poetry run pytest',
+      'deno test',
+      'composer install',
+      'swift test',
+      'cargo clippy',
+      'docker compose build',
+    ]) {
+      const doc = parse(`name: x\non: pull_request_target\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          ref: \${{ github.event.pull_request.head.sha }}\n          allow-unsafe-pr-checkout: true\n      - run: ${command}\n`);
+      const findings = prTarget.check(doc);
+      expect(findings, command).toEqual([
+        expect.objectContaining({ severity: 'critical' }),
+      ]);
+    }
+  });
   it('retains every untrusted checkout path until it is consumed', () => {
     const doc = parse(`name: x
 on: pull_request_target

@@ -1,0 +1,163 @@
+name: actions-warden webhook notification
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit-and-notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # actions-warden-ref: v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Audit workflows
+        id: warden
+        uses: chiz0me/actions-warden@<FULL_COMMIT_SHA>
+        with:
+          command: audit
+          severity: high
+          explain: 'true'
+          format: json
+          output-path: actions-warden-report.json
+          annotations: 'true'
+          fail-on-findings: 'false'
+
+      - name: Upload complete report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # actions-warden-ref: v5.0.0
+        with:
+          name: actions-warden-report-${{ github.run_id }}
+          path: actions-warden-report.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Build bounded notification
+        id: notification
+        if: always()
+        shell: bash
+        env:
+          WARDEN_STATUS: ${{ steps.warden.outputs.status }}
+          WARDEN_FINDINGS: ${{ steps.warden.outputs.findings }}
+          WARDEN_CRITICAL: ${{ steps.warden.outputs.critical }}
+          WARDEN_HIGH: ${{ steps.warden.outputs.high }}
+          WARDEN_ERRORS: ${{ steps.warden.outputs.errors }}
+          REPOSITORY: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          const count = name => {
+            const value = Number(process.env[name] ?? 0);
+            return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+          };
+          const status = ['OK', 'FAIL'].includes(process.env.WARDEN_STATUS)
+            ? process.env.WARDEN_STATUS
+            : 'FAIL';
+          const payload = {
+            schemaVersion: '1.0',
+            source: 'actions-warden',
+            repository: process.env.REPOSITORY,
+            status,
+            summary: {
+              findings: count('WARDEN_FINDINGS'),
+              critical: count('WARDEN_CRITICAL'),
+              high: count('WARDEN_HIGH'),
+              errors: count('WARDEN_ERRORS'),
+            },
+            runUrl: `${process.env.SERVER_URL}/${process.env.REPOSITORY}/actions/runs/${process.env.RUN_ID}`,
+          };
+          fs.writeFileSync(
+            'actions-warden-notification.json',
+            `${JSON.stringify(payload)}\n`,
+            { mode: 0o600 },
+          );
+          NODE
+
+      - name: Send bounded webhook notification
+        if: always() && steps.notification.outcome == 'success'
+        shell: bash
+        env:
+          ACTIONS_WARDEN_WEBHOOK_URL: ${{ secrets.ACTIONS_WARDEN_WEBHOOK_URL }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+          const deliver = async () => {
+            let endpoint;
+            try {
+              endpoint = new URL(process.env.ACTIONS_WARDEN_WEBHOOK_URL);
+            } catch {
+              throw new Error('ACTIONS_WARDEN_WEBHOOK_URL must be a valid HTTPS URL');
+            }
+            if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password) {
+              throw new Error('ACTIONS_WARDEN_WEBHOOK_URL must use HTTPS without embedded credentials');
+            }
+            const body = fs.readFileSync('actions-warden-notification.json');
+            if (body.byteLength > 16 * 1024) {
+              throw new Error('notification payload exceeds 16 KiB');
+            }
+
+            for (let attempt = 1; attempt <= 3; attempt += 1) {
+              try {
+                const response = await fetch(endpoint, {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body,
+                  redirect: 'error',
+                  signal: AbortSignal.timeout(30_000),
+                });
+                await response.body?.cancel();
+                if (response.ok) return;
+                const error = new Error(`webhook rejected the payload with HTTP ${response.status}`);
+                error.retryable = response.status === 429 || response.status >= 500;
+                throw error;
+              } catch (error) {
+                if (attempt === 3 || error.retryable === false) throw error;
+              }
+              await wait(1_000 * attempt);
+            }
+          };
+
+          deliver().catch(error => {
+            const safeMessages = new Set([
+              'ACTIONS_WARDEN_WEBHOOK_URL must be a valid HTTPS URL',
+              'ACTIONS_WARDEN_WEBHOOK_URL must use HTTPS without embedded credentials',
+              'notification payload exceeds 16 KiB',
+            ]);
+            const safeMessage = safeMessages.has(error.message)
+              || /^webhook rejected the payload with HTTP \d{3}$/.test(error.message)
+              ? error.message : 'webhook delivery failed';
+            process.stderr.write(`${safeMessage}\n`);
+            process.exitCode = 1;
+          });
+          NODE
+
+      - name: Enforce Actions Warden result
+        if: always()
+        shell: bash
+        env:
+          WARDEN_STATUS: ${{ steps.warden.outputs.status }}
+          WARDEN_FINDINGS: ${{ steps.warden.outputs.findings }}
+          WARDEN_ERRORS: ${{ steps.warden.outputs.errors }}
+        run: |
+          if [ "$WARDEN_ERRORS" != '0' ]; then
+            printf 'actions-warden did not complete cleanly; review the retained report.\n' >&2
+            exit 1
+          fi
+          if [ "$WARDEN_STATUS" != 'OK' ] || [ "$WARDEN_FINDINGS" != '0' ]; then
+            printf 'actions-warden reported %s blocking finding(s).\n' \
+              "${WARDEN_FINDINGS:-unknown}" >&2
+            exit 1
+          fi

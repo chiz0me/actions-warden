@@ -15,7 +15,7 @@ export { verify, renderVerify } from './commands/verify.js';
 export { scanOrganization, renderOrganizationScan } from './commands/org-scan.js';
 export { listRules } from './rules/index.js';
 export { parseWorkflowFile, parseWorkflowSource, collectUses, collectImages, parseActionRef } from './lib/parser.js';
-export { format, renderToon, renderJson, renderText, renderSarif, summarize, SEVERITY_ORDER } from './lib/formatter.js';
+export { format, renderToon, renderJson, renderText, renderCsv, renderSarif, renderHtml, summarize, SEVERITY_ORDER } from './lib/formatter.js';
 export { discoverWorkflows } from './lib/paths.js';
 export { redact } from './lib/redact.js';
 export { parseIgnoreDirectives, isIgnored } from './lib/ignore.js';
@@ -34,3 +34,7 @@ export {
   loadBaseline,
   serializeBaseline,
 } from './lib/baseline.js';
+export {
+  compareOrganizationReports,
+  loadOrganizationReport,
+} from './lib/org-report-comparison.js';

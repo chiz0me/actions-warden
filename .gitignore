@@ -1,6 +1,7 @@
 node_modules
 .actions-warden-cache
 .actions-warden-agent.*
+.actions-warden-org-scan.*
 coverage
 *.log
 .DS_Store

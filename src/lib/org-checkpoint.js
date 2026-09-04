@@ -22,10 +22,15 @@ const CHECKPOINT_SCHEMA_VERSION = '1.1';
 const LEGACY_CHECKPOINT_SCHEMA_VERSION = '1.0';
 const FIRST_ANALYSIS_GENERATION_TOOL_VERSION = '0.3.0';
 const TOOL_VERSION_RE = /^\d+\.\d+\.\d+$/;
-// Increment this whenever organization discovery, parsing, finding identity,
-// rule evaluation, or persisted result semantics can change. Package releases
-// that leave those behaviors compatible must keep the generation unchanged.
-export const ORGANIZATION_ANALYSIS_GENERATION = 1;
+
+/**
+ * Checkpoint compatibility generation. Increment it whenever organization
+ * discovery, parsing, finding identity, rule evaluation, or persisted result
+ * semantics change; compatible package releases keep the current value.
+ */
+export const ORGANIZATION_ANALYSIS_GENERATION = 2;
+
+/** Maximum accepted or generated checkpoint size, in bytes. */
 export const MAX_ORGANIZATION_CHECKPOINT_BYTES = 256 * 1024 * 1024;
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const SHA_RE = /^[0-9a-f]{40}$/i;
@@ -34,6 +39,10 @@ const SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
 const RULE_IDS = new Set(['parse-error', ...listRules().map(rule => rule.id)]);
 const RULES_HASH = digest(listRules());
 
+/**
+ * Build the version-independent identity that controls whether checkpoint
+ * results are compatible with the requested scan and policy.
+ */
 export function createOrganizationCheckpointIdentity({
   organization,
   repositories,
@@ -74,7 +83,7 @@ export function createOrganizationCheckpointIdentity({
 }
 
 /**
- * Create the stable key used by automatic agent artifacts.
+ * Create the stable key used by automatic organization-scan artifacts.
  *
  * Generation 1 deliberately retains the exact identity serialization used by
  * v0.3.0 so existing automatic checkpoints remain discoverable after an
@@ -109,6 +118,10 @@ export function createOrganizationCheckpointArtifactKey(identity) {
     .slice(0, 32);
 }
 
+/**
+ * Load and fully validate a checkpoint, returning reusable repository results
+ * plus whether a successful resume should migrate its metadata.
+ */
 export async function loadOrganizationCheckpoint({ path, cwd, identity }) {
   const resolvedPath = await resolveRepositoryFile(path, cwd);
   const metadata = await stat(resolvedPath);
@@ -160,10 +173,12 @@ export async function loadOrganizationCheckpoint({ path, cwd, identity }) {
   };
 }
 
+/** Validate a checkpoint destination without creating or replacing a file. */
 export async function validateOrganizationCheckpointPath({ path, cwd }) {
   return writeFileGuarded({ path, content: '', cwd, dryRun: true });
 }
 
+/** Serialize, redact, size-check, and atomically replace a checkpoint. */
 export async function writeOrganizationCheckpoint({
   path,
   cwd,
@@ -188,13 +203,16 @@ export async function writeOrganizationCheckpoint({
   return writeFileGuarded({ path, content, cwd, dryRun: false });
 }
 
+/** Return whether a result is error-free and still matches the live revision. */
 export function canReuseCheckpointResult(result, repository, treeSha) {
   return result.repository === repository.fullName
     && result.branch === repository.defaultBranch
     && result.treeSha === treeSha
-    && result.errors.length === 0;
+    && result.errors.length === 0
+    && !result.findings.some(finding => finding.ruleId === 'parse-error');
 }
 
+/** Rehydrate validated checkpoint data with local paths and live source URLs. */
 export function restoreCheckpointResult(result, { repository, cwd, sourceUrl }) {
   const repositoryRoot = resolve(cwd, repository.owner, repository.name);
   const findings = result.findings.map(finding => ({

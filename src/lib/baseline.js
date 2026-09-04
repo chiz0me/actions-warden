@@ -3,7 +3,8 @@ import { canonicalPath, occurrenceId } from './identity.js';
 import { resolveRepositoryFile } from './config.js';
 
 /**
- * Load a versioned baseline and return its finding IDs.
+ * Load a versioned baseline and return its finding IDs and semantic
+ * fingerprints.
  */
 export async function loadBaseline({ path, cwd = process.cwd() }) {
   const resolvedPath = await resolveRepositoryFile(path, cwd);

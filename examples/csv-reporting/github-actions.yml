@@ -1,0 +1,59 @@
+name: actions-warden CSV report
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # actions-warden-ref: v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Generate CSV report
+        id: warden
+        uses: chiz0me/actions-warden@<FULL_COMMIT_SHA>
+        with:
+          command: audit
+          severity: high
+          explain: 'true'
+          format: csv
+          output-path: actions-warden.csv
+          annotations: 'true'
+          fail-on-findings: 'false'
+
+      - name: Upload CSV report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # actions-warden-ref: v5.0.0
+        with:
+          name: actions-warden-csv-${{ github.run_id }}
+          path: actions-warden.csv
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Enforce policy after upload
+        if: always()
+        shell: bash
+        env:
+          WARDEN_STATUS: ${{ steps.warden.outputs.status }}
+          WARDEN_FINDINGS: ${{ steps.warden.outputs.findings }}
+          WARDEN_ERRORS: ${{ steps.warden.outputs.errors }}
+        run: |
+          if [ "$WARDEN_ERRORS" != '0' ]; then
+            printf 'actions-warden did not complete cleanly; review the job summary.\n' >&2
+            exit 1
+          fi
+          if [ "$WARDEN_STATUS" != 'OK' ] || [ "$WARDEN_FINDINGS" != '0' ]; then
+            printf 'actions-warden reported %s blocking finding(s).\n' \
+              "${WARDEN_FINDINGS:-unknown}" >&2
+            exit 1
+          fi

@@ -14027,6 +14027,8 @@ var dist = __nccwpck_require__(8815);
 
 
 
+const MAX_PARALLEL_DEPTH = 10;
+
 /**
  * @typedef {object} ActionRef
  * @property {string} raw            - e.g. `actions/checkout@v3` or `./local`
@@ -14311,6 +14313,9 @@ function extractSteps(source, stepsNode, doc, parallelDepth = 0) {
     }
     steps.push(step);
     if (parallelPair && (0,dist/* isSeq */.oP)(parallelPair.value)) {
+      if (parallelDepth >= MAX_PARALLEL_DEPTH) {
+        throw new Error(`parallel step nesting exceeded maximum depth of ${MAX_PARALLEL_DEPTH}`);
+      }
       steps.push(...extractSteps(source, parallelPair.value, doc, parallelDepth + 1));
     }
   }
@@ -14589,1023 +14594,6 @@ function collectUses(workflow) {
  */
 function collectImages(workflow) {
   return [...workflow.images];
-}
-
-;// CONCATENATED MODULE: ./src/lib/redact.js
-/**
- * Secret redaction utility.
- *
- * Replaces values that look like tokens, credentials, or high-entropy strings
- * with `<redacted>`. Conservative by design: prefers false positives over leaks.
- */
-
-const TOKEN_PATTERNS = [
-  /ghp_[A-Za-z0-9]{30,}/g,
-  /ghs_[A-Za-z0-9]{30,}/g,
-  /gho_[A-Za-z0-9]{30,}/g,
-  /ghu_[A-Za-z0-9]{30,}/g,
-  /github_pat_[A-Za-z0-9_]{30,}/g,
-  /xox[abprs]-[A-Za-z0-9-]{10,}/g,
-  /(?:AKIA|ASIA)[0-9A-Z]{16}/g,
-  /sk-[A-Za-z0-9]{20,}/g,
-  /(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}/g,
-  /AIza[0-9A-Za-z_-]{30,}/g,
-  /ya29\.[0-9A-Za-z_-]{20,}/g,
-  /npm_[0-9A-Za-z]{20,}/g,
-  /eyJ[0-9A-Za-z_-]{8,}\.[0-9A-Za-z_-]{8,}\.[0-9A-Za-z_-]{8,}/g,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
-];
-
-const SENSITIVE_KEY = /(?:token|secret|password|api[_-]?key|auth[_-]?token|access[_-]?key|private[_-]?key)$/i;
-const KV_TOKEN_KEYS = /([\w-]*(?:token|secret|password|api[_-]?key|auth[_-]?token|access[_-]?key|private[_-]?key))(\s*[:=]\s*)["']?([^"'\s,]+)/gi;
-const HIGH_ENTROPY = /[A-Za-z0-9_+/-]{32,}={0,2}/g;
-// This public rule ID is long enough to trip the generic entropy heuristic.
-// Keep the exception exact instead of weakening detection for arbitrary
-// kebab-case values, which may still be credentials or passphrases.
-const SAFE_PUBLIC_VALUES = new Set([
-  'reusable-workflow-secrets-inherit',
-]);
-
-/**
- * Redacts sensitive substrings from a value.
- *
- * @param {unknown} input
- * @returns {string}
- */
-function redact(input) {
-  if (input == null) return '';
-  let s = typeof input === 'string' ? input : String(input);
-  for (const re of TOKEN_PATTERNS) s = s.replace(re, '<redacted>');
-  s = s.replace(KV_TOKEN_KEYS, (_, key, separator) => `${key}${separator}<redacted>`);
-  s = s.replace(HIGH_ENTROPY, value => (
-    shouldRedactHighEntropy(value) ? '<redacted>' : value
-  ));
-  return s;
-}
-
-/**
- * Recursively redact strings in a JSON-compatible value.
- *
- * @param {unknown} input
- * @param {WeakSet<object>} [seen]
- * @returns {unknown}
- */
-function redactDeep(input, seen = new WeakSet()) {
-  if (typeof input === 'string') return redact(input);
-  if (input === null || typeof input !== 'object') return input;
-  if (seen.has(input)) return '<circular>';
-  seen.add(input);
-  let output;
-  if (Array.isArray(input)) {
-    output = input.map(item => redactDeep(item, seen));
-  } else {
-    output = {};
-    for (const [key, value] of Object.entries(input)) {
-      output[key] = SENSITIVE_KEY.test(key) ? '<redacted>' : redactDeep(value, seen);
-    }
-  }
-  seen.delete(input);
-  return output;
-}
-
-function shouldRedactHighEntropy(value) {
-  if (SAFE_PUBLIC_VALUES.has(value)) return false;
-  if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value)) return false;
-  const categories = [
-    /[a-z]/.test(value),
-    /[A-Z]/.test(value),
-    /\d/.test(value),
-    /[_+/=-]/.test(value),
-  ].filter(Boolean).length;
-  if (categories < 2) return false;
-  const frequencies = new Map();
-  for (const char of value) frequencies.set(char, (frequencies.get(char) ?? 0) + 1);
-  let entropy = 0;
-  for (const count of frequencies.values()) {
-    const probability = count / value.length;
-    entropy -= probability * Math.log2(probability);
-  }
-  return entropy >= 3.5;
-}
-
-/**
- * Wraps console.error/log so any string-coerced argument is redacted first.
- *
- * @param {(...args: unknown[]) => void} fn
- * @returns {(...args: unknown[]) => void}
- */
-function safeLogger(fn) {
-  return (...args) => fn(...args.map(a => redactDeep(a)));
-}
-
-;// CONCATENATED MODULE: ./src/lib/formatter.js
-/**
- * Output formatter supporting TOON (Token-Oriented Object Notation), JSON,
- * plain text, and SARIF.
- *
- * TOON output rules:
- *   - One record per line: `LABEL: key=value key=value`
- *   - Values containing spaces or `=` are quoted: `msg="hello world"`
- *   - Empty/null values are omitted
- *   - Trailing `STATUS: OK` or `STATUS: FAIL` signal for machine consumers
- */
-
-
-
-/**
- * Severity ordering, lowest-to-highest.
- */
-const SEVERITY_ORDER = ['low', 'medium', 'high', 'critical'];
-
-/**
- * @param {string} value
- * @returns {string}
- */
-function quoteIfNeeded(value) {
-  if (value === '') return '""';
-  if (/[\s="\\]/.test(value) || [...value].some(char => char.charCodeAt(0) < 32)) {
-    return JSON.stringify(value);
-  }
-  return value;
-}
-
-/**
- * Serialize a record to a single TOON line.
- *
- * @param {string} label
- * @param {Record<string, unknown>} fields
- * @returns {string}
- */
-function toonLine(label, fields) {
-  const parts = [];
-  for (const [k, v] of Object.entries(fields)) {
-    if (v === null || v === undefined || v === '') continue;
-    const value = typeof v === 'string' ? v : String(v);
-    parts.push(`${k}=${quoteIfNeeded(redact(value))}`);
-  }
-  return parts.length === 0 ? `${label}:` : `${label}: ${parts.join(' ')}`;
-}
-
-/**
- * Render a TOON document.
- *
- * @param {Array<{label: string, fields: Record<string, unknown>}>} records
- * @param {{status?: 'OK'|'FAIL'}} [options]
- * @returns {string}
- */
-function renderToon(records, options = {}) {
-  const lines = records.map(r => toonLine(r.label, r.fields));
-  if (options.status) lines.push(`STATUS: ${options.status}`);
-  return lines.join('\n') + '\n';
-}
-
-/**
- * Render JSON with stable key ordering and 2-space indent.
- *
- * @param {unknown} payload
- * @returns {string}
- */
-function renderJson(payload) {
-  return JSON.stringify(redactDeep(payload), null, 2) + '\n';
-}
-
-/**
- * Render plain text (human-readable summary).
- *
- * @param {Array<{label: string, fields: Record<string, unknown>}>} records
- * @param {{status?: 'OK'|'FAIL'}} [options]
- * @returns {string}
- */
-function renderText(records, options = {}) {
-  const lines = records.map(r => {
-    const kv = Object.entries(r.fields)
-      .filter(([, v]) => v !== null && v !== undefined && v !== '')
-      .map(([k, v]) => `${k}=${escapeText(redact(String(v)))}`)
-      .join(' ');
-    return `[${r.label}] ${kv}`;
-  });
-  if (options.status) lines.push(`==> ${options.status}`);
-  return lines.join('\n') + '\n';
-}
-
-function escapeText(value) {
-  return JSON.stringify(value).slice(1, -1);
-}
-
-/**
- * Format records into the requested output mode.
- *
- * @param {'toon'|'json'|'text'|'sarif'} format
- * @param {Array<{label: string, fields: Record<string, unknown>}>} records
- * @param {{status?: 'OK'|'FAIL', json?: unknown}} [options]
- * @returns {string}
- */
-function formatter_format(format_, records, options = {}) {
-  switch (format_) {
-    case 'json':
-      return renderJson(options.json ?? recordsToJson(records, options));
-    case 'text':
-      return renderText(records, options);
-    case 'sarif':
-      return renderSarif(records, options);
-    case 'toon':
-    default:
-      return renderToon(records, options);
-  }
-}
-
-/**
- * Render records as SARIF 2.1.0 for GitHub code scanning.
- *
- * @param {Array<{label: string, fields: Record<string, unknown>}>} records
- * @param {{status?: string}} [options]
- */
-function renderSarif(records, options = {}) {
-  const ruleRecords = records.filter(record => record.label === 'RULE');
-  const resultRecords = records.filter(record => (
-    record.label === 'FINDING'
-    || record.label === 'ERROR'
-    || record.label === 'WARNING'
-    || record.label === 'PIN'
-    || record.label === 'UPGRADE'
-  ));
-  const rules = new Map();
-  for (const record of ruleRecords) {
-    const id = String(record.fields.id ?? 'actions-warden');
-    rules.set(id, {
-      id,
-      shortDescription: {
-        text: String(record.fields.description ?? id),
-      },
-      defaultConfiguration: {
-        level: sarifLevel(String(record.fields.severity ?? 'low')),
-      },
-    });
-  }
-
-  const results = resultRecords.map(record => {
-    const fields = record.fields;
-    const ruleId = String(fields.type ?? `actions-warden/${record.label.toLowerCase()}`);
-    if (!rules.has(ruleId)) {
-      rules.set(ruleId, {
-        id: ruleId,
-        shortDescription: { text: ruleId },
-        defaultConfiguration: {
-          level: record.label === 'ERROR'
-            ? 'error'
-            : sarifLevel(String(fields.sev ?? 'low')),
-        },
-      });
-    }
-    const file = fields.file ? String(fields.file) : null;
-    const line = Number(fields.line);
-    return {
-      ruleId,
-      level: record.label === 'ERROR'
-        ? 'error'
-        : record.label === 'WARNING'
-          ? 'warning'
-          : sarifLevel(String(fields.sev ?? (record.label === 'FINDING' ? 'warning' : 'low'))),
-      message: {
-        text: String(fields.explain ?? fields.msg ?? summarizeFields(record.label, fields)),
-      },
-      ...(file ? {
-        locations: [{
-          physicalLocation: {
-            artifactLocation: { uri: file.replace(/\\/g, '/') },
-            ...(Number.isInteger(line) && line > 0
-              ? { region: { startLine: line } }
-              : {}),
-          },
-        }],
-      } : {}),
-      ...(fields.id ? {
-        partialFingerprints: {
-          // GitHub code scanning recognizes this key and uses the suffix to
-          // distinguish multiple results with the same semantic fingerprint.
-          primaryLocationLineHash: `${fields.fingerprint ?? fields.id}:1`,
-          'actions-warden/id': String(fields.id),
-          ...(fields.fingerprint
-            ? { 'actions-warden/semantic': String(fields.fingerprint) }
-            : {}),
-        },
-      } : {}),
-    };
-  });
-
-  return renderJson({
-    $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
-    version: '2.1.0',
-    runs: [{
-      tool: {
-        driver: {
-          name: 'actions-warden',
-          informationUri: 'https://github.com/chiz0me/actions-warden',
-          rules: [...rules.values()],
-        },
-      },
-      invocations: [{
-        executionSuccessful: options.status !== 'ERROR',
-      }],
-      results,
-    }],
-  });
-}
-
-function sarifLevel(severity) {
-  if (severity === 'critical' || severity === 'high' || severity === 'error') return 'error';
-  if (severity === 'medium' || severity === 'warning') return 'warning';
-  return 'note';
-}
-
-function summarizeFields(label, fields) {
-  const details = Object.entries(fields)
-    .filter(([key, value]) => !['id', 'file', 'line'].includes(key) && value != null && value !== '')
-    .map(([key, value]) => `${key}=${String(value)}`)
-    .join(' ');
-  return `${label}: ${details}`;
-}
-
-/**
- * Convert records to a generic JSON payload when no custom JSON is supplied.
- *
- * @param {Array<{label: string, fields: Record<string, unknown>}>} records
- * @param {{status?: string}} options
- * @returns {object}
- */
-function recordsToJson(records, options) {
-  return {
-    schemaVersion: '1.0',
-    records: records.map(r => ({ label: r.label, ...r.fields })),
-    status: options.status ?? null,
-  };
-}
-
-/**
- * Aggregate findings into a summary record.
- *
- * @param {Array<{severity: string}>} findings
- * @returns {Record<string, number>}
- */
-function summarize(findings) {
-  const counts = { critical: 0, high: 0, medium: 0, low: 0 };
-  for (const f of findings) {
-    if (counts[f.severity] !== undefined) counts[f.severity] += 1;
-  }
-  return counts;
-}
-
-;// CONCATENATED MODULE: ./src/lib/ignore.js
-/**
- * Inline ignore directives in workflow sources.
- *
- * Directives (accept either `actions-warden-` or `aw-` prefix):
- *
- *   # actions-warden-ignore-file                - silence the entire file
- *   # actions-warden-ignore-start               - start a block (until -end)
- *   # actions-warden-ignore-end                 - end the current block
- *   # actions-warden-ignore-next-line           - silence the next non-comment line
- *   # actions-warden-ignore                     - silence the same line (inline)
- *
- * Optional rule filter: append rule ids after a colon, e.g.
- *   # actions-warden-ignore: unpinned-action,secrets-in-env
- *
- * Without a filter the directive silences every rule.
- */
-
-const PREFIX = '(?:actions-warden|aw)';
-const LEAD = '(?:#|;)\\s*';
-const TAIL = '(?::\\s*([\\w,\\s-]+?))?\\s*(?=;|$)';
-const RE_FILE = new RegExp(`${LEAD}${PREFIX}-ignore-file${TAIL}`);
-const RE_START = new RegExp(`${LEAD}${PREFIX}-ignore-start${TAIL}`);
-const RE_END = new RegExp(`${LEAD}${PREFIX}-ignore-end\\s*(?=;|$)`);
-const RE_NEXT = new RegExp(`${LEAD}${PREFIX}-ignore-next-line${TAIL}`);
-const RE_INLINE = new RegExp(`${LEAD}${PREFIX}-ignore(?!-)${TAIL}`);
-
-/**
- * @typedef {object} IgnoreScope
- * @property {boolean} wholeFile
- * @property {Set<string>|null} fileRules           - null means "all rules"
- * @property {Array<{start: number, end: number, rules: Set<string>|null}>} ranges
- * @property {Map<number, Set<string>|null>} lines  - line -> ignored rule set (or null = all)
- */
-
-/**
- * @param {string|null|undefined} list   comma- or whitespace-separated rule ids
- * @returns {Set<string>|null}            null = match every rule
- */
-function parseRuleList(list) {
-  if (!list) return null;
-  const ids = list.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
-  if (ids.length === 0) return null;
-  return new Set(ids);
-}
-
-/**
- * @param {string} source
- * @returns {IgnoreScope}
- */
-function parseIgnoreDirectives(source) {
-  /** @type {IgnoreScope} */
-  const scope = {
-    wholeFile: false,
-    fileRules: null,
-    ranges: [],
-    lines: new Map(),
-  };
-  const lines = source.split('\n');
-  /** @type {{start: number, rules: Set<string>|null}|null} */
-  let openBlock = null;
-
-  lines.forEach((text, i) => {
-    const lineNo = i + 1;
-    const fileMatch = text.match(RE_FILE);
-    if (fileMatch) {
-      scope.wholeFile = true;
-      scope.fileRules = parseRuleList(fileMatch[1]);
-      return;
-    }
-    const startMatch = text.match(RE_START);
-    if (startMatch) {
-      openBlock = { start: lineNo, rules: parseRuleList(startMatch[1]) };
-      return;
-    }
-    if (RE_END.test(text)) {
-      if (openBlock) {
-        scope.ranges.push({ start: openBlock.start, end: lineNo, rules: openBlock.rules });
-        openBlock = null;
-      }
-      return;
-    }
-    const nextMatch = text.match(RE_NEXT);
-    if (nextMatch) {
-      for (let j = i + 1; j < lines.length; j += 1) {
-        const next = lines[j].trim();
-        if (next === '' || next.startsWith('#')) continue;
-        mergeLine(scope.lines, j + 1, parseRuleList(nextMatch[1]));
-        break;
-      }
-      return;
-    }
-    const inlineMatch = text.match(RE_INLINE);
-    if (inlineMatch) {
-      mergeLine(scope.lines, lineNo, parseRuleList(inlineMatch[1]));
-    }
-  });
-
-  if (openBlock) {
-    scope.ranges.push({ start: openBlock.start, end: lines.length, rules: openBlock.rules });
-  }
-  return scope;
-}
-
-function mergeLine(map, line, rules) {
-  const existing = map.get(line);
-  if (existing === undefined) {
-    map.set(line, rules);
-    return;
-  }
-  if (existing === null || rules === null) {
-    map.set(line, null);
-    return;
-  }
-  for (const r of rules) existing.add(r);
-}
-
-/**
- * @param {IgnoreScope} scope
- * @param {number} line
- * @param {string} ruleId
- * @returns {boolean}
- */
-function isIgnored(scope, line, ruleId) {
-  if (scope.wholeFile && matches(scope.fileRules, ruleId)) return true;
-  for (const range of scope.ranges) {
-    if (line >= range.start && line <= range.end && matches(range.rules, ruleId)) return true;
-  }
-  const lineRules = scope.lines.get(line);
-  if (lineRules !== undefined && matches(lineRules, ruleId)) return true;
-  return false;
-}
-
-function matches(rules, ruleId) {
-  return rules === null ? true : rules.has(ruleId);
-}
-
-;// CONCATENATED MODULE: ./src/lib/identity.js
-
-
-
-/**
- * Return a stable repository-relative path using POSIX separators.
- *
- * @param {string} file
- * @param {string} cwd
- */
-function identity_canonicalPath(file, cwd = process.cwd()) {
-  return (0,external_node_path_namespaceObject.relative)(cwd, file).split(external_node_path_namespaceObject.sep).join('/');
-}
-
-/**
- * Create a stable, collision-resistant identifier for a source occurrence.
- *
- * IDs deliberately exclude absolute paths so they remain stable across clones.
- *
- * @param {object} input
- * @param {string} input.kind
- * @param {string} input.file
- * @param {string} input.cwd
- * @param {number} [input.line]
- * @param {number} [input.start]
- * @param {string} [input.subject]
- */
-function occurrenceId({
-  kind,
-  file,
-  cwd = process.cwd(),
-  line = 0,
-  start = 0,
-  subject = '',
-}) {
-  const identity = JSON.stringify({
-    kind,
-    file: identity_canonicalPath(file, cwd),
-    line,
-    start,
-    subject,
-  });
-  return (0,external_node_crypto_namespaceObject.createHash)('sha256').update(identity).digest('hex').slice(0, 16);
-}
-
-/**
- * The ID shared by an unpinned-action finding and its pin change.
- *
- * @param {object} input
- * @param {string} input.file
- * @param {string} input.cwd
- * @param {{line: number, start?: number, raw: string}} input.ref
- */
-function pinOccurrenceId({ file, cwd, ref }) {
-  return occurrenceId({
-    kind: 'pin',
-    file,
-    cwd,
-    line: ref.line,
-    start: ref.start ?? 0,
-    subject: ref.raw,
-  });
-}
-
-// EXTERNAL MODULE: ./node_modules/picomatch/index.js
-var picomatch = __nccwpck_require__(4006);
-;// CONCATENATED MODULE: ./src/lib/paths.js
-/**
- * Workflow file discovery with safe path handling.
- */
-
-
-
-
-
-/**
- * Default workflow directory globs.
- */
-const DEFAULT_WORKFLOW_PATTERNS = [
-  '.github/workflows/*.yml',
-  '.github/workflows/*.yaml',
-  'action.yml',
-  'action.yaml',
-  '**/action.yml',
-  '**/action.yaml',
-];
-
-/**
- * Reject path-traversal and absolute-escape attempts.
- *
- * @param {string} p
- * @param {string} cwd
- */
-function assertInside(p, cwd) {
-  if (typeof p !== 'string' || p.includes('\0')) {
-    throw new Error('invalid workflow path');
-  }
-  const root = (0,external_node_path_namespaceObject.resolve)(cwd);
-  const abs = (0,external_node_path_namespaceObject.resolve)(cwd, p);
-  const rel = (0,external_node_path_namespaceObject.relative)(root, abs);
-  if (isOutside(rel)) {
-    throw new Error(`path traversal rejected: ${p}`);
-  }
-  return abs;
-}
-
-function isOutside(rel) {
-  return rel === '..' || rel.startsWith(`..${external_node_path_namespaceObject.sep}`) || (0,external_node_path_namespaceObject.isAbsolute)(rel);
-}
-
-async function assertRealInside(path, cwd) {
-  const [root, target] = await Promise.all([(0,promises_namespaceObject.realpath)((0,external_node_path_namespaceObject.resolve)(cwd)), (0,promises_namespaceObject.realpath)(path)]);
-  if (isOutside((0,external_node_path_namespaceObject.relative)(root, target))) {
-    throw new Error(`symlink escape rejected: ${path}`);
-  }
-  return target;
-}
-
-/**
- * Recursively list files under a directory.
- *
- * @param {string} dir
- * @param {string[]} acc
- * @returns {Promise<string[]>}
- */
-async function walk(dir, acc = []) {
-  let entries;
-  try {
-    entries = await (0,promises_namespaceObject.readdir)(dir, { withFileTypes: true });
-  } catch {
-    return acc;
-  }
-  for (const entry of entries) {
-    if (entry.name.startsWith('.git') && entry.name !== '.github') continue;
-    if (entry.name === 'node_modules') continue;
-    const full = (0,external_node_path_namespaceObject.join)(dir, entry.name);
-    if (entry.isDirectory()) {
-      await walk(full, acc);
-    } else if (entry.isFile()) {
-      acc.push(full);
-    }
-  }
-  return acc;
-}
-
-/**
- * Discover workflow files matching the given patterns (relative to cwd).
- *
- * @param {object} opts
- * @param {string[]} [opts.patterns]
- * @param {string} [opts.cwd]
- * @returns {Promise<string[]>}
- */
-async function discoverWorkflows({ patterns = DEFAULT_WORKFLOW_PATTERNS, cwd = process.cwd() } = {}) {
-  const root = (0,external_node_path_namespaceObject.resolve)(cwd);
-  for (const p of patterns) assertInside(p, root);
-  const normalizedPatterns = patterns.map(p => {
-    const pattern = (0,external_node_path_namespaceObject.isAbsolute)(p) ? (0,external_node_path_namespaceObject.relative)(root, p) : p;
-    return pattern.split(external_node_path_namespaceObject.sep).join('/');
-  });
-  const matchers = normalizedPatterns.map(p => picomatch(p, { dot: true }));
-  const all = await walk(root);
-  const out = [];
-  for (const file of all) {
-    const rel = (0,external_node_path_namespaceObject.relative)(root, file).split(external_node_path_namespaceObject.sep).join('/');
-    if (matchers.some(m => m(rel))) out.push(file);
-  }
-  return out.sort();
-}
-
-/**
- * Resolve a single workflow path argument. If it's a directory or glob,
- * expand it; if a file, validate it exists.
- *
- * @param {string} input
- * @param {string} [cwd]
- * @returns {Promise<string[]>}
- */
-async function resolveWorkflowArg(input, cwd = process.cwd()) {
-  const abs = assertInside(input, cwd);
-  try {
-    const st = await (0,promises_namespaceObject.stat)(abs);
-    const safePath = await assertRealInside(abs, cwd);
-    if (st.isDirectory()) {
-      const files = await walk(safePath);
-      return files.filter(f => /\.ya?ml$/i.test(f)).sort();
-    }
-    if (!st.isFile()) return [];
-    return [safePath];
-  } catch {
-    return discoverWorkflows({ patterns: [input], cwd });
-  }
-}
-
-;// CONCATENATED MODULE: ./src/lib/targets.js
-
-
-/**
- * Resolve command workflow targets and reject empty scopes.
- *
- * @param {object} input
- * @param {string[]|undefined} input.workflows
- * @param {string} input.cwd
- */
-async function resolveTargets({ workflows, cwd }) {
-  if (!workflows || workflows.length === 0) {
-    const discovered = await discoverWorkflows({ cwd });
-    if (discovered.length === 0) {
-      throw new Error('no workflow or composite action files found');
-    }
-    return discovered;
-  }
-
-  const out = new Set();
-  for (const workflow of workflows) {
-    const files = await resolveWorkflowArg(workflow, cwd);
-    if (files.length === 0) {
-      throw new Error(`no workflows matched: ${workflow}`);
-    }
-    for (const file of files) out.add(file);
-  }
-  return [...out].sort();
-}
-
-;// CONCATENATED MODULE: ./src/lib/config.js
-
-
-
-
-
-const CONFIG_NAMES = ['.actions-warden.yml', '.actions-warden.yaml'];
-const SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
-const TOP_LEVEL_KEYS = new Set([
-  'version',
-  'baseline',
-  'ignore-paths',
-  'rules',
-  'runner-policy',
-]);
-
-const DEFAULT_CONFIG = Object.freeze({
-  path: null,
-  baseline: null,
-  ignorePaths: [],
-  rules: {},
-  runnerPolicy: {
-    trustedGroups: [],
-    selfHostedLabels: [],
-    flagUnknownGroups: false,
-  },
-});
-
-/**
- * Load and strictly validate repository policy.
- *
- * @param {object} options
- * @param {string} [options.cwd]
- * @param {string|false} [options.path]
- * @param {string[]} [options.ruleIds]
- */
-async function loadConfig({
-  cwd = process.cwd(),
-  path,
-  ruleIds = [],
-} = {}) {
-  if (path === false) {
-    return { ...DEFAULT_CONFIG, runnerPolicy: { ...DEFAULT_CONFIG.runnerPolicy } };
-  }
-  let resolvedPath;
-  if (path) {
-    resolvedPath = await resolveRepositoryFile(path, cwd);
-  } else {
-    for (const candidate of CONFIG_NAMES) {
-      try {
-        resolvedPath = await resolveRepositoryFile(candidate, cwd);
-        break;
-      } catch (error) {
-        if (error.code !== 'ENOENT') throw error;
-      }
-    }
-  }
-  if (!resolvedPath) return { ...DEFAULT_CONFIG, runnerPolicy: { ...DEFAULT_CONFIG.runnerPolicy } };
-
-  const source = await (0,promises_namespaceObject.readFile)(resolvedPath, 'utf8');
-  const document = (0,dist/* parseDocument */.Tp)(source);
-  if (document.errors.length > 0) {
-    throw new Error(`invalid actions-warden config: ${document.errors[0].message}`);
-  }
-  const raw = document.toJS() ?? {};
-  if (!isRecord(raw)) throw new Error('actions-warden config must be a mapping');
-  rejectUnknownKeys(raw, TOP_LEVEL_KEYS, 'config');
-  if (raw.version !== undefined && raw.version !== 1) {
-    throw new Error('actions-warden config version must be 1');
-  }
-
-  const knownRules = new Set(ruleIds);
-  const rules = validateRules(raw.rules, knownRules);
-  const runnerPolicy = validateRunnerPolicy(raw['runner-policy']);
-  const baseline = optionalString(raw.baseline, 'baseline');
-  const ignorePaths = stringArray(raw['ignore-paths'], 'ignore-paths');
-
-  return {
-    path: resolvedPath,
-    baseline,
-    ignorePaths,
-    rules,
-    runnerPolicy,
-  };
-}
-
-function filterIgnoredPaths(files, config, cwd) {
-  if (config.ignorePaths.length === 0) return files;
-  const matchers = config.ignorePaths.map(pattern => picomatch(pattern, { dot: true }));
-  return files.filter(file => {
-    const path = (0,external_node_path_namespaceObject.relative)(cwd, file).split(external_node_path_namespaceObject.sep).join('/');
-    return !matchers.some(matches => matches(path));
-  });
-}
-
-async function resolveRepositoryFile(path, cwd = process.cwd()) {
-  const requestedRoot = (0,external_node_path_namespaceObject.resolve)(cwd);
-  const requested = (0,external_node_path_namespaceObject.resolve)(requestedRoot, path);
-  if (!(0,external_node_path_namespaceObject.isAbsolute)(path) && config_isOutside((0,external_node_path_namespaceObject.relative)(requestedRoot, requested))) {
-    throw new Error(`path traversal rejected: ${path}`);
-  }
-  const [root, target] = await Promise.all([
-    (0,promises_namespaceObject.realpath)(requestedRoot),
-    (0,promises_namespaceObject.realpath)(requested),
-  ]);
-  if (config_isOutside((0,external_node_path_namespaceObject.relative)(root, target))) {
-    throw new Error(`repository file escapes working directory: ${path}`);
-  }
-  return target;
-}
-
-function validateRules(value, knownRules) {
-  if (value === undefined) return {};
-  if (!isRecord(value)) throw new Error('config.rules must be a mapping');
-  const rules = {};
-  for (const [ruleId, policy] of Object.entries(value)) {
-    if (knownRules.size > 0 && !knownRules.has(ruleId)) {
-      throw new Error(`unknown rule in config: ${ruleId}`);
-    }
-    if (!isRecord(policy)) throw new Error(`config.rules.${ruleId} must be a mapping`);
-    rejectUnknownKeys(policy, new Set(['enabled', 'severity']), `config.rules.${ruleId}`);
-    if (policy.enabled !== undefined && typeof policy.enabled !== 'boolean') {
-      throw new Error(`config.rules.${ruleId}.enabled must be a boolean`);
-    }
-    if (policy.severity !== undefined && !SEVERITIES.has(policy.severity)) {
-      throw new Error(`config.rules.${ruleId}.severity must be low, medium, high, or critical`);
-    }
-    rules[ruleId] = {
-      enabled: policy.enabled ?? true,
-      severity: policy.severity,
-    };
-  }
-  return rules;
-}
-
-function validateRunnerPolicy(value) {
-  if (value === undefined) return { ...DEFAULT_CONFIG.runnerPolicy };
-  if (!isRecord(value)) throw new Error('config.runner-policy must be a mapping');
-  rejectUnknownKeys(
-    value,
-    new Set(['trusted-groups', 'self-hosted-labels', 'flag-unknown-groups']),
-    'config.runner-policy',
-  );
-  const flagUnknownGroups = value['flag-unknown-groups'] ?? false;
-  if (typeof flagUnknownGroups !== 'boolean') {
-    throw new Error('config.runner-policy.flag-unknown-groups must be a boolean');
-  }
-  return {
-    trustedGroups: stringArray(value['trusted-groups'], 'runner-policy.trusted-groups'),
-    selfHostedLabels: stringArray(
-      value['self-hosted-labels'],
-      'runner-policy.self-hosted-labels',
-    ),
-    flagUnknownGroups,
-  };
-}
-
-function rejectUnknownKeys(value, allowed, label) {
-  for (const key of Object.keys(value)) {
-    if (!allowed.has(key)) throw new Error(`unknown ${label} key: ${key}`);
-  }
-}
-
-function stringArray(value, label) {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !item)) {
-    throw new Error(`config.${label} must be an array of non-empty strings`);
-  }
-  return [...new Set(value)];
-}
-
-function optionalString(value, label) {
-  if (value === undefined) return null;
-  if (typeof value !== 'string' || !value) {
-    throw new Error(`config.${label} must be a non-empty string`);
-  }
-  return value;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function config_isOutside(path) {
-  return path === '..' || path.startsWith(`..${external_node_path_namespaceObject.sep}`) || (0,external_node_path_namespaceObject.isAbsolute)(path);
-}
-
-;// CONCATENATED MODULE: ./src/lib/baseline.js
-
-
-
-
-/**
- * Load a versioned baseline and return its finding IDs.
- */
-async function loadBaseline({ path, cwd = process.cwd() }) {
-  const resolvedPath = await resolveRepositoryFile(path, cwd);
-  const raw = JSON.parse(await (0,promises_namespaceObject.readFile)(resolvedPath, 'utf8'));
-  if (!raw || typeof raw !== 'object' || raw.schemaVersion !== '1.0') {
-    throw new Error('baseline schemaVersion must be "1.0"');
-  }
-  if (!Array.isArray(raw.findings)) {
-    throw new Error('baseline findings must be an array');
-  }
-  const ids = new Set();
-  const fingerprints = new Set();
-  for (const finding of raw.findings) {
-    if (!finding || typeof finding !== 'object' || typeof finding.id !== 'string') {
-      throw new Error('every baseline finding must contain a string id');
-    }
-    ids.add(finding.id);
-    if (finding.fingerprint !== undefined && typeof finding.fingerprint !== 'string') {
-      throw new Error('baseline finding fingerprints must be strings');
-    }
-    if (finding.fingerprint) fingerprints.add(finding.fingerprint);
-  }
-  return { path: resolvedPath, ids, fingerprints };
-}
-
-/**
- * Serialize current findings deterministically for review and version control.
- */
-function serializeBaseline(findings, cwd = process.cwd()) {
-  const records = findings
-    .filter(finding => finding.ruleId !== 'parse-error')
-    .map(finding => ({
-      id: finding.id,
-      fingerprint: finding.fingerprint,
-      ruleId: finding.ruleId,
-      severity: finding.severity,
-      file: canonicalPath(finding.file, cwd),
-      line: finding.line,
-    }))
-    .sort((a, b) => (
-      a.file.localeCompare(b.file)
-      || a.line - b.line
-      || a.ruleId.localeCompare(b.ruleId)
-      || a.id.localeCompare(b.id)
-    ));
-  return `${JSON.stringify({
-    schemaVersion: '1.0',
-    generatedBy: 'actions-warden',
-    findings: records,
-  }, null, 2)}\n`;
-}
-
-/**
- * Attach line-independent semantic fingerprints while distinguishing repeated
- * equivalent findings by their source-order ordinal.
- */
-function assignBaselineFingerprints(findings, cwd = process.cwd()) {
-  const ordered = [...findings].sort((a, b) => (
-    identity_canonicalPath(a.file, cwd).localeCompare(identity_canonicalPath(b.file, cwd))
-    || a.line - b.line
-    || a.ruleId.localeCompare(b.ruleId)
-    || a.id.localeCompare(b.id)
-  ));
-  const occurrences = new Map();
-  for (const finding of ordered) {
-    const semantic = stableValue(Object.fromEntries(
-      Object.entries(finding.fields ?? {})
-        .filter(([key]) => !['file', 'line', 'sev', 'source_line'].includes(key)),
-    ));
-    const key = JSON.stringify({
-      ruleId: finding.ruleId,
-      file: identity_canonicalPath(finding.file, cwd),
-      fields: semantic,
-    });
-    const ordinal = occurrences.get(key) ?? 0;
-    occurrences.set(key, ordinal + 1);
-    finding.fingerprint = occurrenceId({
-      kind: 'baseline',
-      file: finding.file,
-      cwd,
-      subject: `${key}#${ordinal}`,
-    });
-  }
-  return findings;
-}
-
-function stableValue(value) {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, item]) => [key, stableValue(item)]),
-    );
-  }
-  return value;
 }
 
 ;// CONCATENATED MODULE: ./src/rules/unpinned-action.js
@@ -16081,7 +15069,7 @@ function hasTrigger(on, name) {
  * code execution while covering common build/test/package entry points.
  */
 
-const WORKSPACE_COMMAND = /(?:^|[;&|])\s*(?:sudo\s+)?(?:(?:\.{0,2}[\\/]|[A-Za-z]:[\\/]|[A-Za-z0-9_.-]+[\\/])[^\s;&|]+|source\s+[^\s;&|]+|make(?:\s|$)|npm\s+(?:ci|install|test|run|exec)\b|npx\b|pnpm\s+(?:install|test|run|exec)\b|yarn\s+(?:install|test|run|exec)\b|bun\s+(?:install|test|run|x)\b|(?:bash|sh|zsh|python3?|ruby|node|perl|php)\s+[^\s;&|]+|(?:pwsh|powershell)(?:\.exe)?\s+(?:-File\s+)?[^\s;&|]+|cmd(?:\.exe)?\s+\/c\s+[^\s;&|]+|java\s+-jar\s+[^\s;&|]+|cargo\s+(?:build|test|run)\b|go\s+(?:build|test|run)\b|mvn\b|gradle\b|\.\/gradlew\b|dotnet\s+(?:build|test|run|publish)\b|bundle\s+exec\b|rake\b|pytest\b)/im;
+const WORKSPACE_COMMAND = /(?:^|[;&|])\s*(?:sudo\s+)?(?:(?:\.{0,2}[\\/]|[A-Za-z]:[\\/]|[A-Za-z0-9_.-]+[\\/])[^\s;&|]+|source\s+[^\s;&|]+|make(?:\s|$)|npm\s+(?:ci|install|test|run|exec)\b|npx\b|pnpm\s+(?:install|test|run|exec)\b|yarn\s+(?:install|test|run|exec)\b|bun\s+(?:install|test|run|x)\b|deno\s+(?:run|test|task)\b|(?:pip3?|uv\s+pip|poetry)\s+(?:install|run)\b|uv\s+run\b|tox\b|nox\b|composer\s+(?:install|run|exec)\b|swift\s+(?:build|test)\b|sbt\b|cmake\s+--build\b|(?:bash|sh|zsh|python3?|ruby|node|perl|php)\s+[^\s;&|]+|(?:pwsh|powershell)(?:\.exe)?\s+(?:-File\s+)?[^\s;&|]+|cmd(?:\.exe)?\s+\/c\s+[^\s;&|]+|java\s+-jar\s+[^\s;&|]+|cargo\s+(?:build|test|run|check|clippy)\b|go\s+(?:build|test|run)\b|mvn\b|gradle\b|\.\/gradlew\b|dotnet\s+(?:build|test|run|publish)\b|bundle\s+exec\b|rake\b|pytest\b|docker(?:\s+compose)?\s+(?:build|run)\b)/im;
 const WORKSPACE_ACTION = /(?:^|[-_/])(build|builder|compile|exec|package|publish|runner|test|deploy)(?:[-_/]|$)/i;
 
 /**
@@ -16117,6 +15105,10 @@ function executesWorkspace(step, { sourcePaths = ['.'] } = {}) {
   ));
 }
 
+/**
+ * Normalize a configured source path, conservatively treating dynamic
+ * expressions and empty values as the workspace root.
+ */
 function normalizeSourcePath(value) {
   if (typeof value !== 'string' || !value.trim()) return '.';
   const expanded = normalizeTrustedRoots(value);
@@ -16212,6 +15204,10 @@ function checkoutProtection(step) {
   return { active: false, reason: 'unknown-or-unprotected-version' };
 }
 
+/**
+ * Describe an unprotected checkout of pull-request code, or return null when
+ * the step is unrelated or has recognized checkout protection.
+ */
 function checkoutOfUntrustedPr(step) {
   if (!step.uses) return null;
   if (
@@ -16240,6 +15236,7 @@ function checkoutOfUntrustedPr(step) {
   };
 }
 
+/** Return whether a shell step directly fetches pull-request-controlled code. */
 function fetchesUntrustedPrCode(step) {
   if (typeof step.run !== 'string') return false;
   if (/\bgh\s+pr\s+(?:checkout|co)\b/i.test(step.run)) return true;
@@ -16362,6 +15359,8 @@ function reusable_workflow_secrets_check(workflow) {
   return findings;
 }
 
+// EXTERNAL MODULE: ./node_modules/picomatch/index.js
+var picomatch = __nccwpck_require__(4006);
 ;// CONCATENATED MODULE: ./src/rules/untrusted-self-hosted-runner.js
 
 
@@ -16630,7 +15629,7 @@ function workflow_structure_check(workflow) {
     'permissions',
   ));
 
-  if (!workflow_structure_isRecord(workflow.raw?.jobs)) {
+  if (!isRecord(workflow.raw?.jobs)) {
     findings.push(finding(1, 'jobs-mapping', '`jobs:` must be a mapping of job IDs to job definitions'));
     return findings;
   }
@@ -16892,7 +15891,7 @@ function permissionFindings(value, declared, line, issue, job) {
       job,
     )];
   }
-  if (!workflow_structure_isRecord(value)) {
+  if (!isRecord(value)) {
     return [finding(line, issue, '`permissions` must be a mapping or a supported shorthand', job)];
   }
   const invalid = Object.entries(value)
@@ -16954,7 +15953,7 @@ function validTriggers(value) {
   if (Array.isArray(value)) {
     return value.length > 0 && value.every(event => typeof event === 'string' && event.length > 0);
   }
-  return workflow_structure_isRecord(value) && Object.keys(value).length > 0;
+  return isRecord(value) && Object.keys(value).length > 0;
 }
 
 function validRunnerSelector(value) {
@@ -16963,7 +15962,7 @@ function validRunnerSelector(value) {
     return value.length > 0
       && value.every(label => typeof label === 'string' && label.trim().length > 0);
   }
-  if (!workflow_structure_isRecord(value)) return false;
+  if (!isRecord(value)) return false;
   const groupValid = typeof value.group === 'string' && value.group.trim().length > 0;
   const labelsValid = typeof value.labels === 'string'
     ? value.labels.trim().length > 0
@@ -16973,7 +15972,7 @@ function validRunnerSelector(value) {
   return groupValid || labelsValid;
 }
 
-function workflow_structure_isRecord(value) {
+function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
@@ -17028,6 +16027,1506 @@ const RULES = [
  */
 function listRules() {
   return RULES.map(r => ({ id: r.id, severity: r.severity, description: r.description }));
+}
+
+;// CONCATENATED MODULE: ./src/lib/redact.js
+/**
+ * Secret redaction utility.
+ *
+ * Replaces values that look like tokens, credentials, or high-entropy strings
+ * with `<redacted>`. Conservative by design: prefers false positives over leaks.
+ */
+
+
+
+const TOKEN_PATTERNS = [
+  /ghp_[A-Za-z0-9]{30,}/g,
+  /ghs_[A-Za-z0-9]{30,}/g,
+  /gho_[A-Za-z0-9]{30,}/g,
+  /ghu_[A-Za-z0-9]{30,}/g,
+  /github_pat_[A-Za-z0-9_]{30,}/g,
+  /xox[abprs]-[A-Za-z0-9-]{10,}/g,
+  /(?:AKIA|ASIA)[0-9A-Z]{16}/g,
+  /sk-[A-Za-z0-9]{20,}/g,
+  /(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}/g,
+  /AIza[0-9A-Za-z_-]{30,}/g,
+  /ya29\.[0-9A-Za-z_-]{20,}/g,
+  /npm_[0-9A-Za-z]{20,}/g,
+  /eyJ[0-9A-Za-z_-]{8,}\.[0-9A-Za-z_-]{8,}\.[0-9A-Za-z_-]{8,}/g,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+];
+
+const SENSITIVE_KEY = /(?:token|secret|password|api[_-]?key|auth[_-]?token|access[_-]?key|private[_-]?key)$/i;
+const KV_TOKEN_KEYS = /([\w-]*(?:token|secret|password|api[_-]?key|auth[_-]?token|access[_-]?key|private[_-]?key))(\s*[:=]\s*)["']?([^"'\s,]+)/gi;
+const HIGH_ENTROPY = /[A-Za-z0-9_+/-]{32,}={0,2}/g;
+// Public rule IDs and artifact kinds long enough to trip the generic entropy
+// heuristic. Keep the exceptions exact instead of weakening detection for
+// arbitrary kebab-case values, which may still be credentials or passphrases.
+const SAFE_PUBLIC_VALUES = new Set([
+  ...RULES.map(rule => rule.id),
+  'actions-warden-agent-receipt',
+  'actions-warden-org-scan-receipt',
+  'actions-warden-org-scan-directory',
+  'actions-warden-org-scan-manifest',
+  'actions-warden-org-scan-progress',
+  'actions-warden-org-scan-repository',
+]);
+
+/**
+ * Redacts sensitive substrings from a value.
+ *
+ * @param {unknown} input
+ * @returns {string}
+ */
+function redact(input) {
+  if (input == null) return '';
+  let s = typeof input === 'string' ? input : String(input);
+  for (const re of TOKEN_PATTERNS) s = s.replace(re, '<redacted>');
+  s = s.replace(KV_TOKEN_KEYS, (_, key, separator) => `${key}${separator}<redacted>`);
+  s = s.replace(HIGH_ENTROPY, value => (
+    shouldRedactHighEntropy(value) ? '<redacted>' : value
+  ));
+  return s;
+}
+
+/**
+ * Recursively redact strings in a JSON-compatible value.
+ *
+ * @param {unknown} input
+ * @param {WeakSet<object>} [seen]
+ * @returns {unknown}
+ */
+function redactDeep(input, seen = new WeakSet()) {
+  if (typeof input === 'string') return redact(input);
+  if (input === null || typeof input !== 'object') return input;
+  if (seen.has(input)) return '<circular>';
+  seen.add(input);
+  let output;
+  if (input instanceof Date) {
+    output = input.toISOString();
+  } else if (input instanceof Error) {
+    output = {
+      name: redact(input.name),
+      message: redact(input.message),
+    };
+    for (const [key, value] of Object.entries(input)) {
+      output[key] = SENSITIVE_KEY.test(key) ? '<redacted>' : redactDeep(value, seen);
+    }
+  } else if (input instanceof Set) {
+    output = [...input].map(item => redactDeep(item, seen));
+  } else if (input instanceof Map) {
+    output = Object.fromEntries(
+      [...input.entries()].map(([k, v]) => [
+        redact(String(k)),
+        SENSITIVE_KEY.test(String(k)) ? '<redacted>' : redactDeep(v, seen),
+      ]),
+    );
+  } else if (Array.isArray(input)) {
+    output = input.map(item => redactDeep(item, seen));
+  } else {
+    output = {};
+    for (const [key, value] of Object.entries(input)) {
+      output[key] = SENSITIVE_KEY.test(key) ? '<redacted>' : redactDeep(value, seen);
+    }
+  }
+  seen.delete(input);
+  return output;
+}
+
+function shouldRedactHighEntropy(value) {
+  if (SAFE_PUBLIC_VALUES.has(value)) return false;
+  if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value)) return false;
+  const categories = [
+    /[a-z]/.test(value),
+    /[A-Z]/.test(value),
+    /\d/.test(value),
+    /[_+/=-]/.test(value),
+  ].filter(Boolean).length;
+  if (categories < 2) return false;
+  const frequencies = new Map();
+  for (const char of value) frequencies.set(char, (frequencies.get(char) ?? 0) + 1);
+  let entropy = 0;
+  for (const count of frequencies.values()) {
+    const probability = count / value.length;
+    entropy -= probability * Math.log2(probability);
+  }
+  return entropy >= 3.5;
+}
+
+/**
+ * Wraps console.error/log so any string-coerced argument is redacted first.
+ *
+ * @param {(...args: unknown[]) => void} fn
+ * @returns {(...args: unknown[]) => void}
+ */
+function safeLogger(fn) {
+  return (...args) => fn(...args.map(a => redactDeep(a)));
+}
+
+;// CONCATENATED MODULE: ./src/lib/formatter.js
+/**
+ * Output formatter supporting TOON (Token-Oriented Object Notation), JSON,
+ * plain text, CSV, SARIF, and self-contained HTML.
+ *
+ * TOON output rules:
+ *   - One record per line: `LABEL: key=value key=value`
+ *   - Values containing spaces or `=` are quoted: `msg="hello world"`
+ *   - Empty/null values are omitted
+ *   - Trailing `STATUS: OK` or `STATUS: FAIL` signal for machine consumers
+ */
+
+
+
+const MAX_HTML_REPORT_BYTES = 32 * 1024 * 1024;
+const CSV_PREFERRED_COLUMNS = Object.freeze([
+  'status',
+  'organization',
+  'repo',
+  'repository',
+  'file',
+  'line',
+  'id',
+  'type',
+  'ruleId',
+  'sev',
+  'severity',
+  'action',
+  'image',
+  'from',
+  'to',
+  'sha',
+  'version',
+  'level',
+  'change',
+  'msg',
+  'explain',
+  'url',
+]);
+
+/**
+ * Severity ordering, lowest-to-highest.
+ */
+const SEVERITY_ORDER = ['low', 'medium', 'high', 'critical'];
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function quoteIfNeeded(value) {
+  if (value === '') return '""';
+  if (/[\s="\\]/.test(value) || [...value].some(char => char.charCodeAt(0) < 32)) {
+    return JSON.stringify(value);
+  }
+  return value;
+}
+
+/**
+ * Serialize a record to a single TOON line.
+ *
+ * @param {string} label
+ * @param {Record<string, unknown>} fields
+ * @returns {string}
+ */
+function toonLine(label, fields) {
+  const parts = [];
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === null || v === undefined || v === '') continue;
+    const value = typeof v === 'string' ? v : String(v);
+    const key = redact(String(k)).replace(/[^a-zA-Z0-9_.-]/g, '_');
+    parts.push(`${key}=${quoteIfNeeded(redact(value))}`);
+  }
+  return parts.length === 0 ? `${label}:` : `${label}: ${parts.join(' ')}`;
+}
+
+/**
+ * Render a TOON document.
+ *
+ * @param {Array<{label: string, fields: Record<string, unknown>}>} records
+ * @param {{status?: 'OK'|'FAIL'}} [options]
+ * @returns {string}
+ */
+function renderToon(records, options = {}) {
+  const lines = records.map(r => toonLine(r.label, r.fields));
+  if (options.status) lines.push(`STATUS: ${options.status}`);
+  return lines.join('\n') + '\n';
+}
+
+/**
+ * Render recursively redacted JSON with 2-space indentation. Object key order
+ * follows the caller-provided value.
+ *
+ * @param {unknown} payload
+ * @returns {string}
+ */
+function renderJson(payload) {
+  return JSON.stringify(redactDeep(payload), null, 2) + '\n';
+}
+
+/**
+ * Render records as deterministic RFC 4180-compatible CSV. The first column
+ * identifies the record type and a final STATUS record preserves semantic
+ * status. Control characters are escaped to keep one physical line per record,
+ * and formula-like cells are prefixed with an apostrophe for spreadsheet safety.
+ *
+ * @param {Array<{label: string, fields: Record<string, unknown>}>} records
+ * @param {{status?: 'OK'|'FAIL'}} [options]
+ * @returns {string}
+ */
+function renderCsv(records, options = {}) {
+  const normalized = normalizeCsvRecords(records);
+  if (options.status) {
+    normalized.push({
+      label: 'STATUS',
+      fields: new Map([['status', redact(String(options.status))]]),
+    });
+  }
+
+  const discovered = new Set(normalized.flatMap(record => [...record.fields.keys()]));
+  discovered.delete('record_type');
+  const preferred = CSV_PREFERRED_COLUMNS.filter(column => discovered.delete(column));
+  const columns = ['record_type', ...preferred, ...[...discovered].sort()];
+  const rows = [columns.map(csvCell).join(',')];
+  for (const record of normalized) {
+    rows.push(columns.map(column => csvCell(
+      column === 'record_type' ? record.label : record.fields.get(column),
+    )).join(','));
+  }
+  return `${rows.join('\r\n')}\r\n`;
+}
+
+/**
+ * Render plain text (human-readable summary).
+ *
+ * @param {Array<{label: string, fields: Record<string, unknown>}>} records
+ * @param {{status?: 'OK'|'FAIL'}} [options]
+ * @returns {string}
+ */
+function renderText(records, options = {}) {
+  const lines = records.map(r => {
+    const kv = Object.entries(r.fields)
+      .filter(([, v]) => v !== null && v !== undefined && v !== '')
+      .map(([k, v]) => `${k}=${escapeText(redact(String(v)))}`)
+      .join(' ');
+    return `[${r.label}] ${kv}`;
+  });
+  if (options.status) lines.push(`==> ${options.status}`);
+  return lines.join('\n') + '\n';
+}
+
+function escapeText(value) {
+  return JSON.stringify(value).slice(1, -1);
+}
+
+/**
+ * Format records into the requested output mode.
+ *
+ * @param {'toon'|'json'|'text'|'csv'|'sarif'|'html'} format
+ * @param {Array<{label: string, fields: Record<string, unknown>}>} records
+ * @param {{status?: 'OK'|'FAIL', json?: unknown, title?: string,
+ *   metadata?: Record<string, unknown>}} [options]
+ * @returns {string}
+ */
+function formatter_format(format_, records, options = {}) {
+  switch (format_) {
+    case 'json':
+      return renderJson(options.json ?? recordsToJson(records, options));
+    case 'text':
+      return renderText(records, options);
+    case 'csv':
+      return renderCsv(records, options);
+    case 'sarif':
+      return renderSarif(records, options);
+    case 'html':
+      return renderHtml(records, options);
+    case 'toon':
+    default:
+      return renderToon(records, options);
+  }
+}
+
+function normalizeCsvRecords(records) {
+  if (!Array.isArray(records)) return [];
+  return records.map(record => {
+    const source = record?.fields;
+    const entries = source && typeof source === 'object' && !Array.isArray(source)
+      ? Object.entries(source)
+      : [];
+    return {
+      label: redact(String(record?.label ?? 'RECORD')),
+      fields: new Map(entries.map(([key, value]) => [
+        redact(String(key)),
+        redactDeep(value),
+      ])),
+    };
+  });
+}
+
+function csvCell(value) {
+  if (value === null || value === undefined) return '';
+  const formulaSensitive = typeof value === 'string';
+  let serialized;
+  if (typeof value === 'string') {
+    serialized = redact(value);
+  } else if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    serialized = String(value);
+  } else {
+    serialized = JSON.stringify(redactDeep(value));
+    if (serialized === undefined) serialized = String(value);
+  }
+  serialized = escapeCsvControls(redact(serialized));
+  if (formulaSensitive && /^\s*[=+\-@]/u.test(serialized)) serialized = `'${serialized}`;
+  return /[",\r\n]/.test(serialized)
+    ? `"${serialized.replaceAll('"', '""')}"`
+    : serialized;
+}
+
+function escapeCsvControls(value) {
+  let escaped = '';
+  for (const character of value) {
+    if (character === '\r') escaped += '\\r';
+    else if (character === '\n') escaped += '\\n';
+    else if (character === '\t') escaped += '\\t';
+    else {
+      const code = character.charCodeAt(0);
+      if (code <= 31 || code === 127) {
+        escaped += `\\u${code.toString(16).padStart(4, '0')}`;
+      } else {
+        escaped += character;
+      }
+    }
+  }
+  return escaped;
+}
+
+/**
+ * Render a deterministic, self-contained HTML report with client-side search
+ * and filters. Dynamic values are redacted and escaped before entering markup;
+ * no report data is interpolated into executable JavaScript.
+ *
+ * @param {Array<{label: string, fields: Record<string, unknown>}>} records
+ * @param {{status?: 'OK'|'FAIL', title?: string,
+ *   metadata?: Record<string, unknown>}} [options]
+ * @returns {string}
+ */
+function renderHtml(records, options = {}) {
+  const normalized = normalizeHtmlRecords(redactDeep(records));
+  const status = redact(String(options.status ?? 'UNKNOWN'));
+  const title = redact(String(options.title ?? 'actions-warden report'));
+  const metadata = normalizeFields(redactDeep(options.metadata ?? {}));
+  const summary = [...normalized].reverse().find(record => record.label === 'SUMMARY');
+  const detailRecords = normalized.filter(record => record.label !== 'SUMMARY');
+  const groups = groupRecords(detailRecords);
+  const findings = normalized.filter(record => record.label === 'FINDING');
+  const ruleCounts = summarizeHtmlRules(findings);
+  const labels = [...new Set(detailRecords.map(record => record.label))].sort();
+  const severities = [...new Set(detailRecords
+    .map(record => record.fields.sev ?? record.fields.severity)
+    .filter(Boolean)
+    .map(String))].sort(severitySort);
+  const repositories = [...new Set(detailRecords
+    .map(recordRepository)
+    .filter(Boolean))].sort((left, right) => left.localeCompare(right));
+  const incomplete = Number(summary?.fields.errors ?? 0) > 0
+    || Number(summary?.fields.repositoriesFailed ?? 0) > 0
+    || detailRecords.some(record => record.label === 'ERROR')
+    || detailRecords.some(record => (
+      record.label === 'UNKNOWN_FINDING'
+      || (record.label === 'COMPARISON' && record.fields.complete === 'false')
+      || (record.label === 'COVERAGE' && record.fields.complete === 'false')
+    ))
+    || findings.some(record => (
+      record.fields.type === 'parse-error' || record.fields.ruleId === 'parse-error'
+    ));
+
+  const document = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
+  <title>${escapeHtml(title)}</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #f6f8fa; --panel: #fff; --text: #1f2328; --muted: #59636e; --border: #d0d7de; --accent: #0969da; --ok: #1a7f37; --fail: #cf222e; --critical: #82071e; --high: #cf222e; --medium: #9a6700; --low: #0969da; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --panel: #161b22; --text: #e6edf3; --muted: #8d96a0; --border: #30363d; --accent: #58a6ff; --ok: #3fb950; --fail: #f85149; --critical: #ff7b72; --high: #f85149; --medium: #d29922; --low: #58a6ff; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { width: min(1600px, 100%); margin: 0 auto; padding: 24px; }
+    h1, h2, h3 { line-height: 1.25; }
+    h1 { margin: 0; font-size: clamp(24px, 4vw, 36px); }
+    h2 { margin: 0 0 16px; font-size: 20px; }
+    h3 { margin: 0 0 12px; font-size: 16px; }
+    .header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+    .eyebrow, .muted { color: var(--muted); }
+    .eyebrow { margin: 0 0 4px; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .panel { margin: 16px 0; padding: 18px; overflow: hidden; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 1px 0 rgb(31 35 40 / 4%); }
+    .status, .badge { display: inline-flex; align-items: center; border-radius: 999px; font-weight: 700; white-space: nowrap; }
+    .status { padding: 7px 12px; font-size: 13px; }
+    .badge { padding: 2px 8px; font-size: 12px; background: color-mix(in srgb, var(--muted) 14%, transparent); }
+    .status-ok, .badge-ok, .badge-resolved { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+    .status-fail, .badge-fail, .badge-new, .badge-unknown { color: var(--fail); background: color-mix(in srgb, var(--fail) 14%, transparent); }
+    .badge-critical { color: var(--critical); background: color-mix(in srgb, var(--critical) 14%, transparent); }
+    .badge-high { color: var(--high); background: color-mix(in srgb, var(--high) 14%, transparent); }
+    .badge-medium { color: var(--medium); background: color-mix(in srgb, var(--medium) 14%, transparent); }
+    .badge-low, .badge-unchanged { color: var(--low); background: color-mix(in srgb, var(--low) 14%, transparent); }
+    .callout { border-left: 4px solid var(--fail); }
+    .callout strong { display: block; margin-bottom: 4px; }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 10px; }
+    .metric { min-width: 0; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+    .metric-name { display: block; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; }
+    .metric-value { display: block; margin-top: 3px; overflow-wrap: anywhere; font-size: 20px; font-weight: 700; }
+    .filters { display: grid; grid-template-columns: minmax(220px, 2fr) repeat(3, minmax(140px, 1fr)); gap: 10px; }
+    label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; font-weight: 600; }
+    input, select { width: 100%; min-height: 38px; padding: 7px 9px; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; font: inherit; }
+    input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .filter-count { margin: 10px 0 0; color: var(--muted); }
+    .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 9px 11px; vertical-align: top; text-align: left; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+    th { position: sticky; top: 0; z-index: 1; color: var(--muted); background: var(--panel); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+    code { font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; white-space: pre-wrap; }
+    a { color: var(--accent); text-decoration-thickness: .08em; text-underline-offset: .15em; }
+    [hidden] { display: none !important; }
+    footer { margin: 24px 0 8px; color: var(--muted); font-size: 12px; text-align: center; }
+    @media (max-width: 800px) { main { padding: 14px; } .header { align-items: stretch; flex-direction: column; } .filters { grid-template-columns: 1fr; } }
+    @media print { :root { color-scheme: light; } body { background: #fff; color: #000; } main { width: 100%; padding: 0; } .filters-panel { display: none; } .panel { break-inside: avoid; box-shadow: none; } th { position: static; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header class="header">
+      <div><p class="eyebrow">actions-warden report</p><h1>${escapeHtml(title)}</h1></div>
+      <span class="status ${statusClass(status)}">${escapeHtml(status)}</span>
+    </header>
+    ${incomplete ? `<section class="panel callout"><strong>Coverage is incomplete</strong><span>One or more repositories or files could not be fully inspected. Review operational errors before treating absent findings as clean.</span></section>` : ''}
+    ${renderHtmlMetadata(metadata)}
+    ${renderHtmlSummary(summary?.fields)}
+    ${renderHtmlRuleBreakdown(ruleCounts)}
+    ${detailRecords.length > 0 ? renderHtmlFilters({ labels, severities, repositories, total: detailRecords.length }) : ''}
+    ${[...groups.entries()].map(([label, values]) => renderHtmlGroup(label, values)).join('\n    ')}
+    <footer>Generated deterministically by actions-warden. The saved report may contain sensitive repository names, paths, and findings.</footer>
+  </main>
+  <script>
+    (() => {
+      const rows = [...document.querySelectorAll('[data-record]')];
+      const search = document.querySelector('#filter-search');
+      const label = document.querySelector('#filter-label');
+      const severity = document.querySelector('#filter-severity');
+      const repository = document.querySelector('#filter-repository');
+      const count = document.querySelector('#filter-count');
+      if (!search || !label || !severity || !repository || !count) return;
+      const apply = () => {
+        const query = search.value.trim().toLocaleLowerCase();
+        let visible = 0;
+        for (const row of rows) {
+          const matches = (!query || row.dataset.search.includes(query))
+            && (!label.value || row.dataset.label === label.value)
+            && (!severity.value || row.dataset.severity === severity.value)
+            && (!repository.value || row.dataset.repository === repository.value);
+          row.hidden = !matches;
+          if (matches) visible += 1;
+        }
+        for (const section of document.querySelectorAll('[data-record-section]')) {
+          section.hidden = !section.querySelector('[data-record]:not([hidden])');
+        }
+        count.textContent = String(visible) + ' of ' + String(rows.length) + ' records shown';
+      };
+      for (const control of [search, label, severity, repository]) {
+        control.addEventListener(control === search ? 'input' : 'change', apply);
+      }
+      apply();
+    })();
+  </script>
+</body>
+</html>
+`;
+  const bytes = Buffer.byteLength(document);
+  if (bytes > MAX_HTML_REPORT_BYTES) {
+    throw new Error(
+      `HTML report exceeds ${MAX_HTML_REPORT_BYTES} bytes; use JSON, SARIF, or a narrower scope`,
+    );
+  }
+  return document;
+}
+
+function normalizeHtmlRecords(records) {
+  if (!Array.isArray(records)) return [];
+  return records.map(record => ({
+    label: redact(String(record?.label ?? 'RECORD')),
+    fields: normalizeFields(record?.fields),
+  }));
+}
+
+function normalizeFields(fields) {
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return {};
+  return Object.fromEntries(Object.entries(fields)
+    .filter(([, value]) => value !== null && value !== undefined && value !== '')
+    .map(([key, value]) => [redact(String(key)), htmlValue(value)]));
+}
+
+function htmlValue(value) {
+  if (typeof value === 'string') return redact(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return redact(JSON.stringify(value));
+}
+
+function groupRecords(records) {
+  const groups = new Map();
+  for (const record of records) {
+    if (!groups.has(record.label)) groups.set(record.label, []);
+    groups.get(record.label).push(record);
+  }
+  return groups;
+}
+
+function summarizeHtmlRules(findings) {
+  const counts = new Map();
+  for (const finding of findings) {
+    const rule = String(finding.fields.type ?? finding.fields.ruleId ?? 'unknown');
+    const severity = String(finding.fields.sev ?? finding.fields.severity ?? 'unknown');
+    const key = `${severity}\0${rule}`;
+    const current = counts.get(key) ?? { rule, severity, count: 0 };
+    current.count += 1;
+    counts.set(key, current);
+  }
+  return [...counts.values()].sort((left, right) => (
+    severitySort(left.severity, right.severity)
+    || right.count - left.count
+    || left.rule.localeCompare(right.rule)
+  ));
+}
+
+function renderHtmlMetadata(metadata) {
+  const entries = Object.entries(metadata);
+  if (entries.length === 0) return '';
+  return `<section class="panel"><h2>Report scope</h2><div class="metrics">${entries.map(([name, value]) => (
+    `<div class="metric"><span class="metric-name">${escapeHtml(humanize(name))}</span><span class="metric-value"><code>${escapeHtml(value)}</code></span></div>`
+  )).join('')}</div></section>`;
+}
+
+function renderHtmlSummary(fields) {
+  if (!fields || Object.keys(fields).length === 0) return '';
+  return `<section class="panel"><h2>Summary</h2><div class="metrics">${Object.entries(fields)
+    .map(([name, value]) => (
+      `<div class="metric"><span class="metric-name">${escapeHtml(humanize(name))}</span><span class="metric-value">${escapeHtml(value)}</span></div>`
+    )).join('')}</div></section>`;
+}
+
+function renderHtmlRuleBreakdown(rows) {
+  if (rows.length === 0) return '';
+  return `<section class="panel"><h2>Rule breakdown</h2><div class="table-wrap"><table><thead><tr><th>Severity</th><th>Rule</th><th>Findings</th></tr></thead><tbody>${rows.map(row => (
+    `<tr><td>${renderBadge(row.severity)}</td><td><code>${escapeHtml(row.rule)}</code></td><td>${row.count}</td></tr>`
+  )).join('')}</tbody></table></div></section>`;
+}
+
+function renderHtmlFilters({ labels, severities, repositories, total }) {
+  return `<section class="panel filters-panel"><h2>Filter records</h2><div class="filters"><label>Search<input id="filter-search" type="search" placeholder="Repository, rule, file, action, or message"></label><label>Record type<select id="filter-label"><option value="">All types</option>${optionMarkup(labels)}</select></label><label>Severity<select id="filter-severity"><option value="">All severities</option>${optionMarkup(severities)}</select></label><label>Repository<select id="filter-repository"><option value="">All repositories</option>${optionMarkup(repositories)}</select></label></div><p class="filter-count" id="filter-count">${total} of ${total} records shown</p></section>`;
+}
+
+function optionMarkup(values) {
+  return values.map(value => (
+    `<option value="${escapeHtml(String(value).toLocaleLowerCase())}">${escapeHtml(value)}</option>`
+  )).join('');
+}
+
+function renderHtmlGroup(label, records) {
+  const columns = [...new Set(records.flatMap(record => Object.keys(record.fields)))];
+  const rows = records.map(record => {
+    const severity = String(record.fields.sev ?? record.fields.severity ?? '').toLocaleLowerCase();
+    const repository = recordRepository(record).toLocaleLowerCase();
+    const search = `${record.label} ${Object.values(record.fields).join(' ')}`.toLocaleLowerCase();
+    return `<tr data-record data-label="${escapeHtml(record.label.toLocaleLowerCase())}" data-severity="${escapeHtml(severity)}" data-repository="${escapeHtml(repository)}" data-search="${escapeHtml(search)}">${columns.map(column => (
+      `<td>${renderHtmlCell(column, record.fields[column])}</td>`
+    )).join('')}</tr>`;
+  }).join('');
+  const heading = `${recordGroupTitle(label)} (${records.length})`;
+  return `<section class="panel" data-record-section><h2>${escapeHtml(heading)}</h2><div class="table-wrap"><table><thead><tr>${columns.map(column => `<th>${escapeHtml(humanize(column))}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div></section>`;
+}
+
+function recordGroupTitle(label) {
+  const names = new Map([
+    ['REPOSITORY', 'Repository breakdown'],
+    ['FINDING', 'Findings'],
+    ['ERROR', 'Operational errors'],
+    ['WARNING', 'Warnings'],
+    ['COMPARISON', 'Comparison summary'],
+    ['NEW_FINDING', 'New findings'],
+    ['RESOLVED_FINDING', 'Resolved findings'],
+    ['UNCHANGED_FINDING', 'Unchanged findings'],
+    ['UNKNOWN_FINDING', 'Unknown-resolution findings'],
+  ]);
+  return names.get(label) ?? humanize(label);
+}
+
+function renderHtmlCell(key, value) {
+  if (value === undefined) return '';
+  if (['severity', 'sev', 'status', 'change'].includes(key)) return renderBadge(value);
+  if (key === 'url' && safeHttpsUrl(value)) {
+    return `<a href="${escapeHtml(value)}" target="_blank" rel="noopener noreferrer">${escapeHtml(value)}</a>`;
+  }
+  return `<code>${escapeHtml(value)}</code>`;
+}
+
+function renderBadge(value) {
+  const text = String(value);
+  const normalized = text.toLocaleLowerCase();
+  const known = new Set([
+    'critical', 'high', 'medium', 'low', 'ok', 'fail',
+    'new', 'resolved', 'unchanged', 'unknown',
+  ]);
+  const className = known.has(normalized) ? ` badge-${normalized}` : '';
+  return `<span class="badge${className}">${escapeHtml(text)}</span>`;
+}
+
+function recordRepository(record) {
+  const explicit = record.fields.repo ?? record.fields.repository;
+  return explicit ? String(explicit) : '';
+}
+
+function safeHttpsUrl(value) {
+  try {
+    return new URL(String(value)).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function statusClass(status) {
+  if (status.toLocaleLowerCase() === 'ok') return 'status-ok';
+  if (status.toLocaleLowerCase() === 'fail') return 'status-fail';
+  return '';
+}
+
+function severitySort(left, right) {
+  const order = new Map([
+    ['critical', 0],
+    ['high', 1],
+    ['medium', 2],
+    ['low', 3],
+  ]);
+  return (order.get(String(left).toLocaleLowerCase()) ?? 4)
+    - (order.get(String(right).toLocaleLowerCase()) ?? 4);
+}
+
+function humanize(value) {
+  const source = String(value);
+  return (/^[A-Z0-9_-]+$/.test(source) ? source.toLocaleLowerCase() : source)
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replaceAll('_', ' ')
+    .replaceAll('-', ' ')
+    .replace(/^./, first => first.toLocaleUpperCase());
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+/**
+ * Render records as SARIF 2.1.0 for GitHub code scanning.
+ *
+ * @param {Array<{label: string, fields: Record<string, unknown>}>} records
+ * @param {{status?: string}} [options]
+ */
+function renderSarif(records, options = {}) {
+  const ruleRecords = records.filter(record => record.label === 'RULE');
+  const resultRecords = records.filter(record => (
+    record.label === 'FINDING'
+    || record.label === 'ERROR'
+    || record.label === 'WARNING'
+    || record.label === 'PIN'
+    || record.label === 'UPGRADE'
+  ));
+  const rules = new Map();
+  for (const record of ruleRecords) {
+    const id = String(record.fields.id ?? 'actions-warden');
+    rules.set(id, {
+      id,
+      shortDescription: {
+        text: String(record.fields.description ?? id),
+      },
+      defaultConfiguration: {
+        level: sarifLevel(String(record.fields.severity ?? 'low')),
+      },
+    });
+  }
+
+  const results = resultRecords.map(record => {
+    const fields = record.fields;
+    const ruleId = String(fields.type ?? `actions-warden/${record.label.toLowerCase()}`);
+    if (!rules.has(ruleId)) {
+      rules.set(ruleId, {
+        id: ruleId,
+        shortDescription: { text: ruleId },
+        defaultConfiguration: {
+          level: record.label === 'ERROR'
+            ? 'error'
+            : sarifLevel(String(fields.sev ?? 'low')),
+        },
+      });
+    }
+    const file = fields.file ? String(fields.file) : null;
+    const line = Number(fields.line);
+    return {
+      ruleId,
+      level: record.label === 'ERROR'
+        ? 'error'
+        : record.label === 'WARNING'
+          ? 'warning'
+          : sarifLevel(String(fields.sev ?? (record.label === 'FINDING' ? 'warning' : 'low'))),
+      message: {
+        text: String(fields.explain ?? fields.msg ?? summarizeFields(record.label, fields)),
+      },
+      ...(file ? {
+        locations: [{
+          physicalLocation: {
+            artifactLocation: { uri: file.replace(/\\/g, '/') },
+            ...(Number.isInteger(line) && line > 0
+              ? { region: { startLine: line } }
+              : {}),
+          },
+        }],
+      } : {}),
+      ...(fields.id ? {
+        partialFingerprints: {
+          // GitHub code scanning recognizes this key and uses the suffix to
+          // distinguish multiple results with the same semantic fingerprint.
+          primaryLocationLineHash: `${fields.fingerprint ?? fields.id}:1`,
+          'actions-warden/id': String(fields.id),
+          ...(fields.fingerprint
+            ? { 'actions-warden/semantic': String(fields.fingerprint) }
+            : {}),
+        },
+      } : {}),
+    };
+  });
+
+  return renderJson({
+    $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
+    version: '2.1.0',
+    runs: [{
+      tool: {
+        driver: {
+          name: 'actions-warden',
+          informationUri: 'https://github.com/chiz0me/actions-warden',
+          rules: [...rules.values()],
+        },
+      },
+      invocations: [{
+        executionSuccessful: options.status !== 'ERROR',
+      }],
+      results,
+    }],
+  });
+}
+
+function sarifLevel(severity) {
+  if (severity === 'critical' || severity === 'high' || severity === 'error') return 'error';
+  if (severity === 'medium' || severity === 'warning') return 'warning';
+  return 'note';
+}
+
+function summarizeFields(label, fields) {
+  const details = Object.entries(fields)
+    .filter(([key, value]) => !['id', 'file', 'line'].includes(key) && value != null && value !== '')
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(' ');
+  return `${label}: ${details}`;
+}
+
+/**
+ * Convert records to a generic JSON payload when no custom JSON is supplied.
+ *
+ * @param {Array<{label: string, fields: Record<string, unknown>}>} records
+ * @param {{status?: string}} options
+ * @returns {object}
+ */
+function recordsToJson(records, options) {
+  return {
+    schemaVersion: '1.0',
+    records: records.map(r => ({ label: r.label, ...r.fields })),
+    status: options.status ?? null,
+  };
+}
+
+/**
+ * Aggregate findings into a summary record.
+ *
+ * @param {Array<{severity: string}>} findings
+ * @returns {Record<string, number>}
+ */
+function summarize(findings) {
+  const counts = { critical: 0, high: 0, medium: 0, low: 0 };
+  for (const f of findings) {
+    if (counts[f.severity] !== undefined) counts[f.severity] += 1;
+  }
+  return counts;
+}
+
+;// CONCATENATED MODULE: ./src/lib/ignore.js
+/**
+ * Inline ignore directives in workflow sources.
+ *
+ * Directives (accept either `actions-warden-` or `aw-` prefix):
+ *
+ *   # actions-warden-ignore-file                - silence the entire file
+ *   # actions-warden-ignore-start               - start a block (until -end)
+ *   # actions-warden-ignore-end                 - end the current block
+ *   # actions-warden-ignore-next-line           - silence the next non-comment line
+ *   # actions-warden-ignore                     - silence the same line (inline)
+ *
+ * Optional rule filter: append rule ids after a colon, e.g.
+ *   # actions-warden-ignore: unpinned-action,secrets-in-env
+ *
+ * Without a filter the directive silences every rule.
+ */
+
+const PREFIX = '(?:actions-warden|aw)';
+const LEAD = '(?:#|;)\\s*';
+const TAIL = '(?::\\s*([\\w,\\s-]+?))?\\s*(?=;|$)';
+const RE_FILE = new RegExp(`${LEAD}${PREFIX}-ignore-file${TAIL}`);
+const RE_START = new RegExp(`${LEAD}${PREFIX}-ignore-start${TAIL}`);
+const RE_END = new RegExp(`${LEAD}${PREFIX}-ignore-end\\s*(?=;|$)`);
+const RE_NEXT = new RegExp(`${LEAD}${PREFIX}-ignore-next-line${TAIL}`);
+const RE_INLINE = new RegExp(`${LEAD}${PREFIX}-ignore(?!-)${TAIL}`);
+
+/**
+ * @typedef {object} IgnoreScope
+ * @property {boolean} wholeFile
+ * @property {Set<string>|null} fileRules           - null means "all rules"
+ * @property {Array<{start: number, end: number, rules: Set<string>|null}>} ranges
+ * @property {Map<number, Set<string>|null>} lines  - line -> ignored rule set (or null = all)
+ */
+
+/**
+ * @param {string|null|undefined} list   comma- or whitespace-separated rule ids
+ * @returns {Set<string>|null}            null = match every rule
+ */
+function parseRuleList(list) {
+  if (!list) return null;
+  const ids = list.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+  if (ids.length === 0) return null;
+  return new Set(ids);
+}
+
+/**
+ * @param {string} source
+ * @returns {IgnoreScope}
+ */
+function parseIgnoreDirectives(source) {
+  /** @type {IgnoreScope} */
+  const scope = {
+    wholeFile: false,
+    fileRules: null,
+    ranges: [],
+    lines: new Map(),
+  };
+  const lines = source.split('\n');
+  /** @type {{start: number, rules: Set<string>|null}|null} */
+  let openBlock = null;
+
+  lines.forEach((text, i) => {
+    const lineNo = i + 1;
+    const fileMatch = text.match(RE_FILE);
+    if (fileMatch) {
+      scope.wholeFile = true;
+      scope.fileRules = parseRuleList(fileMatch[1]);
+      return;
+    }
+    const startMatch = text.match(RE_START);
+    if (startMatch) {
+      openBlock = { start: lineNo, rules: parseRuleList(startMatch[1]) };
+      return;
+    }
+    if (RE_END.test(text)) {
+      if (openBlock) {
+        scope.ranges.push({ start: openBlock.start, end: lineNo, rules: openBlock.rules });
+        openBlock = null;
+      }
+      return;
+    }
+    const nextMatch = text.match(RE_NEXT);
+    if (nextMatch) {
+      for (let j = i + 1; j < lines.length; j += 1) {
+        const next = lines[j].trim();
+        if (next === '' || next.startsWith('#')) continue;
+        mergeLine(scope.lines, j + 1, parseRuleList(nextMatch[1]));
+        break;
+      }
+      return;
+    }
+    const inlineMatch = text.match(RE_INLINE);
+    if (inlineMatch) {
+      mergeLine(scope.lines, lineNo, parseRuleList(inlineMatch[1]));
+    }
+  });
+
+  if (openBlock) {
+    scope.ranges.push({ start: openBlock.start, end: lines.length, rules: openBlock.rules });
+  }
+  return scope;
+}
+
+function mergeLine(map, line, rules) {
+  const existing = map.get(line);
+  if (existing === undefined) {
+    map.set(line, rules);
+    return;
+  }
+  if (existing === null || rules === null) {
+    map.set(line, null);
+    return;
+  }
+  for (const r of rules) existing.add(r);
+}
+
+/**
+ * @param {IgnoreScope} scope
+ * @param {number} line
+ * @param {string} ruleId
+ * @returns {boolean}
+ */
+function isIgnored(scope, line, ruleId) {
+  if (scope.wholeFile && matches(scope.fileRules, ruleId)) return true;
+  for (const range of scope.ranges) {
+    if (line >= range.start && line <= range.end && matches(range.rules, ruleId)) return true;
+  }
+  const lineRules = scope.lines.get(line);
+  if (lineRules !== undefined && matches(lineRules, ruleId)) return true;
+  return false;
+}
+
+function matches(rules, ruleId) {
+  return rules === null ? true : rules.has(ruleId);
+}
+
+;// CONCATENATED MODULE: ./src/lib/identity.js
+
+
+
+/**
+ * Return a stable repository-relative path using POSIX separators.
+ *
+ * @param {string} file
+ * @param {string} cwd
+ */
+function identity_canonicalPath(file, cwd = process.cwd()) {
+  return (0,external_node_path_namespaceObject.relative)(cwd, file).split(external_node_path_namespaceObject.sep).join('/');
+}
+
+/**
+ * Create a stable, collision-resistant identifier for a source occurrence.
+ *
+ * IDs deliberately exclude absolute paths so they remain stable across clones.
+ *
+ * @param {object} input
+ * @param {string} input.kind
+ * @param {string} input.file
+ * @param {string} input.cwd
+ * @param {number} [input.line]
+ * @param {number} [input.start]
+ * @param {string} [input.subject]
+ */
+function occurrenceId({
+  kind,
+  file,
+  cwd = process.cwd(),
+  line = 0,
+  start = 0,
+  subject = '',
+}) {
+  const identity = JSON.stringify({
+    kind,
+    file: identity_canonicalPath(file, cwd),
+    line,
+    start,
+    subject,
+  });
+  return (0,external_node_crypto_namespaceObject.createHash)('sha256').update(identity).digest('hex').slice(0, 16);
+}
+
+/**
+ * The ID shared by an unpinned-action finding and its pin change.
+ *
+ * @param {object} input
+ * @param {string} input.file
+ * @param {string} input.cwd
+ * @param {{line: number, start?: number, raw: string}} input.ref
+ */
+function pinOccurrenceId({ file, cwd, ref }) {
+  return occurrenceId({
+    kind: 'pin',
+    file,
+    cwd,
+    line: ref.line,
+    start: ref.start ?? 0,
+    subject: ref.raw,
+  });
+}
+
+;// CONCATENATED MODULE: ./src/lib/paths.js
+/**
+ * Workflow file discovery with safe path handling.
+ */
+
+
+
+
+
+/**
+ * Default workflow directory globs.
+ */
+const DEFAULT_WORKFLOW_PATTERNS = [
+  '.github/workflows/*.yml',
+  '.github/workflows/*.yaml',
+  'action.yml',
+  'action.yaml',
+  '**/action.yml',
+  '**/action.yaml',
+];
+
+/**
+ * Reject path-traversal and absolute-escape attempts.
+ *
+ * @param {string} p
+ * @param {string} cwd
+ */
+function assertInside(p, cwd) {
+  if (typeof p !== 'string' || p.includes('\0')) {
+    throw new Error('invalid workflow path');
+  }
+  const root = (0,external_node_path_namespaceObject.resolve)(cwd);
+  const abs = (0,external_node_path_namespaceObject.resolve)(cwd, p);
+  const rel = (0,external_node_path_namespaceObject.relative)(root, abs);
+  if (isOutside(rel)) {
+    throw new Error(`path traversal rejected: ${p}`);
+  }
+  return abs;
+}
+
+function isOutside(rel) {
+  return rel === '..' || rel.startsWith(`..${external_node_path_namespaceObject.sep}`) || (0,external_node_path_namespaceObject.isAbsolute)(rel);
+}
+
+async function assertRealInside(path, cwd) {
+  const [root, target] = await Promise.all([(0,promises_namespaceObject.realpath)((0,external_node_path_namespaceObject.resolve)(cwd)), (0,promises_namespaceObject.realpath)(path)]);
+  if (isOutside((0,external_node_path_namespaceObject.relative)(root, target))) {
+    throw new Error(`symlink escape rejected: ${path}`);
+  }
+  return target;
+}
+
+/**
+ * Recursively list files under a directory.
+ *
+ * @param {string} dir
+ * @param {string[]} acc
+ * @returns {Promise<string[]>}
+ */
+async function walk(dir, acc = []) {
+  let entries;
+  try {
+    entries = await (0,promises_namespaceObject.readdir)(dir, { withFileTypes: true });
+  } catch {
+    return acc;
+  }
+  for (const entry of entries) {
+    if (entry.name.startsWith('.git') && entry.name !== '.github') continue;
+    if (entry.name === 'node_modules') continue;
+    const full = (0,external_node_path_namespaceObject.join)(dir, entry.name);
+    if (entry.isDirectory()) {
+      await walk(full, acc);
+    } else if (entry.isFile()) {
+      acc.push(full);
+    }
+  }
+  return acc;
+}
+
+/**
+ * Discover workflow files matching the given patterns (relative to cwd).
+ *
+ * @param {object} opts
+ * @param {string[]} [opts.patterns]
+ * @param {string} [opts.cwd]
+ * @returns {Promise<string[]>}
+ */
+async function discoverWorkflows({ patterns = DEFAULT_WORKFLOW_PATTERNS, cwd = process.cwd() } = {}) {
+  const root = (0,external_node_path_namespaceObject.resolve)(cwd);
+  for (const p of patterns) assertInside(p, root);
+  const normalizedPatterns = patterns.map(p => {
+    const pattern = (0,external_node_path_namespaceObject.isAbsolute)(p) ? (0,external_node_path_namespaceObject.relative)(root, p) : p;
+    return pattern.split(external_node_path_namespaceObject.sep).join('/');
+  });
+  const matchers = normalizedPatterns.map(p => picomatch(p, { dot: true }));
+  const all = await walk(root);
+  const out = [];
+  for (const file of all) {
+    const rel = (0,external_node_path_namespaceObject.relative)(root, file).split(external_node_path_namespaceObject.sep).join('/');
+    if (matchers.some(m => m(rel))) out.push(file);
+  }
+  return out.sort();
+}
+
+/**
+ * Resolve a single workflow path argument. If it's a directory or glob,
+ * expand it; if a file, validate it exists.
+ *
+ * @param {string} input
+ * @param {string} [cwd]
+ * @returns {Promise<string[]>}
+ */
+async function resolveWorkflowArg(input, cwd = process.cwd()) {
+  const abs = assertInside(input, cwd);
+  try {
+    const st = await (0,promises_namespaceObject.stat)(abs);
+    const safePath = await assertRealInside(abs, cwd);
+    if (st.isDirectory()) {
+      const files = await walk(safePath);
+      return files.filter(f => /\.ya?ml$/i.test(f)).sort();
+    }
+    if (!st.isFile()) return [];
+    return [safePath];
+  } catch {
+    return discoverWorkflows({ patterns: [input], cwd });
+  }
+}
+
+;// CONCATENATED MODULE: ./src/lib/targets.js
+
+
+/**
+ * Resolve command workflow targets and reject empty scopes.
+ *
+ * @param {object} input
+ * @param {string[]|undefined} input.workflows
+ * @param {string} input.cwd
+ */
+async function resolveTargets({ workflows, cwd }) {
+  if (!workflows || workflows.length === 0) {
+    const discovered = await discoverWorkflows({ cwd });
+    if (discovered.length === 0) {
+      throw new Error('no workflow or composite action files found');
+    }
+    return discovered;
+  }
+
+  const out = new Set();
+  for (const workflow of workflows) {
+    const files = await resolveWorkflowArg(workflow, cwd);
+    if (files.length === 0) {
+      throw new Error(`no workflows matched: ${workflow}`);
+    }
+    for (const file of files) out.add(file);
+  }
+  return [...out].sort();
+}
+
+;// CONCATENATED MODULE: ./src/lib/config.js
+
+
+
+
+
+const CONFIG_NAMES = ['.actions-warden.yml', '.actions-warden.yaml'];
+const SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
+const TOP_LEVEL_KEYS = new Set([
+  'version',
+  'baseline',
+  'ignore-paths',
+  'rules',
+  'runner-policy',
+]);
+
+/**
+ * Normalized built-in policy used when no repository configuration is found.
+ * Callers should treat the nested values as read-only defaults.
+ */
+const DEFAULT_CONFIG = Object.freeze({
+  path: null,
+  baseline: null,
+  ignorePaths: [],
+  rules: {},
+  runnerPolicy: {
+    trustedGroups: [],
+    selfHostedLabels: [],
+    flagUnknownGroups: false,
+  },
+});
+
+/**
+ * Load and strictly validate repository policy.
+ *
+ * @param {object} options
+ * @param {string} [options.cwd]
+ * @param {string|false} [options.path]
+ * @param {string[]} [options.ruleIds]
+ */
+async function loadConfig({
+  cwd = process.cwd(),
+  path,
+  ruleIds = [],
+} = {}) {
+  if (path === false) {
+    return { ...DEFAULT_CONFIG, runnerPolicy: { ...DEFAULT_CONFIG.runnerPolicy } };
+  }
+  let resolvedPath;
+  if (path) {
+    resolvedPath = await resolveRepositoryFile(path, cwd);
+  } else {
+    for (const candidate of CONFIG_NAMES) {
+      try {
+        resolvedPath = await resolveRepositoryFile(candidate, cwd);
+        break;
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
+  }
+  if (!resolvedPath) return { ...DEFAULT_CONFIG, runnerPolicy: { ...DEFAULT_CONFIG.runnerPolicy } };
+
+  const source = await (0,promises_namespaceObject.readFile)(resolvedPath, 'utf8');
+  const document = (0,dist/* parseDocument */.Tp)(source);
+  if (document.errors.length > 0) {
+    throw new Error(`invalid actions-warden config: ${document.errors[0].message}`);
+  }
+  const raw = document.toJS() ?? {};
+  if (!config_isRecord(raw)) throw new Error('actions-warden config must be a mapping');
+  rejectUnknownKeys(raw, TOP_LEVEL_KEYS, 'config');
+  if (raw.version !== undefined && raw.version !== 1) {
+    throw new Error('actions-warden config version must be 1');
+  }
+
+  const knownRules = new Set(ruleIds);
+  const rules = validateRules(raw.rules, knownRules);
+  const runnerPolicy = validateRunnerPolicy(raw['runner-policy']);
+  const baseline = optionalString(raw.baseline, 'baseline');
+  const ignorePaths = stringArray(raw['ignore-paths'], 'ignore-paths');
+
+  return {
+    path: resolvedPath,
+    baseline,
+    ignorePaths,
+    rules,
+    runnerPolicy,
+  };
+}
+
+/** Remove files matched by repository-relative policy ignore globs. */
+function filterIgnoredPaths(files, config, cwd) {
+  if (config.ignorePaths.length === 0) return files;
+  const matchers = config.ignorePaths.map(pattern => picomatch(pattern, { dot: true }));
+  return files.filter(file => {
+    const path = (0,external_node_path_namespaceObject.relative)(cwd, file).split(external_node_path_namespaceObject.sep).join('/');
+    return !matchers.some(matches => matches(path));
+  });
+}
+
+/**
+ * Resolve an existing repository path after rejecting lexical and real-path
+ * escapes, including escapes through symbolic links.
+ */
+async function resolveRepositoryFile(path, cwd = process.cwd()) {
+  const requestedRoot = (0,external_node_path_namespaceObject.resolve)(cwd);
+  const requested = (0,external_node_path_namespaceObject.resolve)(requestedRoot, path);
+  if (!(0,external_node_path_namespaceObject.isAbsolute)(path) && config_isOutside((0,external_node_path_namespaceObject.relative)(requestedRoot, requested))) {
+    throw new Error(`path traversal rejected: ${path}`);
+  }
+  const [root, target] = await Promise.all([
+    (0,promises_namespaceObject.realpath)(requestedRoot),
+    (0,promises_namespaceObject.realpath)(requested),
+  ]);
+  if (config_isOutside((0,external_node_path_namespaceObject.relative)(root, target))) {
+    throw new Error(`repository file escapes working directory: ${path}`);
+  }
+  return target;
+}
+
+function validateRules(value, knownRules) {
+  if (value === undefined) return {};
+  if (!config_isRecord(value)) throw new Error('config.rules must be a mapping');
+  const rules = {};
+  for (const [ruleId, policy] of Object.entries(value)) {
+    if (knownRules.size > 0 && !knownRules.has(ruleId)) {
+      throw new Error(`unknown rule in config: ${ruleId}`);
+    }
+    if (!config_isRecord(policy)) throw new Error(`config.rules.${ruleId} must be a mapping`);
+    rejectUnknownKeys(policy, new Set(['enabled', 'severity']), `config.rules.${ruleId}`);
+    if (policy.enabled !== undefined && typeof policy.enabled !== 'boolean') {
+      throw new Error(`config.rules.${ruleId}.enabled must be a boolean`);
+    }
+    if (policy.severity !== undefined && !SEVERITIES.has(policy.severity)) {
+      throw new Error(`config.rules.${ruleId}.severity must be low, medium, high, or critical`);
+    }
+    rules[ruleId] = {
+      enabled: policy.enabled ?? true,
+      severity: policy.severity,
+    };
+  }
+  return rules;
+}
+
+function validateRunnerPolicy(value) {
+  if (value === undefined) return { ...DEFAULT_CONFIG.runnerPolicy };
+  if (!config_isRecord(value)) throw new Error('config.runner-policy must be a mapping');
+  rejectUnknownKeys(
+    value,
+    new Set(['trusted-groups', 'self-hosted-labels', 'flag-unknown-groups']),
+    'config.runner-policy',
+  );
+  const flagUnknownGroups = value['flag-unknown-groups'] ?? false;
+  if (typeof flagUnknownGroups !== 'boolean') {
+    throw new Error('config.runner-policy.flag-unknown-groups must be a boolean');
+  }
+  return {
+    trustedGroups: stringArray(value['trusted-groups'], 'runner-policy.trusted-groups'),
+    selfHostedLabels: stringArray(
+      value['self-hosted-labels'],
+      'runner-policy.self-hosted-labels',
+    ),
+    flagUnknownGroups,
+  };
+}
+
+function rejectUnknownKeys(value, allowed, label) {
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) throw new Error(`unknown ${label} key: ${key}`);
+  }
+}
+
+function stringArray(value, label) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !item)) {
+    throw new Error(`config.${label} must be an array of non-empty strings`);
+  }
+  return [...new Set(value)];
+}
+
+function optionalString(value, label) {
+  if (value === undefined) return null;
+  if (typeof value !== 'string' || !value) {
+    throw new Error(`config.${label} must be a non-empty string`);
+  }
+  return value;
+}
+
+function config_isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function config_isOutside(path) {
+  return path === '..' || path.startsWith(`..${external_node_path_namespaceObject.sep}`) || (0,external_node_path_namespaceObject.isAbsolute)(path);
+}
+
+;// CONCATENATED MODULE: ./src/lib/baseline.js
+
+
+
+
+/**
+ * Load a versioned baseline and return its finding IDs and semantic
+ * fingerprints.
+ */
+async function loadBaseline({ path, cwd = process.cwd() }) {
+  const resolvedPath = await resolveRepositoryFile(path, cwd);
+  const raw = JSON.parse(await (0,promises_namespaceObject.readFile)(resolvedPath, 'utf8'));
+  if (!raw || typeof raw !== 'object' || raw.schemaVersion !== '1.0') {
+    throw new Error('baseline schemaVersion must be "1.0"');
+  }
+  if (!Array.isArray(raw.findings)) {
+    throw new Error('baseline findings must be an array');
+  }
+  const ids = new Set();
+  const fingerprints = new Set();
+  for (const finding of raw.findings) {
+    if (!finding || typeof finding !== 'object' || typeof finding.id !== 'string') {
+      throw new Error('every baseline finding must contain a string id');
+    }
+    ids.add(finding.id);
+    if (finding.fingerprint !== undefined && typeof finding.fingerprint !== 'string') {
+      throw new Error('baseline finding fingerprints must be strings');
+    }
+    if (finding.fingerprint) fingerprints.add(finding.fingerprint);
+  }
+  return { path: resolvedPath, ids, fingerprints };
+}
+
+/**
+ * Serialize current findings deterministically for review and version control.
+ */
+function serializeBaseline(findings, cwd = process.cwd()) {
+  const records = findings
+    .filter(finding => finding.ruleId !== 'parse-error')
+    .map(finding => ({
+      id: finding.id,
+      fingerprint: finding.fingerprint,
+      ruleId: finding.ruleId,
+      severity: finding.severity,
+      file: canonicalPath(finding.file, cwd),
+      line: finding.line,
+    }))
+    .sort((a, b) => (
+      a.file.localeCompare(b.file)
+      || a.line - b.line
+      || a.ruleId.localeCompare(b.ruleId)
+      || a.id.localeCompare(b.id)
+    ));
+  return `${JSON.stringify({
+    schemaVersion: '1.0',
+    generatedBy: 'actions-warden',
+    findings: records,
+  }, null, 2)}\n`;
+}
+
+/**
+ * Attach line-independent semantic fingerprints while distinguishing repeated
+ * equivalent findings by their source-order ordinal.
+ */
+function assignBaselineFingerprints(findings, cwd = process.cwd()) {
+  const ordered = [...findings].sort((a, b) => (
+    identity_canonicalPath(a.file, cwd).localeCompare(identity_canonicalPath(b.file, cwd))
+    || a.line - b.line
+    || a.ruleId.localeCompare(b.ruleId)
+    || a.id.localeCompare(b.id)
+  ));
+  const occurrences = new Map();
+  for (const finding of ordered) {
+    const semantic = stableValue(Object.fromEntries(
+      Object.entries(finding.fields ?? {})
+        .filter(([key]) => !['file', 'line', 'sev', 'source_line'].includes(key)),
+    ));
+    const key = JSON.stringify({
+      ruleId: finding.ruleId,
+      file: identity_canonicalPath(finding.file, cwd),
+      fields: semantic,
+    });
+    const ordinal = occurrences.get(key) ?? 0;
+    occurrences.set(key, ordinal + 1);
+    finding.fingerprint = occurrenceId({
+      kind: 'baseline',
+      file: finding.file,
+      cwd,
+      subject: `${key}#${ordinal}`,
+    });
+  }
+  return findings;
+}
+
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, stableValue(item)]),
+    );
+  }
+  return value;
 }
 
 ;// CONCATENATED MODULE: ./src/commands/audit.js
@@ -17296,7 +17795,8 @@ function relPath(p, cwd) {
  * Render an audit result to the chosen format.
  *
  * @param {Awaited<ReturnType<typeof audit>>} result
- * @param {{format: 'toon'|'json'|'text', explain?: boolean, cwd?: string}} opts
+ * @param {{format: 'toon'|'json'|'text'|'csv'|'sarif'|'html', explain?: boolean,
+ *   cwd?: string}} opts
  */
 function renderAudit(result, opts) {
   const cwd = opts.cwd ?? process.cwd();
@@ -17343,7 +17843,14 @@ function renderAudit(result, opts) {
     records.push({ label: 'FINDING', fields });
   }
   records.push({ label: 'SUMMARY', fields: result.summary });
-  return formatter_format(opts.format, records, { status: result.status });
+  return formatter_format(opts.format, records, {
+    status: result.status,
+    title: 'Workflow security audit',
+    metadata: {
+      config: result.configPath ? relPath(result.configPath, cwd) : 'built-in defaults',
+      baseline: result.baseline.path ? relPath(result.baseline.path, cwd) : 'none',
+    },
+  });
 }
 
 ;// CONCATENATED MODULE: external "node:os"
@@ -17495,6 +18002,7 @@ function resolveToken(explicit) {
  * @param {string} [opts.cwd]
  * @param {boolean} [opts.useCache]
  * @param {(event: {attempt: number, maxRetries: number, reason: 'network'|'rate-limit'|'server-error', delayMs: number, status?: number}) => void|Promise<void>} [opts.onRetry]
+ * @param {(event: {status: number, rateLimit: object|null}) => void|Promise<void>} [opts.onResponse]
  * @returns {Promise<{status: number, body: unknown}>}
  */
 function ghFetch(options) {
@@ -17521,9 +18029,13 @@ async function ghFetchInternal({
   cwd = process.cwd(),
   useCache = true,
   onRetry,
+  onResponse,
 }) {
   if (onRetry !== undefined && typeof onRetry !== 'function') {
     throw new Error('onRetry must be a function');
+  }
+  if (onResponse !== undefined && typeof onResponse !== 'function') {
+    throw new Error('onResponse must be a function');
   }
   const cacheKey = requestCacheKey(url, token);
   const cached = useCache
@@ -17568,11 +18080,28 @@ async function ghFetchInternal({
         etag: cached.etag,
         cwd,
       });
+      await notifyResponse(onResponse, response);
       return { status: 200, body: cached.value };
     }
-    if ((response.status === 403 && remaining === '0') || response.status === 429) {
+    const retryAfterHeader = response.headers.get('retry-after');
+    const isRateLimit = (response.status === 403 && (remaining === '0' || retryAfterHeader !== null))
+      || response.status === 429;
+    if (isRateLimit) {
+      let retryAfterMs = 0;
+      if (retryAfterHeader) {
+        if (/^\d+$/.test(retryAfterHeader)) {
+          retryAfterMs = Number(retryAfterHeader) * 1000;
+        } else {
+          const parsedDate = Date.parse(retryAfterHeader);
+          if (Number.isFinite(parsedDate) && parsedDate > Date.now()) {
+            retryAfterMs = parsedDate - Date.now();
+          }
+        }
+      }
       const reset = Number(response.headers.get('x-ratelimit-reset') ?? 0) * 1000;
-      const wait = Math.max(reset - Date.now(), backoff(attempt));
+      const wait = retryAfterMs > 0
+        ? retryAfterMs
+        : Math.max(reset - Date.now(), backoff(attempt));
       if (attempt >= retries) {
         const resetMessage = Number.isFinite(reset) && reset > Date.now()
           ? `; resets at ${new Date(reset).toISOString()}`
@@ -17616,6 +18145,7 @@ async function ghFetchInternal({
         cwd,
       });
     }
+    await notifyResponse(onResponse, response);
     return { status: response.status, body };
   }
 }
@@ -17635,6 +18165,40 @@ function sleep(ms) {
 
 async function notifyRetry(onRetry, event) {
   if (onRetry) await onRetry(event);
+}
+
+async function notifyResponse(onResponse, response) {
+  if (!onResponse) return;
+  const integerHeader = name => {
+    const value = response.headers.get(name);
+    if (value === null || !/^\d+$/.test(value)) return undefined;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : undefined;
+  };
+  const limit = integerHeader('x-ratelimit-limit');
+  const remaining = integerHeader('x-ratelimit-remaining');
+  const used = integerHeader('x-ratelimit-used');
+  const reset = integerHeader('x-ratelimit-reset');
+  const rawResource = response.headers.get('x-ratelimit-resource');
+  const resource = rawResource && /^[A-Za-z0-9_.-]{1,64}$/.test(rawResource)
+    ? rawResource
+    : undefined;
+  const resetDate = reset === undefined ? null : new Date(reset * 1000);
+  const resetAt = resetDate && !Number.isNaN(resetDate.getTime())
+    ? resetDate.toISOString()
+    : undefined;
+  const hasRateLimit = [limit, remaining, used, reset, resource]
+    .some(value => value !== undefined);
+  await onResponse({
+    status: response.status,
+    rateLimit: hasRateLimit ? {
+      ...(limit === undefined ? {} : { limit }),
+      ...(remaining === undefined ? {} : { remaining }),
+      ...(used === undefined ? {} : { used }),
+      ...(resetAt === undefined ? {} : { resetAt }),
+      ...(resource === undefined ? {} : { resource }),
+    } : null,
+  });
 }
 
 /**
@@ -18349,7 +18913,8 @@ function rewriteUses(source, ref, sha) {
 
 /**
  * @param {Awaited<ReturnType<typeof pin>>} result
- * @param {{format: 'toon'|'json'|'text', dryRun: boolean, cwd?: string}} opts
+ * @param {{format: 'toon'|'json'|'text'|'csv'|'sarif'|'html', dryRun: boolean,
+ *   cwd?: string}} opts
  */
 function renderPin(result, opts) {
   const cwd = opts.cwd ?? process.cwd();
@@ -18388,7 +18953,11 @@ function renderPin(result, opts) {
     records.push({ label: 'ERROR', fields: { file: rel(e.file ?? '', cwd), action: e.action ?? '', msg: e.error } });
   }
   records.push({ label: 'SUMMARY', fields: { changes: result.changes.length, errors: result.errors.length, dry_run: opts.dryRun } });
-  return formatter_format(opts.format, records, { status: result.status });
+  return formatter_format(opts.format, records, {
+    status: result.status,
+    title: opts.dryRun ? 'Action pin plan' : 'Applied action pins',
+    metadata: { mode: opts.dryRun ? 'dry run' : 'write' },
+  });
 }
 
 function rel(p, cwd) {
@@ -18649,7 +19218,8 @@ function bumpLevel(from, to) {
 
 /**
  * @param {Awaited<ReturnType<typeof upgrade>>} result
- * @param {{format: 'toon'|'json'|'text', dryRun: boolean, mode: string, cwd?: string}} opts
+ * @param {{format: 'toon'|'json'|'text'|'csv'|'sarif'|'html', dryRun: boolean,
+ *   mode: string, cwd?: string}} opts
  */
 function renderUpgrade(result, opts) {
   const cwd = opts.cwd ?? process.cwd();
@@ -18704,7 +19274,11 @@ function renderUpgrade(result, opts) {
     records.push({ label: 'ERROR', fields: { file: upgrade_rel(e.file ?? '', cwd), action: e.action ?? '', msg: e.error } });
   }
   records.push({ label: 'SUMMARY', fields: { changes: result.changes.length, skipped: (result.skipped ?? []).length, errors: result.errors.length, mode: opts.mode, dry_run: opts.dryRun } });
-  return formatter_format(opts.format, records, { status: result.status });
+  return formatter_format(opts.format, records, {
+    status: result.status,
+    title: opts.dryRun ? 'Action upgrade plan' : 'Applied action upgrades',
+    metadata: { mode: opts.mode, operation: opts.dryRun ? 'dry run' : 'write' },
+  });
 }
 
 function upgrade_rel(p, cwd) {
@@ -18793,7 +19367,8 @@ async function report({
 
 /**
  * @param {Awaited<ReturnType<typeof report>>} result
- * @param {{format: 'toon'|'json'|'text', mode: string, cwd?: string}} opts
+ * @param {{format: 'toon'|'json'|'text'|'csv'|'sarif'|'html', mode: string,
+ *   cwd?: string}} opts
  */
 function renderReport(result, opts) {
   const cwd = opts.cwd ?? process.cwd();
@@ -18911,7 +19486,11 @@ function renderReport(result, opts) {
       offline: result.offline,
     },
   });
-  return formatter_format(opts.format, records, { status: result.status });
+  return formatter_format(opts.format, records, {
+    status: result.status,
+    title: 'Security and dependency report',
+    metadata: { upgradeMode: opts.mode, offline: result.offline },
+  });
 }
 
 function report_rel(p, cwd) {
@@ -18930,6 +19509,17 @@ function report_rel(p, cwd) {
 
 const verify_SHA_RE = /^[0-9a-f]{40}$/i;
 
+/**
+ * Verify that external action references are full repository-owned commit
+ * SHAs and that optional actions-warden version metadata resolves to the same
+ * commit.
+ *
+ * @param {object} [options]
+ * @param {string} [options.cwd]
+ * @param {string[]} [options.workflows]
+ * @param {string} [options.token]
+ * @returns {Promise<{files: string[], checks: object[], warnings: object[], errors: object[], status: 'OK'|'FAIL'}>}
+ */
 async function verify({ cwd = process.cwd(), workflows, token } = {}) {
   const files = await resolveTargets({ workflows, cwd });
   const resolvedToken = resolveToken(token);
@@ -19040,6 +19630,13 @@ async function verify({ cwd = process.cwd(), workflows, token } = {}) {
   };
 }
 
+/**
+ * Render a verification result in a supported public output format.
+ *
+ * @param {Awaited<ReturnType<typeof verify>>} result
+ * @param {{format: 'toon'|'json'|'text'|'csv'|'sarif'|'html', cwd?: string}} options
+ * @returns {string}
+ */
 function renderVerify(result, { format: outputFormat, cwd = process.cwd() }) {
   if (outputFormat === 'json') {
     return formatter_format('json', [], {
@@ -19106,7 +19703,10 @@ function renderVerify(result, { format: outputFormat, cwd = process.cwd() }) {
       errors: result.errors.length,
     },
   });
-  return formatter_format(outputFormat, records, { status: result.status });
+  return formatter_format(outputFormat, records, {
+    status: result.status,
+    title: 'Pinned action verification',
+  });
 }
 
 ;// CONCATENATED MODULE: external "node:util"
@@ -19125,15 +19725,39 @@ const external_node_util_namespaceObject = __WEBPACK_EXTERNAL_createRequire(impo
 const github_org_API = 'https://api.github.com';
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const github_org_SHA_RE = /^[0-9a-f]{40}$/i;
+
+/** Maximum decoded bytes accepted for one remote workflow YAML blob. */
 const MAX_WORKFLOW_BYTES = 2 * 1024 * 1024;
+
+/** Maximum workflow and composite-action files accepted per repository. */
 const MAX_WORKFLOW_FILES = 1000;
+
+/** Maximum cumulative decoded workflow bytes accepted per repository. */
 const MAX_REPOSITORY_WORKFLOW_BYTES = 32 * 1024 * 1024;
 
 /**
  * List every repository visible to the supplied token for an organization.
+ * The optional page observer receives only bounded counters and sanitized
+ * GitHub rate-limit metadata; repository objects remain in the final result.
+ *
+ * @param {object} [options]
+ * @param {string} options.organization
+ * @param {string} [options.token]
+ * @param {string} [options.cwd]
+ * @param {(event: object) => void|Promise<void>} [options.onRetry]
+ * @param {(event: object) => void|Promise<void>} [options.onPage]
  */
-async function listOrganizationRepositories({ organization, token, cwd, onRetry } = {}) {
+async function listOrganizationRepositories({
+  organization,
+  token,
+  cwd,
+  onRetry,
+  onPage,
+} = {}) {
   const org = validateName(organization, 'organization');
+  if (onPage !== undefined && typeof onPage !== 'function') {
+    throw new Error('onPage must be a function');
+  }
   const repositories = [];
   const seen = new Set();
 
@@ -19145,12 +19769,16 @@ async function listOrganizationRepositories({ organization, token, cwd, onRetry 
       per_page: '100',
       page: String(page),
     });
+    let responseMetadata;
     const response = await ghFetch({
       url: `${github_org_API}/orgs/${encodeURIComponent(org)}/repos?${query}`,
       token,
       cwd,
       useCache: false,
       onRetry,
+      onResponse: event => {
+        responseMetadata = event;
+      },
     });
     if (response.status !== 200) {
       throw new Error(`could not list repositories for ${org} (HTTP ${response.status})`);
@@ -19165,6 +19793,13 @@ async function listOrganizationRepositories({ organization, token, cwd, onRetry 
       if (seen.has(key)) continue;
       seen.add(key);
       repositories.push(repository);
+    }
+    if (onPage) {
+      await onPage(Object.freeze({
+        page,
+        repositoriesDiscovered: repositories.length,
+        rateLimit: responseMetadata?.rateLimit ?? null,
+      }));
     }
     if (response.body.length < 100) {
       return repositories.sort((left, right) => left.fullName.localeCompare(right.fullName));
@@ -19330,6 +19965,13 @@ async function fetchRepositoryWorkflows({
   };
 }
 
+/**
+ * Return whether a validated Git tree path belongs to the supported workflow
+ * or composite-action discovery scope.
+ *
+ * @param {unknown} path
+ * @returns {boolean}
+ */
 function github_org_isWorkflowPath(path) {
   if (
     typeof path !== 'string'
@@ -19490,7 +20132,7 @@ function validateRef(value) {
 ;// CONCATENATED MODULE: ./src/version.js
 // Runtime version embedded in the GitHub Action bundle. The version-sync check
 // keeps this value aligned with package.json, the lockfile, and plugin metadata.
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 
 ;// CONCATENATED MODULE: ./src/lib/org-checkpoint.js
 /**
@@ -19517,10 +20159,15 @@ const CHECKPOINT_SCHEMA_VERSION = '1.1';
 const LEGACY_CHECKPOINT_SCHEMA_VERSION = '1.0';
 const FIRST_ANALYSIS_GENERATION_TOOL_VERSION = '0.3.0';
 const TOOL_VERSION_RE = /^\d+\.\d+\.\d+$/;
-// Increment this whenever organization discovery, parsing, finding identity,
-// rule evaluation, or persisted result semantics can change. Package releases
-// that leave those behaviors compatible must keep the generation unchanged.
-const ORGANIZATION_ANALYSIS_GENERATION = 1;
+
+/**
+ * Checkpoint compatibility generation. Increment it whenever organization
+ * discovery, parsing, finding identity, rule evaluation, or persisted result
+ * semantics change; compatible package releases keep the current value.
+ */
+const ORGANIZATION_ANALYSIS_GENERATION = 2;
+
+/** Maximum accepted or generated checkpoint size, in bytes. */
 const MAX_ORGANIZATION_CHECKPOINT_BYTES = 256 * 1024 * 1024;
 const org_checkpoint_NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const org_checkpoint_SHA_RE = /^[0-9a-f]{40}$/i;
@@ -19529,6 +20176,10 @@ const org_checkpoint_SEVERITIES = new Set(['low', 'medium', 'high', 'critical'])
 const RULE_IDS = new Set(['parse-error', ...listRules().map(rule => rule.id)]);
 const RULES_HASH = org_checkpoint_digest(listRules());
 
+/**
+ * Build the version-independent identity that controls whether checkpoint
+ * results are compatible with the requested scan and policy.
+ */
 function createOrganizationCheckpointIdentity({
   organization,
   repositories,
@@ -19569,7 +20220,7 @@ function createOrganizationCheckpointIdentity({
 }
 
 /**
- * Create the stable key used by automatic agent artifacts.
+ * Create the stable key used by automatic organization-scan artifacts.
  *
  * Generation 1 deliberately retains the exact identity serialization used by
  * v0.3.0 so existing automatic checkpoints remain discoverable after an
@@ -19596,7 +20247,7 @@ function createOrganizationCheckpointArtifactKey(identity) {
         baselineHash: identity.baselineHash,
       }
     : identity;
-  return createHash('sha256')
+  return (0,external_node_crypto_namespaceObject.createHash)('sha256')
     .update(identity.analysisGeneration === 1
       ? JSON.stringify(compatibleIdentity)
       : stableStringify(compatibleIdentity))
@@ -19604,6 +20255,10 @@ function createOrganizationCheckpointArtifactKey(identity) {
     .slice(0, 32);
 }
 
+/**
+ * Load and fully validate a checkpoint, returning reusable repository results
+ * plus whether a successful resume should migrate its metadata.
+ */
 async function loadOrganizationCheckpoint({ path, cwd, identity }) {
   const resolvedPath = await resolveRepositoryFile(path, cwd);
   const metadata = await (0,promises_namespaceObject.stat)(resolvedPath);
@@ -19655,10 +20310,12 @@ async function loadOrganizationCheckpoint({ path, cwd, identity }) {
   };
 }
 
+/** Validate a checkpoint destination without creating or replacing a file. */
 async function validateOrganizationCheckpointPath({ path, cwd }) {
   return writeFileGuarded({ path, content: '', cwd, dryRun: true });
 }
 
+/** Serialize, redact, size-check, and atomically replace a checkpoint. */
 async function writeOrganizationCheckpoint({
   path,
   cwd,
@@ -19683,13 +20340,16 @@ async function writeOrganizationCheckpoint({
   return writeFileGuarded({ path, content, cwd, dryRun: false });
 }
 
+/** Return whether a result is error-free and still matches the live revision. */
 function canReuseCheckpointResult(result, repository, treeSha) {
   return result.repository === repository.fullName
     && result.branch === repository.defaultBranch
     && result.treeSha === treeSha
-    && result.errors.length === 0;
+    && result.errors.length === 0
+    && !result.findings.some(finding => finding.ruleId === 'parse-error');
 }
 
+/** Rehydrate validated checkpoint data with local paths and live source URLs. */
 function restoreCheckpointResult(result, { repository, cwd, sourceUrl }) {
   const repositoryRoot = (0,external_node_path_namespaceObject.resolve)(cwd, repository.owner, repository.name);
   const findings = result.findings.map(finding => ({
@@ -20007,6 +20667,7 @@ function comparablePath(path) {
 
 
 
+
 const VISIBILITIES = new Set(['all', 'public', 'private', 'internal']);
 const ORGANIZATION_RE = /^[A-Za-z0-9_.-]+$/;
 
@@ -20118,6 +20779,15 @@ async function scanOrganization({
     token: resolvedToken,
     cwd,
     onRetry: retry => emitRetryProgress(onProgress, retry),
+    onPage: page => emitProgress(onProgress, {
+      type: 'discovery-page',
+      organization,
+      page: page.page,
+      repositoriesDiscovered: page.repositoriesDiscovered,
+      ...(Number.isSafeInteger(page.rateLimit?.remaining)
+        ? { rateLimitRemaining: page.rateLimit.remaining }
+        : {}),
+    }),
   });
   const eligible = selectRepositories(discovered, {
     patterns,
@@ -20163,16 +20833,32 @@ async function scanOrganization({
 
   let completed = 0;
   let reused = 0;
+  let active = 0;
   const repositoryResults = await mapLimit(selected, concurrency, async (repository, index) => {
+    active += 1;
     await emitProgress(onProgress, {
       type: 'repository-started',
       repository: repository.fullName,
       position: index + 1,
       total: selected.length,
+      completed,
+      active,
+      concurrency,
+    });
+    const emitPhase = phase => emitProgress(onProgress, {
+      type: 'repository-phase',
+      repository: repository.fullName,
+      position: index + 1,
+      total: selected.length,
+      completed,
+      active,
+      concurrency,
+      phase,
     });
     let repositoryResult;
     let wasReused = false;
     try {
+      await emitPhase('reading default-branch tree');
       const workflowTree = await fetchRepositoryWorkflowTree({
         repository,
         token: resolvedToken,
@@ -20183,10 +20869,12 @@ async function scanOrganization({
         onRetry: retry => emitRetryProgress(onProgress, retry, repository.fullName),
       });
       const stored = loadedCheckpoint.results.get(repository.fullName.toLowerCase());
+      await emitPhase('checking resumable evidence');
       if (stored && canReuseCheckpointResult(stored, repository, workflowTree.treeSha)) {
         repositoryResult = restoreCheckpointResult(stored, { repository, cwd, sourceUrl });
         wasReused = true;
       } else {
+        await emitPhase('downloading workflow YAML');
         const fetched = await fetchRepositoryWorkflows({
           repository,
           token: resolvedToken,
@@ -20198,6 +20886,7 @@ async function scanOrganization({
           file: virtualPath(cwd, repository, item.path),
           source: item.source,
         }));
+        await emitPhase('auditing workflows');
         const auditResult = await auditSources({
           cwd,
           sources,
@@ -20253,11 +20942,20 @@ async function scanOrganization({
       };
     }
     if (checkpointPath) {
+      await emitPhase('writing checkpoint');
       checkpointResults.set(repository.fullName.toLowerCase(), repositoryResult);
-      await persistCheckpoint();
+      const durableRepositories = await persistCheckpoint();
+      await emitProgress(onProgress, {
+        type: 'checkpoint-written',
+        repository: repository.fullName,
+        position: index + 1,
+        total: selected.length,
+        repositories: durableRepositories,
+      });
     }
     completed += 1;
     if (wasReused) reused += 1;
+    active -= 1;
     await emitProgress(onProgress, {
       type: 'repository-completed',
       repository: repository.fullName,
@@ -20269,6 +20967,8 @@ async function scanOrganization({
       files: repositoryResult.files.length,
       findings: repositoryResult.findings.length,
       errors: repositoryResult.errors.length,
+      active,
+      concurrency,
     });
     return repositoryResult;
   });
@@ -20295,8 +20995,29 @@ async function scanOrganization({
     errors: errors.length,
     ...counts,
   };
+  const incompleteRepositories = repositoryResults
+    .filter(repositoryResult => !repositoryCoverageComplete(repositoryResult))
+    .map(repositoryResult => repositoryResult.repository.fullName)
+    .sort((left, right) => left.localeCompare(right));
+  const selectedRepositoriesComplete = incompleteRepositories.length === 0;
+  const limitedByMaxRepositories = selected.length < eligible.length;
+  const coverage = {
+    complete: selectedRepositoriesComplete && !limitedByMaxRepositories,
+    enumerationComplete: true,
+    selectedRepositoriesComplete,
+    eligibleRepositoriesComplete: selectedRepositoriesComplete && !limitedByMaxRepositories,
+    limitedByMaxRepositories,
+    repositoriesOmittedByLimit: eligible.length - selected.length,
+    incompleteRepositories,
+  };
   const result = {
     organization,
+    analysis: {
+      generation: checkpointIdentity.analysisGeneration,
+      identity: (0,external_node_crypto_namespaceObject.createHash)('sha256')
+        .update(createOrganizationCheckpointArtifactKey(checkpointIdentity))
+        .digest('hex'),
+    },
     scope: {
       repositories: patterns,
       visibility,
@@ -20307,6 +21028,7 @@ async function scanOrganization({
       concurrency,
       severity: severity ?? null,
     },
+    coverage,
     repositories: repositoryResults,
     findings,
     errors,
@@ -20332,14 +21054,29 @@ async function scanOrganization({
   return result;
 }
 
-function renderOrganizationScan(result, { format: outputFormat, cwd = process.cwd() }) {
+/**
+ * Render an organization scan result with repository-relative paths and the
+ * selected public serialization contract.
+ *
+ * @param {Awaited<ReturnType<typeof scanOrganization>>} result
+ * @param {{format: 'toon'|'json'|'text'|'csv'|'sarif'|'html', cwd?: string,
+ *   comparison?: object}} options
+ * @returns {string}
+ */
+function renderOrganizationScan(result, {
+  format: outputFormat,
+  cwd = process.cwd(),
+  comparison = result.comparison,
+}) {
   if (outputFormat === 'json') {
     return formatter_format('json', [], {
       status: result.status,
       json: {
         schemaVersion: '1.0',
         organization: result.organization,
+        analysis: result.analysis,
         scope: result.scope,
+        coverage: result.coverage,
         repositories: result.repositories.map(repositoryResult => ({
           repository: repositoryResult.repository,
           revision: repositoryResult.revision,
@@ -20357,6 +21094,7 @@ function renderOrganizationScan(result, { format: outputFormat, cwd = process.cw
           path: result.baseline.path ? identity_canonicalPath(result.baseline.path, cwd) : null,
         },
         configPath: result.configPath ? identity_canonicalPath(result.configPath, cwd) : null,
+        ...(comparison ? { comparison } : {}),
         status: result.status,
       },
     });
@@ -20408,10 +21146,64 @@ function renderOrganizationScan(result, { format: outputFormat, cwd = process.cw
     }
   }
   records.push({
+    label: 'COVERAGE',
+    fields: {
+      complete: result.coverage.complete,
+      enumerationComplete: result.coverage.enumerationComplete,
+      selectedRepositoriesComplete: result.coverage.selectedRepositoriesComplete,
+      eligibleRepositoriesComplete: result.coverage.eligibleRepositoriesComplete,
+      limitedByMaxRepositories: result.coverage.limitedByMaxRepositories,
+      repositoriesOmittedByLimit: result.coverage.repositoriesOmittedByLimit,
+      incompleteRepositories: result.coverage.incompleteRepositories.length,
+    },
+  });
+  if (comparison) appendComparisonRecords(records, comparison);
+  records.push({
     label: 'SUMMARY',
     fields: { organization: result.organization, ...result.summary },
   });
-  return formatter_format(outputFormat, records, { status: result.status });
+  return formatter_format(outputFormat, records, {
+    status: result.status,
+    title: `Organization scan: ${result.organization}`,
+    metadata: {
+      organization: result.organization,
+      analysisGeneration: result.analysis.generation,
+      visibility: result.scope.visibility,
+      repositoryFilters: result.scope.repositories.length > 0
+        ? result.scope.repositories.join(', ')
+        : 'all eligible repositories',
+      includeArchived: result.scope.includeArchived,
+      includeDisabled: result.scope.includeDisabled,
+      includeForks: result.scope.includeForks,
+      maxRepositories: result.scope.maxRepositories ?? 'none',
+      severity: result.scope.severity ?? 'all levels',
+      baseline: result.baseline.path ? identity_canonicalPath(result.baseline.path, cwd) : 'none',
+      coverageComplete: result.coverage.complete,
+    },
+  });
+}
+
+function appendComparisonRecords(records, comparison) {
+  records.push({ label: 'COMPARISON', fields: comparison.summary });
+  for (const [change, findings] of Object.entries(comparison.findings)) {
+    for (const finding of findings) {
+      records.push({
+        label: `${change.toUpperCase()}_FINDING`,
+        fields: {
+          ...finding.fields,
+          id: finding.id,
+          change,
+          type: finding.ruleId,
+          sev: finding.severity,
+          repo: finding.repository,
+          file: finding.file,
+          line: finding.line,
+          url: finding.url,
+          explain: finding.explain,
+        },
+      });
+    }
+  }
 }
 
 function selectRepositories(repositories, options) {
@@ -20459,7 +21251,7 @@ function virtualPath(cwd, repository, path) {
 function createCheckpointWriter({ path, cwd, identity, results }) {
   let pending = Promise.resolve();
   return async function persistCheckpoint() {
-    if (!path) return;
+    if (!path) return 0;
     const snapshot = [...results.values()];
     const write = pending.then(() => writeOrganizationCheckpoint({
       path,
@@ -20469,7 +21261,13 @@ function createCheckpointWriter({ path, cwd, identity, results }) {
     }));
     pending = write;
     await write;
+    return snapshot.length;
   };
+}
+
+function repositoryCoverageComplete(repositoryResult) {
+  return repositoryResult.errors.length === 0
+    && !repositoryResult.findings.some(finding => finding.ruleId === 'parse-error');
 }
 
 async function assertCheckpointDoesNotReplaceControlFile(path, cwd, controlFiles) {
@@ -20553,12 +21351,157 @@ function hasOperationalFailure(command, result) {
 
 ;// CONCATENATED MODULE: ./src/lib/org-progress.js
 /**
- * Human-readable rendering for structured organization-scan progress events.
- * Progress is a separate channel from final report serialization.
+ * Organization-scan progress rendering and stderr reporters.
+ *
+ * Progress is a separate, best-effort channel from final report
+ * serialization. Public library callbacks remain strict; this adapter catches
+ * failures from its own output stream so a closed log pipe cannot invalidate
+ * otherwise durable scan evidence.
  */
 
 
 
+const ORGANIZATION_PROGRESS_CONTEXTS = new Set(['agent', 'auto', 'ci', 'interactive']);
+
+/** Public organization progress modes accepted by the CLI. */
+const ORGANIZATION_PROGRESS_MODES = Object.freeze([
+  'auto',
+  'plain',
+  'json',
+  'none',
+  'always',
+  'never',
+]);
+
+/** Normalize compatibility aliases to the canonical progress modes. */
+function normalizeOrganizationProgressMode(mode = 'auto') {
+  if (!ORGANIZATION_PROGRESS_MODES.includes(mode)) {
+    throw new Error('progress must be auto, plain, json, none, always, or never');
+  }
+  if (mode === 'always') return 'plain';
+  if (mode === 'never') return 'none';
+  return mode;
+}
+
+/**
+ * Resolve an implicit progress mode for an explicit execution context.
+ * Context changes presentation only; it never changes scan scope or evidence.
+ */
+function resolveOrganizationProgressMode({
+  mode = 'auto',
+  context = 'auto',
+  isTTY = false,
+} = {}) {
+  const normalized = normalizeOrganizationProgressMode(mode);
+  if (!ORGANIZATION_PROGRESS_CONTEXTS.has(context)) {
+    throw new Error('progress context must be agent, auto, ci, or interactive');
+  }
+  if (normalized !== 'auto') return normalized;
+  if (context === 'agent') return 'none';
+  if (context === 'ci') return 'plain';
+  if (context === 'interactive') return 'plain';
+  return isTTY ? 'plain' : 'none';
+}
+
+/**
+ * Create a best-effort progress reporter for human lines or JSON Lines.
+ * Every JSON event receives stable envelope metadata and is written to the
+ * supplied stream one event per line.
+ */
+function createOrganizationProgressReporter({
+  mode = 'auto',
+  context = 'auto',
+  stream = process.stderr,
+  isTTY = stream.isTTY === true,
+  now = Date.now,
+} = {}) {
+  const resolvedMode = resolveOrganizationProgressMode({ mode, context, isTTY });
+  const startedAt = now();
+  let disabled = resolvedMode === 'none';
+  let closed = false;
+  let pendingWrites = 0;
+  let listenerAttached = false;
+  let cleanupScheduled = false;
+
+  const onError = () => {
+    disabled = true;
+  };
+  if (typeof stream?.on === 'function') {
+    stream.on('error', onError);
+    listenerAttached = true;
+  }
+
+  function cleanupListener() {
+    if (!listenerAttached) return;
+    listenerAttached = false;
+    if (typeof stream?.removeListener === 'function') {
+      stream.removeListener('error', onError);
+    } else if (typeof stream?.off === 'function') {
+      stream.off('error', onError);
+    }
+  }
+
+  function scheduleCleanup() {
+    if (!closed || pendingWrites !== 0 || !listenerAttached || cleanupScheduled) return;
+    cleanupScheduled = true;
+    // Writable streams invoke a failed write's callback before emitting the
+    // corresponding error event. Keep the listener through that event turn.
+    setImmediate(() => {
+      cleanupScheduled = false;
+      if (closed && pendingWrites === 0) cleanupListener();
+    });
+  }
+
+  function write(value) {
+    if (disabled || closed) return false;
+    try {
+      pendingWrites += 1;
+      return stream.write(value, error => {
+        pendingWrites = Math.max(0, pendingWrites - 1);
+        if (error) disabled = true;
+        scheduleCleanup();
+      });
+    } catch {
+      pendingWrites = Math.max(0, pendingWrites - 1);
+      disabled = true;
+      scheduleCleanup();
+      return false;
+    }
+  }
+
+  function emit(rawEvent) {
+    if (disabled || closed) return null;
+    const current = now();
+    const { type, ...fields } = rawEvent;
+    const event = Object.freeze({
+      ...redactDeep(fields),
+      schemaVersion: '1.0',
+      kind: 'actions-warden-org-scan-progress',
+      event: redact(type),
+      timestamp: new Date(current).toISOString(),
+      elapsedMs: Math.max(0, current - startedAt),
+    });
+    if (resolvedMode === 'json') {
+      return write(`${JSON.stringify(event)}\n`) ? event : null;
+    }
+    const message = formatOrganizationProgress(rawEvent);
+    return !message || write(message) ? event : null;
+  }
+
+  function close() {
+    closed = true;
+    scheduleCleanup();
+  }
+
+  return {
+    emit,
+    close,
+    mode: resolvedMode,
+    requestedMode: mode,
+  };
+}
+
+/** Render one redacted progress line, or an empty string for an unknown event. */
 function formatOrganizationProgress(event) {
   switch (event.type) {
     case 'scan-started':
@@ -20569,18 +21512,37 @@ function formatOrganizationProgress(event) {
       return line('created organization scan checkpoint');
     case 'discovery-started':
       return line(`discovering repositories in ${event.organization}`);
+    case 'discovery-page':
+      return line(
+        `repository discovery page ${event.page}: ${event.repositoriesDiscovered} visible`
+        + (Number.isSafeInteger(event.rateLimitRemaining)
+          ? `, GitHub API remaining ${event.rateLimitRemaining}`
+          : ''),
+      );
     case 'discovery-completed':
       return line(
         `selected ${event.selected} of ${event.discovered} discovered repositories`
         + ` (${event.eligible} eligible)`,
       );
     case 'repository-started':
-      return line(`[${event.position}/${event.total}] scanning ${event.repository}`);
+      return line(
+        `[${event.position}/${event.total}] scanning ${event.repository}`
+        + (Number.isSafeInteger(event.active)
+          ? ` (${event.active}/${event.concurrency} active)`
+          : ''),
+      );
+    case 'repository-phase':
+      return line(`[${event.position}/${event.total}] ${event.repository}: ${event.phase}`);
     case 'request-retry':
       return line(
         `${event.repository ? `${event.repository}: ` : ''}`
         + `GitHub request retry ${event.attempt}/${event.maxRetries}`
         + ` after ${event.reason} (${event.delayMs}ms)`,
+      );
+    case 'checkpoint-written':
+      return line(
+        `${event.repository}: checkpoint durable`
+        + ` (${event.repositories}/${event.total} repositories)`,
       );
     case 'repository-completed':
       return line(
@@ -20594,6 +21556,10 @@ function formatOrganizationProgress(event) {
         + `repositories, ${event.reused} resumed, ${event.findings} findings, `
         + `${event.errors} errors in ${event.elapsedMs}ms`,
       );
+    case 'scan-failed':
+      return line(`organization scan failed for ${event.organization}: ${event.error}`);
+    case 'command-failed':
+      return line(`organization scan command failed for ${event.organization}: ${event.error}`);
     default:
       return '';
   }
@@ -20611,6 +21577,1524 @@ function line(value) {
 
 function count(value, noun) {
   return `${value} ${noun}${value === 1 ? '' : 's'}`;
+}
+
+;// CONCATENATED MODULE: ./src/lib/org-report-comparison.js
+/**
+ * Deterministic comparison of complete organization JSON reports.
+ *
+ * Resolution claims fail closed: a previous finding is resolved only when the
+ * current report used the same analysis identity and successfully covered the
+ * finding's repository. Missing or failed repositories make findings unknown.
+ */
+
+
+
+
+const MAX_ORGANIZATION_REPORT_BYTES = 256 * 1024 * 1024;
+const ANALYSIS_ID_RE = /^[0-9a-f]{64}$/;
+const FINDING_ID_RE = /^[0-9a-f]{16}$/;
+const org_report_comparison_NAME_RE = /^[A-Za-z0-9_.-]+$/;
+const org_report_comparison_SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
+const org_report_comparison_VISIBILITIES = new Set(['all', 'public', 'private', 'internal']);
+
+/**
+ * Load and validate an organization JSON report from inside the working
+ * directory, with a bounded read and real-path escape protection.
+ */
+async function loadOrganizationReport({ path, cwd = process.cwd() }) {
+  const resolvedPath = await resolveRepositoryFile(path, cwd);
+  const metadata = await (0,promises_namespaceObject.stat)(resolvedPath);
+  if (!metadata.isFile()) throw new Error('previous organization report must be a file');
+  if (metadata.size > MAX_ORGANIZATION_REPORT_BYTES) {
+    throw new Error(
+      `previous organization report exceeds ${MAX_ORGANIZATION_REPORT_BYTES} bytes`,
+    );
+  }
+  let report;
+  try {
+    report = JSON.parse(await (0,promises_namespaceObject.readFile)(resolvedPath, 'utf8'));
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new Error('previous organization report is not valid JSON');
+    }
+    throw error;
+  }
+  return validateOrganizationReport(report, 'previous');
+}
+
+/**
+ * Compare two validated organization reports by semantic finding fingerprint.
+ * Returned arrays are deterministically ordered and retain complete finding
+ * evidence from the report where each classification originated.
+ */
+function compareOrganizationReports({ previous, current }) {
+  const before = validateOrganizationReport(previous, 'previous');
+  const after = validateOrganizationReport(current, 'current');
+  if (before.organization.toLocaleLowerCase() !== after.organization.toLocaleLowerCase()) {
+    throw new Error('organization reports belong to different organizations');
+  }
+  if (
+    before.analysis.generation !== after.analysis.generation
+    || before.analysis.identity !== after.analysis.identity
+  ) {
+    throw new Error(
+      'previous organization report does not match the current analysis scope and policy',
+    );
+  }
+
+  const previousRepositories = repositoryMap(before.repositories, 'previous');
+  const currentRepositories = repositoryMap(after.repositories, 'current');
+  const previousFindings = findingMap(before.findings, 'previous');
+  const currentFindings = findingMap(after.findings, 'current');
+  const newFindings = [];
+  const resolvedFindings = [];
+  const unchangedFindings = [];
+  const unknownFindings = [];
+
+  for (const [key, finding] of currentFindings) {
+    if (previousFindings.has(key)) {
+      unchangedFindings.push(finding);
+      previousFindings.delete(key);
+    } else {
+      newFindings.push(finding);
+    }
+  }
+  for (const finding of previousFindings.values()) {
+    const repository = currentRepositories.get(finding.repository.toLocaleLowerCase());
+    if (repository && org_report_comparison_repositoryCoverageComplete(repository, after.coverage)) resolvedFindings.push(finding);
+    else unknownFindings.push(finding);
+  }
+
+  const previousNames = [...previousRepositories.keys()];
+  const currentNames = [...currentRepositories.keys()];
+  const added = currentNames.filter(name => !previousRepositories.has(name)).sort();
+  const removed = previousNames.filter(name => !currentRepositories.has(name)).sort();
+  const failed = [...currentRepositories]
+    .filter(([, repository]) => !org_report_comparison_repositoryCoverageComplete(repository, after.coverage))
+    .map(([name]) => name)
+    .sort();
+  const comparable = currentNames.filter(name => (
+    previousRepositories.has(name)
+    && org_report_comparison_repositoryCoverageComplete(currentRepositories.get(name), after.coverage)
+  )).length;
+
+  newFindings.sort(compareFindings);
+  resolvedFindings.sort(compareFindings);
+  unchangedFindings.sort(compareFindings);
+  unknownFindings.sort(compareFindings);
+  const complete = after.coverage.complete === true
+    && removed.length === 0
+    && failed.length === 0
+    && after.errors.length === 0;
+
+  return {
+    schemaVersion: '1.0',
+    analysis: { ...after.analysis },
+    repositories: {
+      previous: previousRepositories.size,
+      current: currentRepositories.size,
+      comparable,
+      added,
+      removed,
+      failed,
+    },
+    findings: {
+      new: newFindings,
+      resolved: resolvedFindings,
+      unchanged: unchangedFindings,
+      unknown: unknownFindings,
+    },
+    summary: {
+      newFindings: newFindings.length,
+      resolvedFindings: resolvedFindings.length,
+      unchangedFindings: unchangedFindings.length,
+      unknownFindings: unknownFindings.length,
+      repositoriesComparable: comparable,
+      repositoriesAdded: added.length,
+      repositoriesRemoved: removed.length,
+      repositoriesFailed: failed.length,
+      complete,
+    },
+  };
+}
+
+function validateOrganizationReport(report, label) {
+  if (!org_report_comparison_isRecord(report) || report.schemaVersion !== '1.0') {
+    throw new Error(`${label} organization report schemaVersion must be "1.0"`);
+  }
+  if (typeof report.organization !== 'string' || !report.organization) {
+    throw new Error(`${label} organization report organization is invalid`);
+  }
+  if (
+    !org_report_comparison_isRecord(report.analysis)
+    || !Number.isSafeInteger(report.analysis.generation)
+    || report.analysis.generation < 1
+    || typeof report.analysis.identity !== 'string'
+    || !ANALYSIS_ID_RE.test(report.analysis.identity)
+  ) {
+    throw new Error(`${label} organization report analysis identity is invalid`);
+  }
+  if (!Array.isArray(report.repositories)) {
+    throw new Error(`${label} organization report repositories must be an array`);
+  }
+  if (!Array.isArray(report.findings)) {
+    throw new Error(`${label} organization report findings must be an array`);
+  }
+  if (!Array.isArray(report.errors)) {
+    throw new Error(`${label} organization report errors must be an array`);
+  }
+  if (!org_report_comparison_isRecord(report.summary)) {
+    throw new Error(`${label} organization report summary is invalid`);
+  }
+  if (!['OK', 'FAIL'].includes(report.status)) {
+    throw new Error(`${label} organization report status is invalid`);
+  }
+  validateScope(report.scope, label);
+  validateBaselineAndConfig(report, label);
+  const repositories = repositoryMap(report.repositories, label);
+  const findings = findingMap(report.findings, label);
+  for (const finding of findings.values()) {
+    if (!repositories.has(finding.repository.toLocaleLowerCase())) {
+      throw new Error(
+        `${label} organization report finding references an unknown repository`,
+      );
+    }
+  }
+  validateReportEvidence({ report, repositories, findings, label });
+  validateCoverage(report.coverage, label, repositories);
+  if (
+    !Number.isSafeInteger(report.summary.findings)
+    || report.summary.findings !== findings.size
+  ) {
+    throw new Error(`${label} organization report finding summary is inconsistent`);
+  }
+  // Status describes the selected repositories. Coverage separately records
+  // whether an intentional repository cap prevented a complete organization scan.
+  const expectedReportStatus = report.findings.length === 0 && report.errors.length === 0
+    ? 'OK'
+    : 'FAIL';
+  if (report.status !== expectedReportStatus) {
+    throw new Error(`${label} organization report status is inconsistent`);
+  }
+  return report;
+}
+
+function validateScope(scope, label) {
+  if (!org_report_comparison_isRecord(scope)) {
+    throw new Error(`${label} organization report scope is invalid`);
+  }
+  if (!Array.isArray(scope.repositories) || scope.repositories.some(r => typeof r !== 'string')) {
+    throw new Error(`${label} organization report scope repositories is invalid`);
+  }
+  if (!org_report_comparison_VISIBILITIES.has(scope.visibility)) {
+    throw new Error(`${label} organization report scope visibility is invalid`);
+  }
+  for (const flag of ['includeArchived', 'includeDisabled', 'includeForks']) {
+    if (typeof scope[flag] !== 'boolean') {
+      throw new Error(`${label} organization report scope ${flag} is invalid`);
+    }
+  }
+  if (
+    scope.maxRepositories !== null
+    && (!Number.isSafeInteger(scope.maxRepositories) || scope.maxRepositories <= 0)
+  ) {
+    throw new Error(`${label} organization report scope maxRepositories is invalid`);
+  }
+  if (scope.severity !== null && !org_report_comparison_SEVERITIES.has(scope.severity)) {
+    throw new Error(`${label} organization report scope severity is invalid`);
+  }
+  if (scope.explain !== undefined && typeof scope.explain !== 'boolean') {
+    throw new Error(`${label} organization report scope explain is invalid`);
+  }
+  if (
+    scope.concurrency !== undefined
+    && (!Number.isSafeInteger(scope.concurrency) || scope.concurrency <= 0)
+  ) {
+    throw new Error(`${label} organization report scope concurrency is invalid`);
+  }
+}
+
+function validateCoverage(coverage, label, repositories) {
+  if (!org_report_comparison_isRecord(coverage)) {
+    throw new Error(`${label} organization report coverage is invalid`);
+  }
+  for (const flag of [
+    'complete',
+    'enumerationComplete',
+    'selectedRepositoriesComplete',
+    'eligibleRepositoriesComplete',
+    'limitedByMaxRepositories',
+  ]) {
+    if (typeof coverage[flag] !== 'boolean') {
+      throw new Error(`${label} organization report coverage ${flag} is invalid`);
+    }
+  }
+  if (
+    !Number.isSafeInteger(coverage.repositoriesOmittedByLimit)
+    || coverage.repositoriesOmittedByLimit < 0
+  ) {
+    throw new Error(`${label} organization report coverage repositoriesOmittedByLimit is invalid`);
+  }
+  if (
+    !Array.isArray(coverage.incompleteRepositories)
+    || coverage.incompleteRepositories.some(r => typeof r !== 'string')
+  ) {
+    throw new Error(`${label} organization report coverage incompleteRepositories is invalid`);
+  }
+  const incompleteSet = new Set(coverage.incompleteRepositories.map(r => r.toLowerCase()));
+  for (const repoName of incompleteSet) {
+    if (!repositories.has(repoName)) {
+      throw new Error(`${label} organization report coverage references unknown incomplete repository ${repoName}`);
+    }
+  }
+  for (const [name, repo] of repositories) {
+    const hasFailure = repo.errors.length > 0 || repo.findings.some(f => f?.ruleId === 'parse-error');
+    if (hasFailure && !incompleteSet.has(name)) {
+      throw new Error(`${label} organization report coverage is inconsistent: failed repository ${repo.repository?.fullName} not marked incomplete`);
+    }
+    if (!hasFailure && incompleteSet.has(name)) {
+      throw new Error(`${label} organization report coverage is inconsistent: error-free repository ${repo.repository?.fullName} marked incomplete`);
+    }
+  }
+  if (coverage.selectedRepositoriesComplete !== (incompleteSet.size === 0)) {
+    throw new Error(`${label} organization report coverage selectedRepositoriesComplete is inconsistent`);
+  }
+  if (coverage.complete !== (incompleteSet.size === 0 && !coverage.limitedByMaxRepositories && coverage.enumerationComplete && coverage.selectedRepositoriesComplete && coverage.eligibleRepositoriesComplete)) {
+    throw new Error(`${label} organization report coverage complete is inconsistent`);
+  }
+}
+
+function validateBaselineAndConfig(report, label) {
+  if (!org_report_comparison_isRecord(report.baseline)) {
+    throw new Error(`${label} organization report baseline is invalid`);
+  }
+  if (report.baseline.path !== null && typeof report.baseline.path !== 'string') {
+    throw new Error(`${label} organization report baseline path is invalid`);
+  }
+  if (!Number.isSafeInteger(report.baseline.suppressed) || report.baseline.suppressed < 0) {
+    throw new Error(`${label} organization report baseline suppressed is invalid`);
+  }
+  if (report.configPath !== null && typeof report.configPath !== 'string') {
+    throw new Error(`${label} organization report configPath is invalid`);
+  }
+}
+
+function repositoryMap(repositories, label) {
+  const mapped = new Map();
+  for (const result of repositories) {
+    if (!org_report_comparison_isRecord(result)) {
+      throw new Error(`${label} organization report contains an invalid repository result`);
+    }
+    const repoInfo = result.repository;
+    if (!org_report_comparison_isRecord(repoInfo) || typeof repoInfo.fullName !== 'string') {
+      throw new Error(`${label} organization report contains an invalid repository result`);
+    }
+    const name = repoInfo.fullName;
+    const parts = name.split('/');
+    if (
+      parts.length !== 2
+      || parts.some(part => !org_report_comparison_NAME_RE.test(part) || part === '.' || part === '..')
+      || !Array.isArray(result.errors)
+      || !Array.isArray(result.findings)
+      || !Array.isArray(result.files)
+      || !org_report_comparison_isRecord(result.summary)
+      || !['OK', 'FAIL'].includes(result.status)
+    ) {
+      throw new Error(`${label} organization report contains an invalid repository result`);
+    }
+    if (
+      !Number.isSafeInteger(result.summary.findings)
+      || result.summary.findings !== result.findings.length
+    ) {
+      throw new Error(`${label} organization report repository summary is inconsistent for ${name}`);
+    }
+    const expectedStatus = (result.findings.length === 0 && result.errors.length === 0) ? 'OK' : 'FAIL';
+    if (result.status !== expectedStatus) {
+      throw new Error(`${label} organization report repository status is inconsistent for ${name}`);
+    }
+    const key = name.toLocaleLowerCase();
+    if (mapped.has(key)) {
+      throw new Error(`${label} organization report contains duplicate repository ${name}`);
+    }
+    mapped.set(key, result);
+  }
+  return mapped;
+}
+
+/**
+ * Validate that the flattened evidence is an exact, order-independent copy of
+ * the evidence owned by each repository result. Counts alone are insufficient:
+ * a report could otherwise replace one finding or error with unrelated data.
+ */
+function validateReportEvidence({ report, repositories, findings, label }) {
+  const nestedFindings = new Map();
+  const nestedErrors = [];
+
+  for (const [repositoryKey, result] of repositories) {
+    const repositoryName = result.repository.fullName;
+    const repositoryFindings = findingMap(
+      result.findings,
+      label,
+      ` repository ${repositoryName}`,
+    );
+    for (const [key, finding] of repositoryFindings) {
+      if (finding.repository.toLocaleLowerCase() !== repositoryKey) {
+        throw new Error(
+          `${label} organization report repository ${repositoryName} contains a finding for another repository`,
+        );
+      }
+      if (nestedFindings.has(key)) {
+        throw new Error(`${label} organization report contains duplicate finding identity`);
+      }
+      nestedFindings.set(key, finding);
+    }
+    for (const error of result.errors) {
+      nestedErrors.push(validateReportError(error, {
+        label,
+        expectedRepository: repositoryName,
+      }));
+    }
+  }
+
+  if (!sameRecordMap(findings, nestedFindings)) {
+    throw new Error(`${label} organization report findings are inconsistent with repository results`);
+  }
+
+  const flattenedErrors = report.errors.map(error => {
+    const validated = validateReportError(error, { label });
+    if (!repositories.has(validated.repository.toLocaleLowerCase())) {
+      throw new Error(
+        `${label} organization report error references an unknown repository`,
+      );
+    }
+    return validated;
+  });
+  if (!sameRecordMultiset(flattenedErrors, nestedErrors)) {
+    throw new Error(`${label} organization report errors are inconsistent with repository results`);
+  }
+}
+
+function validateReportError(error, { label, expectedRepository } = {}) {
+  if (
+    !org_report_comparison_isRecord(error)
+    || !org_report_comparison_isJsonValue(error)
+    || typeof error.repository !== 'string'
+    || !error.repository
+    || typeof error.error !== 'string'
+    || (error.path !== undefined && typeof error.path !== 'string')
+  ) {
+    throw new Error(`${label} organization report contains an invalid error`);
+  }
+  if (
+    expectedRepository !== undefined
+    && error.repository.toLocaleLowerCase() !== expectedRepository.toLocaleLowerCase()
+  ) {
+    throw new Error(
+      `${label} organization report repository ${expectedRepository} contains an error for another repository`,
+    );
+  }
+  return error;
+}
+
+function sameRecordMap(left, right) {
+  if (left.size !== right.size) return false;
+  for (const [key, value] of left) {
+    if (!right.has(key) || stableJson(value) !== stableJson(right.get(key))) return false;
+  }
+  return true;
+}
+
+function sameRecordMultiset(left, right) {
+  if (left.length !== right.length) return false;
+  const counts = new Map();
+  for (const value of left) {
+    const key = stableJson(value);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  for (const value of right) {
+    const key = stableJson(value);
+    const count = counts.get(key) ?? 0;
+    if (count === 0) return false;
+    if (count === 1) counts.delete(key);
+    else counts.set(key, count - 1);
+  }
+  return counts.size === 0;
+}
+
+function stableJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  return `{${Object.keys(value)
+    .sort()
+    .map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+    .join(',')}}`;
+}
+
+function org_report_comparison_repositoryCoverageComplete(repository, coverage) {
+  const incompleteSet = new Set(
+    (coverage?.incompleteRepositories ?? []).map(name => name.toLowerCase()),
+  );
+  return repository.errors.length === 0
+    && !repository.findings.some(finding => finding?.ruleId === 'parse-error')
+    && !incompleteSet.has(repository.repository.fullName.toLowerCase());
+}
+
+function findingMap(findings, label, context = '') {
+  const mapped = new Map();
+  for (const finding of findings) {
+    if (
+      !org_report_comparison_isRecord(finding)
+      || !org_report_comparison_isJsonValue(finding)
+      || typeof finding.repository !== 'string'
+      || typeof finding.id !== 'string'
+      || !FINDING_ID_RE.test(finding.id)
+      || (finding.fingerprint !== undefined
+        && (typeof finding.fingerprint !== 'string'
+          || !FINDING_ID_RE.test(finding.fingerprint)))
+      || typeof finding.ruleId !== 'string'
+      || !finding.ruleId
+      || !org_report_comparison_SEVERITIES.has(finding.severity)
+      || typeof finding.file !== 'string'
+      || !Number.isSafeInteger(finding.line)
+      || (finding.fields !== undefined
+        && (!org_report_comparison_isRecord(finding.fields) || !org_report_comparison_isJsonValue(finding.fields)))
+    ) {
+      throw new Error(`${label} organization report${context} contains an invalid finding`);
+    }
+    const identity = finding.fingerprint ?? finding.id;
+    const key = `${finding.repository.toLocaleLowerCase()}\0${identity}`;
+    if (mapped.has(key)) {
+      throw new Error(
+        `${label} organization report${context} contains duplicate finding identity`,
+      );
+    }
+    mapped.set(key, finding);
+  }
+  return mapped;
+}
+
+function compareFindings(left, right) {
+  return left.repository.localeCompare(right.repository)
+    || left.file.localeCompare(right.file)
+    || left.line - right.line
+    || left.ruleId.localeCompare(right.ruleId)
+    || left.id.localeCompare(right.id);
+}
+
+function org_report_comparison_isRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function org_report_comparison_isJsonValue(value, seen = new Set()) {
+  if (value === null || ['string', 'boolean'].includes(typeof value)) return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (!value || typeof value !== 'object' || seen.has(value)) return false;
+  seen.add(value);
+  const valid = Array.isArray(value)
+    ? value.every(item => org_report_comparison_isJsonValue(item, seen))
+    : Object.entries(value).every(([key, item]) => (
+      typeof key === 'string' && org_report_comparison_isJsonValue(item, seen)
+    ));
+  seen.delete(value);
+  return valid;
+}
+
+;// CONCATENATED MODULE: ./src/lib/agent-mode.js
+/**
+ * Safe organization-scan artifact defaults.
+ *
+ * There is no reliable cross-agent runtime signal, so callers select an
+ * execution context explicitly. Context controls presentation defaults only;
+ * automatic organization artifacts always derive from the same scan identity.
+ */
+
+
+
+
+
+
+
+
+
+/** Legacy agent-mode environment opt-in retained for compatibility. */
+const AGENT_MODE_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_MODE';
+
+/** Preferred execution-context environment variable. */
+const EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_CONTEXT';
+
+const EXECUTION_CONTEXTS = new Set(['agent', 'auto', 'ci', 'interactive']);
+
+const agent_mode_ORGANIZATION_RE = /^[A-Za-z0-9_.-]+$/;
+const REPORT_EXTENSIONS = Object.freeze({
+  csv: 'csv',
+  html: 'html',
+  json: 'json',
+  sarif: 'sarif',
+  text: 'txt',
+  toon: 'toon',
+});
+const ARTIFACT_PREFIXES = Object.freeze({
+  agent: '.actions-warden-agent',
+  'org-scan': '.actions-warden-org-scan',
+});
+
+/**
+ * Resolve explicit CLI precedence over the environment opt-in.
+ *
+ * @param {object} options
+ * @param {boolean} [options.optionValue]
+ * @param {string} [options.optionSource]
+ * @param {string} [options.environmentValue]
+ */
+function resolveAgentMode({ optionValue, optionSource, environmentValue } = {}) {
+  if (optionSource === 'cli') return Boolean(optionValue);
+  if (environmentValue === undefined || environmentValue === '') return false;
+  if (environmentValue !== 'agent') {
+    throw new Error(`${AGENT_MODE_ENVIRONMENT_VARIABLE} must be "agent" when set`);
+  }
+  return true;
+}
+
+/**
+ * Resolve CLI flag precedence over the preferred context environment variable
+ * and the legacy ACTIONS_WARDEN_MODE=agent alias.
+ */
+function resolveExecutionContext({
+  optionValue,
+  optionSource,
+  environmentValue,
+  legacyEnvironmentValue,
+} = {}) {
+  if (optionSource === 'cli') return optionValue ? 'agent' : 'auto';
+  if (environmentValue !== undefined && String(environmentValue).trim() !== '') {
+    const context = String(environmentValue).trim().toLowerCase();
+    if (!EXECUTION_CONTEXTS.has(context)) {
+      throw new Error(
+        `${EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE} must be agent, auto, ci, or interactive`,
+      );
+    }
+    return context;
+  }
+  return resolveAgentMode({ environmentValue: legacyEnvironmentValue }) ? 'agent' : 'auto';
+}
+
+/**
+ * Build stable, scope-specific paths for an organization scan.
+ *
+ * @param {object} options
+ * @param {string} options.organization
+ * @param {string} options.cwd
+ * @param {string[]} [options.repositories]
+ * @param {'all'|'public'|'private'|'internal'} options.visibility
+ * @param {boolean} options.includeArchived
+ * @param {boolean} options.includeDisabled
+ * @param {boolean} options.includeForks
+ * @param {number} [options.maxRepositories]
+ * @param {'low'|'medium'|'high'|'critical'} [options.severity]
+ * @param {boolean} options.explain
+ * @param {string|false} [options.configPath]
+ * @param {string} [options.baseline]
+ * @param {'toon'|'json'|'text'|'csv'|'sarif'|'html'} options.reportFormat
+ * @param {'agent'|'org-scan'} [options.artifactNamespace]
+ */
+async function createOrganizationScanArtifacts({
+  organization,
+  cwd,
+  repositories,
+  visibility,
+  includeArchived,
+  includeDisabled,
+  includeForks,
+  maxRepositories,
+  severity,
+  explain,
+  configPath,
+  baseline,
+  reportFormat,
+  artifactNamespace = 'org-scan',
+}) {
+  validateOrganization(organization);
+  const patterns = agent_mode_normalizePatterns(repositories);
+  const config = await loadConfig({
+    cwd,
+    path: configPath,
+    ruleIds: RULES.map(rule => rule.id),
+  });
+  const baselinePath = baseline ?? config.baseline;
+  const baselineData = baselinePath
+    ? await loadBaseline({ path: baselinePath, cwd })
+    : { path: null, ids: new Set(), fingerprints: new Set() };
+  const identity = createOrganizationCheckpointIdentity({
+    organization,
+    repositories: patterns,
+    visibility,
+    includeArchived,
+    includeDisabled,
+    includeForks,
+    maxRepositories,
+    severity,
+    explain,
+    config,
+    baselineData,
+  });
+  const key = createOrganizationCheckpointArtifactKey(identity);
+  const groupedKey = key.match(/.{8}/g).join('.');
+  const prefix = ARTIFACT_PREFIXES[artifactNamespace];
+  if (!prefix) throw new Error(`invalid organization artifact namespace: ${artifactNamespace}`);
+  const checkpointPath = `${prefix}.${groupedKey}.checkpoint.json`;
+  const reportExtension = REPORT_EXTENSIONS[reportFormat];
+  if (!reportExtension) throw new Error(`invalid organization report format: ${reportFormat}`);
+  const reportPath = `${prefix}.${groupedKey}.report.${reportExtension}`;
+
+  return {
+    checkpointPath,
+    reportPath,
+    resume: await pathExists((0,external_node_path_namespaceObject.resolve)(cwd, checkpointPath)),
+    configPath: config.path,
+    baselinePath: baselineData.path,
+    identity,
+  };
+}
+
+/**
+ * Render the bounded stdout contract emitted after an organization file report.
+ */
+function renderOrganizationScanReceipt({
+  result,
+  reportPath,
+  reportFormat,
+  checkpointPath,
+  resumed,
+  repositoriesReused = 0,
+  reportLayout = 'single',
+  reportDirectory,
+  manifestPath,
+  kind = 'actions-warden-org-scan-receipt',
+}) {
+  return format('json', [], {
+    status: result.status,
+    json: {
+      schemaVersion: '1.0',
+      kind,
+      command: 'org-scan',
+      organization: result.organization,
+      status: result.status,
+      summary: result.summary,
+      report: {
+        path: reportPath,
+        format: reportFormat,
+        layout: reportLayout,
+        ...(reportDirectory ? { directory: reportDirectory } : {}),
+        ...(manifestPath ? { manifest: manifestPath } : {}),
+      },
+      checkpoint: {
+        path: checkpointPath,
+        resumed,
+        repositoriesReused,
+      },
+      coverage: compactCoverage(result.coverage),
+      ...(result.comparison ? { comparison: result.comparison.summary } : {}),
+    },
+  });
+}
+
+function compactCoverage(coverage = {}) {
+  return {
+    complete: coverage.complete === true,
+    enumerationComplete: coverage.enumerationComplete === true,
+    selectedRepositoriesComplete: coverage.selectedRepositoriesComplete === true,
+    eligibleRepositoriesComplete: coverage.eligibleRepositoriesComplete === true,
+    limitedByMaxRepositories: coverage.limitedByMaxRepositories === true,
+    repositoriesOmittedByLimit: Number.isSafeInteger(coverage.repositoriesOmittedByLimit)
+      ? coverage.repositoriesOmittedByLimit
+      : 0,
+    incompleteRepositories: Array.isArray(coverage.incompleteRepositories)
+      ? coverage.incompleteRepositories.length
+      : 0,
+  };
+}
+
+function validateOrganization(organization) {
+  if (
+    typeof organization !== 'string'
+    || !agent_mode_ORGANIZATION_RE.test(organization)
+    || organization === '.'
+    || organization === '..'
+  ) throw new Error('invalid organization');
+}
+
+function agent_mode_normalizePatterns(patterns) {
+  if (patterns === undefined) return [];
+  if (!Array.isArray(patterns) || patterns.some(pattern => typeof pattern !== 'string' || !pattern)) {
+    throw new Error('repository filters must be non-empty strings');
+  }
+  return [...new Set(patterns)];
+}
+
+async function pathExists(path) {
+  try {
+    await (0,promises_namespaceObject.lstat)(path);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+;// CONCATENATED MODULE: ./src/lib/destination.js
+/**
+ * Shared destination and control-file collision validation.
+ */
+
+
+
+
+
+const DEFAULT_CONFIG_PATHS = ['.actions-warden.yml', '.actions-warden.yaml'];
+
+/**
+ * Check if a path corresponds to a default workflow or composite-action path.
+ *
+ * @param {string} path
+ * @param {string} cwd
+ * @returns {boolean}
+ */
+function isDefaultWorkflowPath(path, cwd) {
+  const localPath = (0,external_node_path_namespaceObject.relative)((0,external_node_path_namespaceObject.resolve)(cwd), path).split(external_node_path_namespaceObject.sep).join('/');
+  return /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(localPath)
+    || /(^|\/)action\.ya?ml$/i.test(localPath);
+}
+
+/**
+ * Ensure destination paths cannot replace reserved config paths or default workflow paths.
+ *
+ * @param {Array<{label?: string, option?: string, path: string}>} destinations
+ * @param {string} cwd
+ */
+async function assertDestinationsUseSafeNames(destinations, cwd) {
+  await assertDestinationsDoNotReplaceControls(
+    destinations,
+    DEFAULT_CONFIG_PATHS.map(path => ({ label: 'reserved config path', path: (0,external_node_path_namespaceObject.resolve)(cwd, path) })),
+  );
+  for (const destination of destinations) {
+    if (isDefaultWorkflowPath(destination.path, cwd)) {
+      const name = destination.option || destination.label || 'destination';
+      throw new Error(`${name} cannot use a default workflow discovery path`);
+    }
+  }
+}
+
+/**
+ * Ensure destination paths do not collide with control files.
+ *
+ * @param {Array<{label?: string, option?: string, path: string}>} destinations
+ * @param {Array<{label: string, path: string|null|undefined}>} controls
+ */
+async function assertDestinationsDoNotReplaceControls(destinations, controls) {
+  for (const destination of destinations) {
+    if (!destination.path) continue;
+    for (const control of controls) {
+      if (control.path && await sameFilePath(destination.path, (0,external_node_path_namespaceObject.resolve)(control.path))) {
+        const name = destination.option || destination.label || 'destination';
+        throw new Error(`${name} cannot replace the ${control.label}`);
+      }
+    }
+  }
+}
+
+/**
+ * Ensure multiple write destinations are distinct from each other.
+ *
+ * @param {Array<{label?: string, option?: string, path: string}>} destinations
+ */
+async function assertDestinationsAreDistinct(destinations) {
+  for (let left = 0; left < destinations.length; left += 1) {
+    for (let right = left + 1; right < destinations.length; right += 1) {
+      if (await sameFilePath(destinations[left].path, destinations[right].path)) {
+        const leftName = destinations[left].option || destinations[left].label || 'destination';
+        const rightName = destinations[right].option || destinations[right].label || 'destination';
+        throw new Error(`${leftName} and ${rightName} must use different paths`);
+      }
+    }
+  }
+}
+
+/**
+ * Validate that a write destination can be created safely.
+ *
+ * @param {{option?: string, label?: string, path: string, cwd: string}} options
+ * @returns {Promise<{option?: string, label?: string, path: string}>}
+ */
+async function validateWriteDestination({ option, label, path, cwd }) {
+  const name = option || label || 'destination';
+  if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) {
+    throw new Error(`${name} must be a non-empty path`);
+  }
+  try {
+    await writeFileGuarded({ path, content: '', dryRun: true, cwd });
+    return { option, label, path: (0,external_node_path_namespaceObject.resolve)(cwd, path) };
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+      throw new Error(`parent directory for ${name} must exist`);
+    }
+    throw error;
+  }
+}
+
+;// CONCATENATED MODULE: ./src/lib/action-summary.js
+/**
+ * Bounded, redacted GitHub Actions job summaries and numeric output metrics.
+ *
+ * Command payloads can contain attacker-controlled workflow and GitHub API
+ * data. Keep that data in plain escaped table cells; never turn it into links
+ * or copy the complete serialized report into the job summary.
+ */
+
+
+
+
+
+
+const action_summary_SEVERITIES = ['critical', 'high', 'medium', 'low'];
+const action_summary_SEVERITY_ORDER = new Map(action_summary_SEVERITIES.map((severity, index) => [severity, index]));
+const MAX_ROWS_PER_SECTION = 10;
+const MAX_CELL_LENGTH = 240;
+
+/** Hard ceiling for Markdown written to the GitHub Actions job summary. */
+const MAX_ACTION_SUMMARY_LENGTH = 32_000;
+
+const RULE_DESCRIPTIONS = new Map([
+  ...listRules().map(rule => [rule.id, rule.description]),
+  ['parse-error', 'Fix the workflow YAML syntax before relying on the scan result.'],
+]);
+
+/**
+ * GitHub Action output names and their corresponding metric object keys.
+ * Every numeric output is written for every command, using zero when it does
+ * not apply, so downstream expressions do not need command-specific guards.
+ */
+const ACTION_NUMERIC_OUTPUTS = Object.freeze([
+  ['findings', 'findings'],
+  ['total-findings', 'totalFindings'],
+  ['critical', 'critical'],
+  ['high', 'high'],
+  ['medium', 'medium'],
+  ['low', 'low'],
+  ['suppressed', 'suppressed'],
+  ['errors', 'errors'],
+  ['repositories-discovered', 'repositoriesDiscovered'],
+  ['repositories-selected', 'repositoriesSelected'],
+  ['repositories-scanned', 'repositoriesScanned'],
+  ['repositories-resumed', 'repositoriesResumed'],
+  ['repositories-failed', 'repositoriesFailed'],
+  ['new-findings', 'newFindings'],
+  ['resolved-findings', 'resolvedFindings'],
+  ['unchanged-findings', 'unchangedFindings'],
+  ['unknown-findings', 'unknownFindings'],
+]);
+
+/** Return the complete, zero-filled shape used for stable numeric outputs. */
+function emptyActionMetrics({ errors = 0 } = {}) {
+  return {
+    findings: 0,
+    totalFindings: 0,
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+    suppressed: 0,
+    errors: action_summary_count(errors),
+    repositoriesDiscovered: 0,
+    repositoriesSelected: 0,
+    repositoriesScanned: 0,
+    repositoriesResumed: 0,
+    repositoriesFailed: 0,
+    newFindings: 0,
+    resolvedFindings: 0,
+    unchangedFindings: 0,
+    unknownFindings: 0,
+  };
+}
+
+/**
+ * Derive stable numeric Action outputs without changing any command result or
+ * serialized JSON/SARIF contract.
+ */
+function collectActionMetrics({ command, result, repositoriesReused = 0 }) {
+  const findings = findingsFor(command, result);
+  const summary = findingSummaryFor(command, result);
+  const severityCounts = summarizeSeverities(findings);
+  const suppressed = action_summary_count(summary?.suppressed);
+  const activeFindings = action_summary_count(summary?.findings, findings.length);
+  const metrics = {
+    ...emptyActionMetrics(),
+    findings: activeFindings,
+    totalFindings: action_summary_count(summary?.totalFindings, activeFindings + suppressed),
+    critical: action_summary_count(summary?.critical, severityCounts.critical),
+    high: action_summary_count(summary?.high, severityCounts.high),
+    medium: action_summary_count(summary?.medium, severityCounts.medium),
+    low: action_summary_count(summary?.low, severityCounts.low),
+    suppressed,
+    errors: operationalErrorsFor(command, result).length,
+  };
+
+  if (command === 'org-scan') {
+    metrics.repositoriesDiscovered = action_summary_count(summary?.repositoriesDiscovered);
+    metrics.repositoriesSelected = action_summary_count(summary?.repositoriesSelected);
+    metrics.repositoriesScanned = action_summary_count(summary?.repositoriesScanned);
+    metrics.repositoriesResumed = action_summary_count(repositoriesReused);
+    metrics.repositoriesFailed = action_summary_count(summary?.repositoriesFailed);
+    metrics.newFindings = action_summary_count(result?.comparison?.summary?.newFindings);
+    metrics.resolvedFindings = action_summary_count(result?.comparison?.summary?.resolvedFindings);
+    metrics.unchangedFindings = action_summary_count(result?.comparison?.summary?.unchangedFindings);
+    metrics.unknownFindings = action_summary_count(result?.comparison?.summary?.unknownFindings);
+  }
+  return metrics;
+}
+
+/**
+ * Render a concise GitHub-flavored Markdown job summary.
+ */
+function renderActionSummary({
+  command,
+  result,
+  cwd = process.cwd(),
+  metrics = collectActionMetrics({ command, result }),
+  annotations = 0,
+  annotationsSkipped = 0,
+  reportPath = '',
+  checkpointPath = '',
+  checkpointResumed = false,
+  repositoriesReused = metrics.repositoriesResumed,
+  write = false,
+}) {
+  const sections = [
+    `### actions-warden (${markdownText(command, 64)})`,
+    renderTable(
+      ['Result', 'Value'],
+      overviewRows({
+        command,
+        result,
+        cwd,
+        metrics,
+        annotations,
+        annotationsSkipped,
+        reportPath,
+        checkpointPath,
+        checkpointResumed,
+        repositoriesReused,
+        write,
+      }),
+      new Set([1]),
+    ),
+  ];
+
+  const findings = findingsFor(command, result);
+  if (findingSummaryFor(command, result)) {
+    sections.push(renderSeveritySection(metrics));
+  }
+  if (command === 'org-scan') {
+    sections.push(renderOrganizationCoverage(result.summary, result.coverage));
+    if (result.comparison) sections.push(renderComparison(result.comparison));
+  }
+  if (findings.length > 0) {
+    sections.push(renderRuleBreakdown(findings));
+    sections.push(renderFindingDetails({ command, result, findings, cwd }));
+  }
+
+  const changes = changesFor(command, result);
+  if (changes.length > 0) {
+    sections.push(renderChanges(changes, cwd, write && command !== 'report'));
+  }
+
+  const skipped = skippedFor(command, result);
+  if (skipped.length > 0) sections.push(renderSkipped(skipped, cwd));
+
+  const warnings = command === 'verify' ? array(result?.warnings) : [];
+  if (warnings.length > 0) sections.push(renderWarnings(warnings, cwd));
+
+  const errors = operationalErrorsFor(command, result);
+  if (errors.length > 0) sections.push(renderErrors(errors, cwd));
+
+  return boundSummary(`${sections.filter(Boolean).join('\n\n')}\n`);
+}
+
+/**
+ * Render an invocation-level failure when no normal command result exists.
+ */
+function renderActionFailureSummary({
+  command,
+  message,
+  annotations = 0,
+}) {
+  const summary = [
+    `### actions-warden (${markdownText(command, 64)})`,
+    renderTable(['Result', 'Value'], [
+      ['Status', 'FAIL'],
+      ['Operational errors', 1],
+      ['Annotations', `${action_summary_count(annotations)} emitted`],
+    ], new Set([1])),
+    '#### Invocation error',
+    markdownText(message || 'actions-warden could not complete the requested command.', 2_000),
+  ].join('\n\n');
+  return boundSummary(`${summary}\n`);
+}
+
+function overviewRows({
+  command,
+  result,
+  cwd,
+  metrics,
+  annotations,
+  annotationsSkipped,
+  reportPath,
+  checkpointPath,
+  checkpointResumed,
+  repositoriesReused,
+  write,
+}) {
+  const rows = [['Status', result?.status ?? 'UNKNOWN']];
+  const summary = findingSummaryFor(command, result);
+
+  if (summary) {
+    rows.push(
+      ['Files scanned', action_summary_count(summary.files)],
+      ['Active findings', metrics.findings],
+      ['Total findings before baseline', metrics.totalFindings],
+      ['Suppressed by baseline', metrics.suppressed],
+      ['Operational errors', metrics.errors],
+    );
+  } else if (command === 'pin') {
+    rows.push(
+      [write ? 'Changes applied' : 'Changes planned', array(result?.changes).length],
+      ['Operational errors', metrics.errors],
+    );
+  } else if (command === 'upgrade') {
+    rows.push(
+      [write ? 'Changes applied' : 'Changes planned', array(result?.changes).length],
+      ['Upgrades skipped', array(result?.skipped).length],
+      ['Operational errors', metrics.errors],
+    );
+  } else if (command === 'verify') {
+    rows.push(
+      ['Files scanned', array(result?.files).length],
+      ['References verified', array(result?.checks).length],
+      ['Warnings', array(result?.warnings).length],
+      ['Operational errors', metrics.errors],
+    );
+  } else if (command === 'rules') {
+    rows.push(['Rules listed', listRules().length]);
+  }
+
+  if (command === 'report') {
+    rows.push(
+      ['Pin changes planned', array(result?.pin?.changes).length],
+      ['Upgrade changes planned', array(result?.upgrade?.changes).length],
+      ['Upgrades skipped', array(result?.upgrade?.skipped).length],
+    );
+  }
+  if (command === 'org-scan') rows.splice(1, 0, ['Organization', result?.organization ?? '']);
+
+  rows.push([
+    'Annotations',
+    `${action_summary_count(annotations)} emitted; ${action_summary_count(annotationsSkipped)} omitted`,
+  ]);
+  if (reportPath) rows.push(['Saved report', workspacePath(reportPath, cwd)]);
+  if (command === 'org-scan' && checkpointPath) {
+    rows.push(
+      ['Checkpoint', workspacePath(checkpointPath, cwd)],
+      ['Checkpoint resumed', checkpointResumed ? 'yes' : 'no'],
+      ['Repositories reused', action_summary_count(repositoriesReused)],
+    );
+  }
+  return rows;
+}
+
+function renderSeveritySection(metrics) {
+  return [
+    '#### Severity breakdown',
+    renderTable(
+      ['Critical', 'High', 'Medium', 'Low'],
+      [[metrics.critical, metrics.high, metrics.medium, metrics.low]],
+      new Set([0, 1, 2, 3]),
+    ),
+  ].join('\n\n');
+}
+
+function renderOrganizationCoverage(summary = {}, coverage = {}) {
+  return [
+    '#### Repository coverage',
+    renderTable(['Coverage', 'Count'], [
+      ['Eligible coverage complete', coverage.complete === true ? 'yes' : 'no'],
+      ['Discovered', action_summary_count(summary.repositoriesDiscovered)],
+      ['Eligible', action_summary_count(summary.repositoriesEligible)],
+      ['Selected', action_summary_count(summary.repositoriesSelected)],
+      ['Scanned', action_summary_count(summary.repositoriesScanned)],
+      ['With workflows', action_summary_count(summary.repositoriesWithWorkflows)],
+      ['With findings', action_summary_count(summary.repositoriesWithFindings)],
+      ['Failed', action_summary_count(summary.repositoriesFailed)],
+      ['Skipped by scope', action_summary_count(summary.repositoriesSkipped)],
+      ['Omitted by repository limit', action_summary_count(coverage.repositoriesOmittedByLimit)],
+      ['Incomplete repositories', array(coverage.incompleteRepositories).length],
+    ], new Set([1])),
+  ].join('\n\n');
+}
+
+function renderComparison(comparison) {
+  const summary = comparison?.summary ?? {};
+  return [
+    '#### Change since previous report',
+    renderTable(['Change', 'Count'], [
+      ['New findings', action_summary_count(summary.newFindings)],
+      ['Resolved findings', action_summary_count(summary.resolvedFindings)],
+      ['Unchanged findings', action_summary_count(summary.unchangedFindings)],
+      ['Unknown resolution', action_summary_count(summary.unknownFindings)],
+      ['Comparable repositories', action_summary_count(summary.repositoriesComparable)],
+      ['Removed repositories', action_summary_count(summary.repositoriesRemoved)],
+      ['Failed repositories', action_summary_count(summary.repositoriesFailed)],
+      ['Comparison complete', summary.complete === true ? 'yes' : 'no'],
+    ], new Set([1])),
+  ].join('\n\n');
+}
+
+function renderRuleBreakdown(findings) {
+  const byRule = new Map();
+  for (const finding of findings) {
+    const ruleId = String(finding?.ruleId ?? 'unknown');
+    const severity = normalizeSeverity(finding?.severity);
+    const record = byRule.get(ruleId) ?? {
+      ruleId,
+      critical: 0,
+      high: 0,
+      medium: 0,
+      low: 0,
+      total: 0,
+    };
+    record[severity] += 1;
+    record.total += 1;
+    byRule.set(ruleId, record);
+  }
+  const records = [...byRule.values()].sort((left, right) => (
+    right.total - left.total || compareText(left.ruleId, right.ruleId)
+  ));
+  const visible = records.slice(0, MAX_ROWS_PER_SECTION);
+  const section = [
+    '#### Findings by rule',
+    renderTable(
+      ['Rule', 'Critical', 'High', 'Medium', 'Low', 'Total'],
+      visible.map(record => [
+        record.ruleId,
+        record.critical,
+        record.high,
+        record.medium,
+        record.low,
+        record.total,
+      ]),
+      new Set([1, 2, 3, 4, 5]),
+    ),
+  ];
+  if (records.length > visible.length) section.push(showingNote(visible.length, records.length, 'rules'));
+  return section.join('\n\n');
+}
+
+function renderFindingDetails({ command, result, findings, cwd }) {
+  const explanations = findingExplanations(command, result);
+  const sorted = [...findings].sort((left, right) => (
+    severityRank(left?.severity) - severityRank(right?.severity)
+    || compareText(action_summary_location(left, cwd), action_summary_location(right, cwd))
+    || action_summary_count(left?.line) - action_summary_count(right?.line)
+    || compareText(left?.ruleId, right?.ruleId)
+    || compareText(left?.id, right?.id)
+  ));
+  const visible = sorted.slice(0, MAX_ROWS_PER_SECTION);
+  const section = [
+    '#### Top findings',
+    renderTable(['Severity', 'Rule', 'Location', 'ID', 'Remediation'], visible.map(finding => [
+      normalizeSeverity(finding?.severity),
+      finding?.ruleId ?? 'unknown',
+      action_summary_location(finding, cwd),
+      finding?.id ?? '',
+      finding?.explain
+        ?? explanations.get(finding?.id)
+        ?? RULE_DESCRIPTIONS.get(finding?.ruleId)
+        ?? 'Review the complete report evidence and update the workflow safely.',
+    ])),
+  ];
+  if (findings.length > visible.length) {
+    section.push(showingNote(visible.length, findings.length, 'findings'));
+  }
+  return section.join('\n\n');
+}
+
+function renderChanges(changes, cwd, applied) {
+  const sorted = [...changes].sort((left, right) => (
+    compareText(left.stage, right.stage)
+    || compareText(action_summary_location(left.change, cwd), action_summary_location(right.change, cwd))
+    || compareText(left.change?.action, right.change?.action)
+    || compareText(left.change?.id, right.change?.id)
+  ));
+  const visible = sorted.slice(0, MAX_ROWS_PER_SECTION);
+  const section = [
+    applied ? '#### Applied changes' : '#### Planned changes',
+    renderTable(['Stage', 'Action', 'From', 'To', 'Location', 'ID'], visible.map(({ stage, change }) => [
+      stage,
+      change?.action ?? '',
+      change?.fromVersion ?? change?.fromRef ?? '',
+      stage === 'pin' ? change?.toSha ?? '' : change?.toTag ?? change?.toSha ?? '',
+      action_summary_location(change, cwd),
+      change?.id ?? '',
+    ])),
+  ];
+  if (changes.length > visible.length) {
+    section.push(showingNote(visible.length, changes.length, 'changes'));
+  }
+  return section.join('\n\n');
+}
+
+function renderSkipped(skipped, cwd) {
+  const sorted = [...skipped].sort((left, right) => (
+    compareText(action_summary_location(left, cwd), action_summary_location(right, cwd))
+    || compareText(left?.action, right?.action)
+    || compareText(left?.tag, right?.tag)
+  ));
+  const visible = sorted.slice(0, MAX_ROWS_PER_SECTION);
+  const section = [
+    '#### Skipped upgrades',
+    renderTable(['Action', 'Candidate', 'Reason', 'Age', 'Location'], visible.map(skip => [
+      skip?.action ?? '',
+      skip?.tag ?? '',
+      skip?.reason ?? '',
+      skip?.ageDays === undefined
+        ? skip?.ageSource ?? ''
+        : `${action_summary_count(skip.ageDays)} days${skip?.ageSource ? ` (${skip.ageSource})` : ''}`,
+      action_summary_location(skip, cwd),
+    ])),
+  ];
+  if (skipped.length > visible.length) {
+    section.push(showingNote(visible.length, skipped.length, 'skipped upgrades'));
+  }
+  return section.join('\n\n');
+}
+
+function renderWarnings(warnings, cwd) {
+  const sorted = [...warnings].sort(compareDiagnostics(cwd));
+  const visible = sorted.slice(0, MAX_ROWS_PER_SECTION);
+  const section = [
+    '#### Verification warnings',
+    renderTable(['Location', 'Action', 'Warning', 'ID'], visible.map(warning => [
+      action_summary_location(warning, cwd),
+      warning?.action ?? '',
+      warning?.warning ?? 'Verification warning.',
+      warning?.id ?? '',
+    ])),
+  ];
+  if (warnings.length > visible.length) {
+    section.push(showingNote(visible.length, warnings.length, 'warnings'));
+  }
+  return section.join('\n\n');
+}
+
+function renderErrors(errors, cwd) {
+  const sorted = [...errors].sort((left, right) => (
+    compareText(left.stage, right.stage)
+    || compareDiagnostics(cwd)(left.error, right.error)
+  ));
+  const visible = sorted.slice(0, MAX_ROWS_PER_SECTION);
+  const section = [
+    '#### Operational errors',
+    renderTable(['Stage', 'Location', 'Subject', 'Error'], visible.map(({ stage, error }) => [
+      stage,
+      action_summary_location(error, cwd),
+      error?.action ?? error?.repository ?? '',
+      error?.error ?? 'actions-warden reported an operational error.',
+    ])),
+  ];
+  if (errors.length > visible.length) {
+    section.push(showingNote(visible.length, errors.length, 'errors'));
+  }
+  return section.join('\n\n');
+}
+
+function findingsFor(command, result) {
+  if (command === 'audit' || command === 'org-scan') return array(result?.findings);
+  if (command === 'report') return array(result?.audit?.findings);
+  return [];
+}
+
+function findingSummaryFor(command, result) {
+  if (command === 'audit' || command === 'org-scan') return result?.summary;
+  if (command === 'report') return result?.audit?.summary;
+  return undefined;
+}
+
+function findingExplanations(command, result) {
+  const auditResult = command === 'report' ? result?.audit : command === 'audit' ? result : undefined;
+  return new Map(array(auditResult?.allFindings)
+    .filter(finding => finding?.id && finding?.explain)
+    .map(finding => [finding.id, finding.explain]));
+}
+
+function changesFor(command, result) {
+  if (command === 'pin' || command === 'upgrade') {
+    return array(result?.changes).map(change => ({ stage: command, change }));
+  }
+  if (command === 'report') {
+    return [
+      ...array(result?.pin?.changes).map(change => ({ stage: 'pin', change })),
+      ...array(result?.upgrade?.changes).map(change => ({ stage: 'upgrade', change })),
+    ];
+  }
+  return [];
+}
+
+function skippedFor(command, result) {
+  if (command === 'upgrade') return array(result?.skipped);
+  if (command === 'report') return array(result?.upgrade?.skipped);
+  return [];
+}
+
+function operationalErrorsFor(command, result) {
+  const errors = [];
+  const explanations = findingExplanations(command, result);
+  for (const finding of findingsFor(command, result)) {
+    if (finding?.ruleId !== 'parse-error') continue;
+    errors.push({
+      stage: 'parse',
+      error: {
+        ...finding,
+        error: finding.explain
+          ?? explanations.get(finding.id)
+          ?? 'Workflow YAML could not be parsed.',
+      },
+    });
+  }
+
+  if (command === 'pin' || command === 'upgrade' || command === 'verify') {
+    errors.push(...array(result?.errors).map(error => ({ stage: command, error })));
+  } else if (command === 'report') {
+    errors.push(
+      ...array(result?.pin?.errors).map(error => ({ stage: 'pin', error })),
+      ...array(result?.upgrade?.errors).map(error => ({ stage: 'upgrade', error })),
+    );
+  } else if (command === 'org-scan') {
+    errors.push(...array(result?.errors).map(error => ({ stage: 'org-scan', error })));
+  }
+  return errors;
+}
+
+function summarizeSeverities(findings) {
+  const summary = { critical: 0, high: 0, medium: 0, low: 0 };
+  for (const finding of findings) summary[normalizeSeverity(finding?.severity)] += 1;
+  return summary;
+}
+
+function action_summary_location(diagnostic, cwd) {
+  let value = '';
+  if (typeof diagnostic?.file === 'string' && diagnostic.file) {
+    value = workspacePath(diagnostic.file, cwd);
+  } else if (typeof diagnostic?.path === 'string' && diagnostic.path) {
+    value = diagnostic?.repository
+      ? `${diagnostic.repository}/${diagnostic.path}`
+      : diagnostic.path;
+  } else if (typeof diagnostic?.repository === 'string') {
+    value = diagnostic.repository;
+  }
+  const line = positiveInteger(diagnostic?.line);
+  return `${value || '—'}${line ? `:${line}` : ''}`;
+}
+
+function workspacePath(file, cwd) {
+  if (typeof file !== 'string' || !file || file.includes('\0')) return '—';
+  try {
+    const absolute = (0,external_node_path_namespaceObject.isAbsolute)(file) ? file : (0,external_node_path_namespaceObject.resolve)(cwd, file);
+    const relative = identity_canonicalPath(absolute, (0,external_node_path_namespaceObject.resolve)(cwd));
+    if (relative === '') return '.';
+    if (relative === '..' || relative.startsWith('../')) return '(outside working directory)';
+    return relative;
+  } catch {
+    return '(invalid path)';
+  }
+}
+
+function compareDiagnostics(cwd) {
+  return (left, right) => (
+    compareText(action_summary_location(left, cwd), action_summary_location(right, cwd))
+    || action_summary_count(left?.line) - action_summary_count(right?.line)
+    || compareText(left?.action, right?.action)
+    || compareText(left?.id, right?.id)
+    || compareText(left?.error ?? left?.warning, right?.error ?? right?.warning)
+  );
+}
+
+function renderTable(headers, rows, numericColumns = new Set()) {
+  const renderedHeaders = headers.map(header => markdownText(header, 80));
+  const separator = headers.map((_, index) => numericColumns.has(index) ? '---:' : '---');
+  return [
+    `| ${renderedHeaders.join(' | ')} |`,
+    `| ${separator.join(' | ')} |`,
+    ...rows.map(row => (
+      `| ${headers.map((_, index) => markdownText(row[index] ?? '', MAX_CELL_LENGTH)).join(' | ')} |`
+    )),
+  ].join('\n');
+}
+
+function markdownText(value, maxLength = MAX_CELL_LENGTH) {
+  const withoutControls = [...redact(value)].map(character => {
+    const codePoint = character.codePointAt(0);
+    return codePoint <= 0x1f || codePoint === 0x7f ? ' ' : character;
+  }).join('');
+  const normalized = withoutControls
+    .replace(/\s+/g, ' ')
+    .trim();
+  const truncated = truncate(normalized, maxLength);
+  return truncated
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replace(/[\\`*_[\]#|]/g, character => `&#${character.codePointAt(0)};`);
+}
+
+function showingNote(visible, total, label) {
+  return `_Showing ${visible} of ${total} ${label}; all records remain in the command output and any saved report._`;
+}
+
+function boundSummary(summary) {
+  if (summary.length <= MAX_ACTION_SUMMARY_LENGTH) return summary;
+  const marker = '\n\n_Summary truncated; use the complete command output or saved report._\n';
+  return `${summary.slice(0, MAX_ACTION_SUMMARY_LENGTH - marker.length).trimEnd()}${marker}`;
+}
+
+function normalizeSeverity(value) {
+  return action_summary_SEVERITY_ORDER.has(value) ? value : 'low';
+}
+
+function severityRank(value) {
+  return action_summary_SEVERITY_ORDER.get(value) ?? action_summary_SEVERITIES.length;
+}
+
+function array(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function action_summary_count(value, fallback = 0) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
+
+function positiveInteger(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0 ? number : undefined;
+}
+
+function compareText(left, right) {
+  const a = String(left ?? '');
+  const b = String(right ?? '');
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function truncate(value, maxLength) {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
 ;// CONCATENATED MODULE: ./src/lib/annotations.js
@@ -20636,7 +23120,7 @@ const annotations_SEVERITY_ORDER = new Map([
   ['medium', 2],
   ['low', 3],
 ]);
-const RULE_DESCRIPTIONS = new Map(
+const annotations_RULE_DESCRIPTIONS = new Map(
   listRules().map(rule => [rule.id, rule.description]),
 );
 
@@ -20750,9 +23234,9 @@ function renderAnnotationCommands(annotations) {
 }
 
 function findingAnnotation(finding, cwd) {
-  const severity = normalizeSeverity(finding.severity);
+  const severity = annotations_normalizeSeverity(finding.severity);
   const description = finding.explain
-    || RULE_DESCRIPTIONS.get(finding.ruleId)
+    || annotations_RULE_DESCRIPTIONS.get(finding.ruleId)
     || 'GitHub Actions security finding.';
   return {
     level: annotationLevel(severity),
@@ -20793,14 +23277,14 @@ function diagnosticMessage(primary, diagnostic) {
     detailEntries.join(' '),
     diagnostic?.id ? `[${diagnostic.id}]` : '',
   ].filter(Boolean);
-  return truncate(parts.join(' '), 16_000);
+  return annotations_truncate(parts.join(' '), 16_000);
 }
 
 function annotations_location(diagnostic, cwd) {
   const file = normalizeFile(diagnostic?.file, cwd);
   if (!file) return {};
-  const line = positiveInteger(diagnostic?.line) ?? 1;
-  const column = positiveInteger(diagnostic?.column);
+  const line = annotations_positiveInteger(diagnostic?.line) ?? 1;
+  const column = annotations_positiveInteger(diagnostic?.column);
   return {
     file,
     line,
@@ -20817,7 +23301,7 @@ function normalizeFile(file, cwd) {
   return rel.split(/[\\/]/).join('/');
 }
 
-function normalizeSeverity(severity) {
+function annotations_normalizeSeverity(severity) {
   return annotations_SEVERITY_ORDER.has(severity) ? severity : 'low';
 }
 
@@ -20830,19 +23314,19 @@ function annotationLevel(severity) {
 function compareAnnotations(a, b) {
   return (LEVEL_ORDER.get(a.level) ?? 3) - (LEVEL_ORDER.get(b.level) ?? 3)
     || (annotations_SEVERITY_ORDER.get(a.severity) ?? 4) - (annotations_SEVERITY_ORDER.get(b.severity) ?? 4)
-    || compareText(a.file, b.file)
+    || annotations_compareText(a.file, b.file)
     || (a.line ?? 0) - (b.line ?? 0)
-    || compareText(a.title, b.title)
-    || compareText(a.id, b.id);
+    || annotations_compareText(a.title, b.title)
+    || annotations_compareText(a.id, b.id);
 }
 
-function compareText(a, b) {
+function annotations_compareText(a, b) {
   const left = String(a ?? '');
   const right = String(b ?? '');
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function positiveInteger(value) {
+function annotations_positiveInteger(value) {
   const number = Number(value);
   return Number.isInteger(number) && number > 0 ? number : undefined;
 }
@@ -20860,7 +23344,7 @@ function escapeProperty(value) {
     .replaceAll(',', '%2C');
 }
 
-function truncate(value, maxLength) {
+function annotations_truncate(value, maxLength) {
   if (value.length <= maxLength) return value;
   return `${value.slice(0, maxLength - 1)}…`;
 }
@@ -20885,14 +23369,23 @@ function truncate(value, maxLength) {
 
 
 
-const FORMATS = new Set(['toon', 'json', 'text', 'sarif']);
+
+
+
+
+
+
+const FORMATS = new Set(['toon', 'json', 'text', 'csv', 'sarif', 'html']);
 const MODES = new Set(['major', 'minor', 'patch']);
 const action_SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
 const action_VISIBILITIES = new Set(['all', 'public', 'private', 'internal']);
 
 async function main() {
   const command = input('command') || 'audit';
-  const format = input('format') || 'toon';
+  const requestedFormat = input('format') || 'auto';
+  const format = requestedFormat === 'auto'
+    ? (command === 'org-scan' ? 'json' : 'toon')
+    : requestedFormat;
   const cwd = (0,external_node_path_namespaceObject.resolve)(input('working-directory') || process.env.GITHUB_WORKSPACE || process.cwd());
   const workflows = parseStringList(input('workflow'), 'workflow');
   const token = input('token') || undefined;
@@ -20916,15 +23409,58 @@ async function main() {
   const includeForks = booleanInput('include-forks', false);
   const maxRepositories = optionalPositiveInteger(input('max-repos'), 'max-repos');
   const concurrency = action_positiveInteger(input('concurrency') || '4', 'concurrency');
-  const checkpointPath = input('checkpoint-path') || undefined;
+  const configuredCheckpointPath = input('checkpoint-path') || undefined;
   const resumeFrom = input('resume-from') || undefined;
+  const previousReportPath = input('previous-report') || undefined;
   const progress = booleanInput('progress', true);
+  const fresh = booleanInput('fresh', false);
+  const autoCheckpoint = booleanInput('auto-checkpoint', true);
+  let requestedOutput = input('output-path') || undefined;
 
   if (!FORMATS.has(format)) throw new Error(`invalid format: ${format}`);
+  if (command !== 'org-scan' && ['csv', 'html'].includes(format) && !requestedOutput) {
+    throw new Error(`output-path is required when format is ${format}`);
+  }
+  if (previousReportPath && command !== 'org-scan') {
+    throw new Error('previous-report applies only to org-scan');
+  }
+  if (previousReportPath && format === 'sarif') {
+    throw new Error('previous-report cannot be used with format sarif');
+  }
 
   let result;
   let payload;
-  let findings = 0;
+  let reportPath = '';
+  let activeCheckpointPath = '';
+  let checkpointResumed = false;
+  let repositoriesReused = 0;
+
+  if (requestedOutput && command !== 'org-scan') {
+    const outputDestination = await validateWriteDestination({
+      label: 'output-path',
+      path: requestedOutput,
+      cwd,
+    });
+    reportPath = outputDestination.path;
+    await assertDestinationsUseSafeNames([outputDestination], cwd);
+    const config = await loadConfig({
+      cwd,
+      path: ignoreConfig ? false : configPath,
+      ruleIds: listRules().map(rule => rule.id),
+    });
+    const baselinePath = baseline ?? config.baseline;
+    const baselineData = baselinePath
+      ? await loadBaseline({ path: baselinePath, cwd })
+      : { path: null };
+    await assertDestinationsDoNotReplaceControls(
+      [outputDestination],
+      [
+        { label: 'active config', path: config.path },
+        { label: 'active baseline', path: baselineData.path },
+        ...workflows.map(wf => ({ label: 'workflow file', path: (0,external_node_path_namespaceObject.resolve)(cwd, wf) })),
+      ],
+    );
+  }
 
   switch (command) {
     case 'audit':
@@ -20937,7 +23473,6 @@ async function main() {
         baseline,
       });
       payload = renderAudit(result, { format, explain, cwd });
-      findings = result.summary.findings;
       break;
     case 'pin':
       result = await pin({ cwd, workflows, dryRun: !write, token, fix });
@@ -20969,59 +23504,164 @@ async function main() {
         baseline,
       });
       payload = renderReport(result, { format, mode, cwd });
-      findings = result.audit.summary.findings;
       break;
     case 'verify':
       result = await verify({ cwd, workflows, token });
       payload = renderVerify(result, { format, cwd });
       break;
-    case 'org-scan':
+    case 'org-scan': {
       if (!organization) throw new Error('organization is required for org-scan');
-      if (checkpointPath && resumeFrom) {
+      if (configuredCheckpointPath && resumeFrom) {
         throw new Error('checkpoint-path and resume-from cannot be used together');
       }
-      if (
-        (resumeFrom ?? checkpointPath)
-        && input('output-path')
-        && await sameFilePath(
-          (0,external_node_path_namespaceObject.resolve)(cwd, resumeFrom ?? checkpointPath),
-          (0,external_node_path_namespaceObject.resolve)(cwd, input('output-path')),
-        )
-      ) throw new Error('checkpoint and report output paths must be different');
-      result = await scanOrganization({
+      if (fresh && resumeFrom) {
+        throw new Error('fresh and resume-from cannot be used together');
+      }
+      const needsGeneratedCheckpoint = (
+        !configuredCheckpointPath
+        && !resumeFrom
+        && autoCheckpoint
+      );
+      const artifacts = await createOrganizationScanArtifacts({
         organization,
         cwd,
-        token,
         repositories,
         visibility,
         includeArchived,
         includeDisabled,
         includeForks,
         maxRepositories,
-        concurrency,
         severity,
         explain,
         configPath: ignoreConfig ? false : configPath,
         baseline,
-        checkpointPath: resumeFrom ?? checkpointPath,
-        resume: Boolean(resumeFrom),
-        onProgress: progress
-          ? event => {
-              const message = formatOrganizationProgress(event);
-              if (message) process.stderr.write(message);
-            }
-          : undefined,
+        reportFormat: format,
       });
+      requestedOutput ??= artifacts.reportPath;
+      const outputDestination = await validateWriteDestination({
+        label: 'output-path',
+        path: requestedOutput,
+        cwd,
+      });
+      reportPath = outputDestination.path;
+      const selectedCheckpointPath = resumeFrom
+        ?? configuredCheckpointPath
+        ?? (needsGeneratedCheckpoint ? artifacts.checkpointPath : undefined);
+      checkpointResumed = Boolean(resumeFrom);
+      if (selectedCheckpointPath && !resumeFrom) {
+        checkpointResumed = !fresh && await action_pathExists((0,external_node_path_namespaceObject.resolve)(cwd, selectedCheckpointPath));
+      }
+      const checkpointDestination = selectedCheckpointPath
+        ? await validateWriteDestination({
+            label: resumeFrom ? 'resume-from' : 'checkpoint-path',
+            path: selectedCheckpointPath,
+            cwd,
+          })
+        : null;
+      activeCheckpointPath = checkpointDestination?.path ?? '';
+      const destinations = [outputDestination, checkpointDestination].filter(Boolean);
+      await assertDestinationsAreDistinct(destinations);
+      await assertDestinationsUseSafeNames(destinations, cwd);
+      await assertDestinationsDoNotReplaceControls(
+        destinations,
+        [
+          { label: 'active config', path: artifacts.configPath },
+          { label: 'active baseline', path: artifacts.baselinePath },
+        ],
+      );
+      if (
+        activeCheckpointPath
+        && await sameFilePath(activeCheckpointPath, reportPath)
+      ) throw new Error('checkpoint and report output paths must be different');
+      if (
+        previousReportPath
+        && activeCheckpointPath
+        && await sameFilePath(
+          (0,external_node_path_namespaceObject.resolve)(cwd, previousReportPath),
+          activeCheckpointPath,
+        )
+      ) throw new Error('checkpoint and previous report paths must be different');
+      if (
+        previousReportPath
+        && await sameFilePath(
+          (0,external_node_path_namespaceObject.resolve)(cwd, previousReportPath),
+          reportPath,
+        )
+      ) throw new Error('output and previous report paths must be different');
+      const previousReport = previousReportPath
+        ? await loadOrganizationReport({ path: previousReportPath, cwd })
+        : null;
+      const progressReporter = createOrganizationProgressReporter({
+        mode: progress ? 'plain' : 'none',
+        context: 'ci',
+        stream: process.stderr,
+      });
+      try {
+        result = await scanOrganization({
+          organization,
+          cwd,
+          token,
+          repositories,
+          visibility,
+          includeArchived,
+          includeDisabled,
+          includeForks,
+          maxRepositories,
+          concurrency,
+          severity,
+          explain,
+          configPath: ignoreConfig ? false : configPath,
+          baseline,
+          checkpointPath: activeCheckpointPath || undefined,
+          resume: checkpointResumed,
+          onProgress: event => {
+            if (event.type === 'repository-completed' && event.reused) {
+              repositoriesReused += 1;
+            }
+            progressReporter.emit(event);
+          },
+        });
+      } catch (error) {
+        progressReporter.emit({
+          type: 'scan-failed',
+          organization,
+          error: String(error?.message ?? error),
+        });
+        throw error;
+      } finally {
+        progressReporter.close();
+      }
+      if (previousReport) {
+        const currentReport = JSON.parse(renderOrganizationScan(result, {
+          format: 'json',
+          cwd,
+        }));
+        result.comparison = compareOrganizationReports({
+          previous: previousReport,
+          current: currentReport,
+        });
+      }
       payload = renderOrganizationScan(result, { format, cwd });
-      findings = result.summary.findings;
+      await assertDestinationsDoNotReplaceControls(
+        [{ label: 'report output', path: reportPath }],
+        [
+          { label: 'active config', path: result.configPath },
+          { label: 'active baseline', path: result.baseline.path },
+        ],
+      );
       break;
+    }
     case 'rules': {
       const rules = listRules();
       result = { status: 'OK' };
       payload = formatter_format(
         format,
         rules.map(rule => ({ label: 'RULE', fields: rule })),
-        { status: 'OK', json: { schemaVersion: '1.0', rules, status: 'OK' } },
+        {
+          status: 'OK',
+          title: 'Audit rule catalog',
+          json: { schemaVersion: '1.0', rules, status: 'OK' },
+        },
       );
       break;
     }
@@ -21029,38 +23669,58 @@ async function main() {
       throw new Error(`unknown command: ${command}`);
   }
 
-  process.stdout.write(payload);
+  if (command !== 'org-scan' && (!['csv', 'html'].includes(format) || !requestedOutput)) {
+    process.stdout.write(payload);
+  }
   const annotationResult = annotationsEnabled
     ? limitAnnotations(collectAnnotations({ command, result, cwd }))
     : { emitted: [], omitted: 0 };
   const annotationCommands = renderAnnotationCommands(annotationResult.emitted);
   if (annotationCommands) process.stdout.write(annotationCommands);
 
-  let reportPath = '';
-  const requestedOutput = input('output-path');
   if (requestedOutput) {
-    reportPath = (0,external_node_path_namespaceObject.resolve)(cwd, requestedOutput);
+    reportPath ||= (0,external_node_path_namespaceObject.resolve)(cwd, requestedOutput);
     await writeFileGuarded({
       path: reportPath,
       content: payload,
       dryRun: false,
       cwd,
     });
+    if (command === 'org-scan') {
+      process.stdout.write(
+        `Organization ${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
+      );
+    } else if (['csv', 'html'].includes(format)) {
+      process.stdout.write(
+        `${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
+      );
+    }
   }
 
+  const metrics = collectActionMetrics({ command, result, repositoriesReused });
   await setOutput('status', result.status);
-  await setOutput('findings', String(findings));
+  await setNumericOutputs(metrics);
+  await setOutput(
+    'coverage-complete',
+    command === 'org-scan' ? String(result.coverage?.complete === true) : '',
+  );
   await setOutput('annotations', String(annotationResult.emitted.length));
   await setOutput('annotations-skipped', String(annotationResult.omitted));
-  if (reportPath) await setOutput('report-path', reportPath);
-  await writeSummary({
+  await setOutput('report-path', reportPath);
+  await setOutput('checkpoint-path', activeCheckpointPath);
+  await appendSummary(renderActionSummary({
     command,
-    status: result.status,
-    findings,
+    result,
+    cwd,
+    metrics,
     annotations: annotationResult.emitted.length,
     annotationsSkipped: annotationResult.omitted,
-    payload,
-  });
+    reportPath,
+    checkpointPath: activeCheckpointPath,
+    checkpointResumed,
+    repositoriesReused,
+    write,
+  }));
 
   if (shouldFailAction({ command, result, failOnFindings })) {
     process.exitCode = 1;
@@ -21128,29 +23788,43 @@ async function setOutput(name, value) {
   );
 }
 
-async function writeSummary({
-  command,
-  status,
-  findings,
-  annotations,
-  annotationsSkipped,
-  payload,
-}) {
+async function setNumericOutputs(metrics) {
+  for (const [output, key] of ACTION_NUMERIC_OUTPUTS) {
+    await setOutput(output, String(metrics[key]));
+  }
+}
+
+async function appendSummary(markdown) {
   if (!process.env.GITHUB_STEP_SUMMARY) return;
-  const indented = payload
-    .slice(0, 8000)
-    .split('\n')
-    .map(line => `    ${line}`)
-    .join('\n');
   await (0,promises_namespaceObject.appendFile)(
     process.env.GITHUB_STEP_SUMMARY,
-    `### actions-warden (${command})\n\nstatus: \`${status}\`  findings: \`${findings}\`  annotations: \`${annotations}\`  skipped: \`${annotationsSkipped}\`\n\n${indented}\n`,
+    markdown,
     'utf8',
   );
 }
 
+async function action_pathExists(path) {
+  try {
+    await (0,promises_namespaceObject.lstat)(path);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+/** Redact and visibly escape control bytes before writing ordinary Action logs. */
+function actionLogText(value) {
+  return [...redact(value)].map(character => {
+    const codePoint = character.codePointAt(0);
+    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)
+      ? `\\u${codePoint.toString(16).padStart(4, '0')}`
+      : character;
+  }).join('');
+}
+
 main().catch(async error => {
-  const message = redact(String(error?.message ?? error));
+  const message = actionLogText(String(error?.message ?? error));
   process.stderr.write(`error: ${message}\n`);
   const annotationsEnabled = input('annotations') !== 'false';
   if (annotationsEnabled) {
@@ -21161,10 +23835,19 @@ main().catch(async error => {
       message,
     }]));
   }
+  const annotations = annotationsEnabled ? 1 : 0;
   await setOutput('status', 'FAIL').catch(() => {});
-  await setOutput('findings', '0').catch(() => {});
-  await setOutput('annotations', annotationsEnabled ? '1' : '0').catch(() => {});
+  await setNumericOutputs(emptyActionMetrics({ errors: 1 })).catch(() => {});
+  await setOutput('coverage-complete', '').catch(() => {});
+  await setOutput('annotations', String(annotations)).catch(() => {});
   await setOutput('annotations-skipped', '0').catch(() => {});
+  await setOutput('report-path', '').catch(() => {});
+  await setOutput('checkpoint-path', '').catch(() => {});
+  await appendSummary(renderActionFailureSummary({
+    command: input('command') || 'audit',
+    message,
+    annotations,
+  })).catch(() => {});
   process.exitCode = 2;
 });
 

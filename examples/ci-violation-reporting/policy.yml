@@ -1,0 +1,7 @@
+version: 1
+
+# Treat broadly writable GITHUB_TOKEN permissions as a blocking high-severity
+# violation for this repository.
+rules:
+  excessive-permissions:
+    severity: high

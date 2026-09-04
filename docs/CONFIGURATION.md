@@ -259,17 +259,34 @@ Unmatched `ignore-start` directives extend to the end of the file. An
 
 ## Baselines
 
-A baseline accepts existing, reviewed findings while allowing new findings to
-fail the scan.
+A baseline records existing, reviewed findings so that your CI stays green on
+day one, while ensuring that any **new** vulnerabilities fail future pull requests.
 
-Create one from the current unfiltered finding set:
+### How to adopt on an existing codebase (without breaking CI)
 
-```sh
-actions-warden audit \
-  --create-baseline=.actions-warden-baseline.json
-```
+When introducing `actions-warden` to an established project, you may encounter
+existing warnings. Rather than blocking your team until every single issue is
+resolved, follow this recommended baseline adoption workflow:
 
-The command writes a deterministic document:
+1. **Record current findings in a baseline file:**
+   ```sh
+   actions-warden audit \
+     --create-baseline=.actions-warden-baseline.json
+   ```
+2. **Reference the baseline in `.actions-warden.yml`:**
+   ```yaml
+   version: 1
+   baseline: .actions-warden-baseline.json
+   ```
+3. **Commit both files to your repository.**
+4. **Enable `actions-warden` in your CI pipeline.**
+   All existing issues are now suppressed so builds remain green. However, if any
+   pull request introduces a **new** security finding or unpinned action, CI will
+   fail immediately—preventing security debt from growing.
+5. **Gradually fix issues over time:**
+   As you pin actions or fix permissions, simply re-generate or update your baseline.
+
+The baseline file is saved as a deterministic, human-readable JSON document:
 
 ```json
 {
@@ -314,6 +331,12 @@ reports `totalFindings` and `suppressed`. Parser failures cannot be baselined.
 
 Review baseline diffs carefully. Deleting a finding from the baseline makes it
 active again; adding one accepts that risk without changing the workflow.
+Organization report comparison includes normalized policy and baseline
+contents in its analysis identity. Changing either intentionally requires a
+new comparison starting point instead of presenting policy-driven differences
+as resolved workflow findings.
+The [baseline-adoption example](../examples/baseline-adoption/README.md) shows
+the complete review, artifact, and CI-gating flow.
 
 ## Policy ownership
 

@@ -60,6 +60,10 @@ function checkoutProtection(step) {
   return { active: false, reason: 'unknown-or-unprotected-version' };
 }
 
+/**
+ * Describe an unprotected checkout of pull-request code, or return null when
+ * the step is unrelated or has recognized checkout protection.
+ */
 export function checkoutOfUntrustedPr(step) {
   if (!step.uses) return null;
   if (
@@ -88,6 +92,7 @@ export function checkoutOfUntrustedPr(step) {
   };
 }
 
+/** Return whether a shell step directly fetches pull-request-controlled code. */
 export function fetchesUntrustedPrCode(step) {
   if (typeof step.run !== 'string') return false;
   if (/\bgh\s+pr\s+(?:checkout|co)\b/i.test(step.run)) return true;

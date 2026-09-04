@@ -75,11 +75,14 @@ responses and use temporary directories for filesystem cases.
 ## Documentation expectations
 
 Behavior changes are incomplete until their user and integration contracts are
-updated.
+updated. `npm run check:docs` enforces 100% coverage across exported runtime
+function/class comments, public JavaScript exports, package entry points, CLI
+commands/options, Action inputs/outputs, rules, guide indexing, and example
+reachability.
 
 - CLI flags and semantics: `docs/CLI.md`
 - policy or rule behavior: `docs/CONFIGURATION.md`
-- records, JSON, SARIF, status, or exit codes: `docs/OUTPUTS.md`
+- records, JSON, CSV, SARIF, HTML, comparison, status, or exit codes: `docs/OUTPUTS.md`
 - Action inputs and outputs: `docs/GITHUB-ACTION.md` and `action.yml`
 - public exports: `docs/JAVASCRIPT-API.md`
 - agent workflows: `docs/AI-AGENTS.md` and the Claude skill

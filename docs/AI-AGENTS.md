@@ -234,9 +234,7 @@ the request:
 actions-warden org-scan my-org \
   --repository 'payments-*' \
   --visibility=private \
-  --severity=high \
-  --checkpoint=.actions-warden-org-checkpoint.json \
-  --format=json
+  --severity=high
 ```
 
 The scanner never executes remote code, but the resulting strings still come
@@ -260,19 +258,39 @@ An integration can set the marker once instead of passing the option on every
 invocation:
 
 ```sh
-export ACTIONS_WARDEN_MODE=agent
+export ACTIONS_WARDEN_CONTEXT=agent
 actions-warden org-scan my-org
 ```
 
-Agent mode is an explicit contract, not heuristic detection. By default it:
+`ACTIONS_WARDEN_MODE=agent` remains a legacy alias. There is no reliable
+universal agent-runtime heuristic; integrations should set the preferred
+context once when they cannot add `--agent-mode` to each invocation.
 
-- selects JSON and writes the full report to a guarded hidden file;
-- disables progress;
-- creates a guarded hidden checkpoint on the first run;
-- resumes that checkpoint on a later run with the same compatibility identity,
-  including across package-version-only upgrades;
-- emits only a bounded JSON receipt containing status, coverage summary,
-  report path, report format, checkpoint path, and whether resume was used.
+Organization scans are artifact-first even when an integration forgets agent
+mode: the CLI writes a scope-keyed JSON report and checkpoint, automatically
+resumes compatible state, and emits a bounded receipt. Agent mode is an
+explicit contract, not heuristic detection. It additionally:
+
+- disables implicit progress;
+- labels the bounded receipt `actions-warden-agent-receipt` so integrations can
+  distinguish the explicit contract.
+
+Agent and normal execution share `.actions-warden-org-scan.*` artifacts. A
+context switch therefore retains compatible resume state. A compatible legacy
+`.actions-warden-agent.*` checkpoint is validated and copied atomically into
+the common namespace on an automatic-checkpoint run; the legacy file is
+retained.
+
+An agent may explicitly select `--format=html` when the user wants a retained
+human-review artifact or `--format=csv` for a flat spreadsheet export, but it
+must not load either complete artifact into model context. Read the bounded
+receipt and use JSON for structured comparison or finding-batch inspection.
+For a broad report that will be inspected repository by repository, prefer
+`--report-dir=reports/actions-warden-org`: read its compact aggregate and
+manifest first, then only the relevant complete repository artifacts. This
+bounds downstream context reads, not the scanner's in-process memory. Retain a
+normal complete JSON report as well if the run must later be used as
+`--previous-report`.
 
 The automatic artifact key covers the organization, repository filters,
 inclusion flags, repository limit, severity, explanation setting, normalized
@@ -281,19 +299,22 @@ package upgrade keeps the same path and atomically migrates older checkpoint
 metadata on the first successful resume. A changed scope, security control, or
 analysis behavior receives a different path instead of replacing an
 incompatible checkpoint.
-The generated files begin
-`.actions-warden-agent.`; protect them as sensitive report artifacts and add
-that pattern to the consuming repository's ignore rules when appropriate.
+The generated files begin `.actions-warden-org-scan.`; protect them as
+sensitive report artifacts and add that pattern to the consuming repository's
+ignore rules when appropriate.
 
 Version-only upgrades do not accumulate new automatic artifacts. A deliberate
 analysis-generation change does retain the older keyed files as audit evidence;
 remove them only under the consuming repository's retention policy.
 
 Explicit CLI options take precedence over agent defaults. Use
-`--progress=always` when the user requests live progress. Use
+`--progress=plain` when the user requests human-readable live progress, or
+`--progress=json` when the integration will parse JSON Lines. Use
 `--output=stdout` only when the caller intentionally wants the complete report
 in its context; in that case stdout is the selected report rather than the
-compact receipt. `--no-agent-mode` overrides an inherited environment marker.
+compact receipt. `--no-auto-checkpoint` disables generated resume state, and
+`--fresh` deliberately replaces it without reuse. `--no-agent-mode` overrides
+an inherited environment marker.
 
 Resume primarily reduces repeated GitHub tree/blob work and elapsed time. It
 only reduces model usage when it also prevents extra output from entering the
@@ -303,7 +324,7 @@ context.
 Do not add a severity or repository filter merely to save model tokens. The
 requested security scope controls the scan; file output controls the context
 cost. Omit `--explain` on the broad first pass unless the user requested
-remediation guidance. If live progress is requested, use `--progress=always`
+remediation guidance. If live progress is requested, use `--progress=plain`
 and treat those short stderr records only as status—not report evidence.
 
 After the command finishes, inspect the report from small to large. For
@@ -311,7 +332,7 @@ example, `jq` can produce a bounded first-pass view without emitting finding
 bodies or the per-repository result array:
 
 ```sh
-agent_report_path='.actions-warden-agent.<scope-key>.report.json'
+agent_report_path='.actions-warden-org-scan.<scope-key>.report.json'
 jq '{
   schemaVersion,
   organization,
@@ -334,6 +355,22 @@ jq '{
 
 Set `agent_report_path` to the exact `report.path` value in the receipt.
 
+When the user asks what changed since a prior scan, keep the same requested
+scope and use a compatible previous JSON report:
+
+```sh
+actions-warden org-scan my-org \
+  --agent-mode \
+  --previous-report=reports/org.previous.json
+```
+
+Inspect `comparison.summary` from the receipt and saved report first. Report
+new, resolved, unchanged, and unknown counts. A removed, failed, or unparseable
+repository makes prior unmatched findings unknown; never describe them as resolved. A
+scope, policy, baseline, rule, or analysis-generation mismatch is an invocation
+error and must not be bypassed by weakening current controls. CSV and HTML
+reports are not valid previous-report inputs.
+
 Then read operational errors and relevant findings in bounded batches, grouped
 by repository, severity, or rule. The saved JSON remains the complete source
 of truth. If a response covers only a subset of findings, say so explicitly
@@ -342,18 +379,21 @@ sample, and never ignore `summary.repositoriesFailed` or `summary.errors`.
 
 Before summarizing risk:
 
-1. inspect `summary.repositoriesFailed` and `errors`;
+1. inspect `coverage.complete`, `summary.repositoriesFailed`, and `errors`;
 2. compare discovered, eligible, selected, and scanned counts;
 3. state excluded archived, disabled, and forked defaults;
 4. state `maxRepositories`, filters, visibility, and severity;
 5. distinguish “no findings in completed scans” from “complete organization
-   coverage.”
+   coverage”; a repository cap is explicitly incomplete coverage even when the
+   selected scan status is `OK`.
 
 Store reports in a controlled path. Organization results can reveal private
 repository names, workflow paths, branches, source URLs, and security posture.
 
-For a long scan, preserve the exact command scope and use the explicit
-checkpoint handoff:
+For a long scan, preserve the exact command scope and repeat the same command;
+the generated or explicitly selected `--checkpoint` path resumes automatically.
+Use the strict checkpoint handoff only when a caller restored a file that must
+exist:
 
 ```sh
 actions-warden org-scan my-org \
@@ -367,10 +407,46 @@ actions-warden org-scan my-org \
 Do not weaken filters, policy, baseline, or severity merely to make a
 checkpoint compatible. A mismatch is an invocation error and requires a new
 checkpoint. Resume still performs fresh discovery and tree verification; say
-which repository completions were shown as `resumed` in stderr progress, while
-using the final report—not progress lines—as the evidence contract. Previously
-failed and changed repositories are rescanned. Checkpoints omit tokens and raw
+how many repository results were actually reused from
+`checkpoint.repositoriesReused` in the receipt (or the equivalent progress
+events), while using the final report—not progress lines—as the evidence
+contract. Previously failed and changed repositories are rescanned. Checkpoints omit tokens and raw
 YAML but retain redacted report evidence, so treat them as sensitive artifacts.
+
+## Generating CI reporting workflows
+
+When the user asks for a GitHub Actions integration, give the actions-warden
+step an `id` and use its bounded job summary for the human review path. Save
+JSON or SARIF with `output-path` when later ingestion or complete evidence is
+required, CSV for a flat spreadsheet/warehouse export, or HTML for a retained
+human dashboard; the summary deliberately contains only aggregates and top
+records. Action organization scans generate a report path and checkpoint path
+when omitted and keep every complete format out of the step log. CSV and HTML
+require `output-path` only for non-organization commands.
+
+Later steps can read decimal-string outputs for `findings`, `total-findings`,
+each severity, `suppressed`, and `errors`. Organization scans additionally
+expose discovered, selected, scanned, resumed, and failed repository counts,
+plus the non-numeric `coverage-complete` boolean string. Do not
+describe a run as clean merely because `findings` is `0`: require `errors` and
+`repositories-failed` (for an organization scan) to be `0` and inspect
+`status` plus `coverage-complete`. If a report must be uploaded before findings fail the job, use the
+reviewed pattern in the
+[CI violation-reporting example](../examples/ci-violation-reporting/README.md);
+do not make `fail-on-findings: false` the final policy decision.
+
+Organization comparisons additionally expose `new-findings`,
+`resolved-findings`, `unchanged-findings`, and `unknown-findings`. Treat
+resolution as complete only when unknown findings, failed repositories, and
+errors are all zero and the saved comparison says `complete: true`.
+
+Do not add webhook delivery to the scanner command. When the user requests a
+webhook or ProjectDiscovery Notify integration, retain the complete report as a
+protected artifact and send a separate bounded summary from the calling
+workflow. Keep provider credentials in masked secrets and make HTTPS
+validation, redirects, retries, timeouts, and delivery failure policy explicit.
+Start from the
+[notification example](../examples/notifications/README.md).
 
 ## Policy and suppression requests
 

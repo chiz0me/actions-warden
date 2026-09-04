@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { appendFile } from 'node:fs/promises';
+import { appendFile, lstat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { audit, renderAudit } from './commands/audit.js';
@@ -14,22 +14,45 @@ import { format as renderFormat } from './lib/formatter.js';
 import { redact } from './lib/redact.js';
 import { writeFileGuarded } from './lib/writer.js';
 import { shouldFailAction } from './lib/action-status.js';
-import { formatOrganizationProgress } from './lib/org-progress.js';
+import { createOrganizationProgressReporter } from './lib/org-progress.js';
 import { sameFilePath } from './lib/path-equality.js';
+import {
+  compareOrganizationReports,
+  loadOrganizationReport,
+} from './lib/org-report-comparison.js';
+import { createOrganizationScanArtifacts } from './lib/agent-mode.js';
+import { loadConfig } from './lib/config.js';
+import { loadBaseline } from './lib/baseline.js';
+import {
+  assertDestinationsAreDistinct,
+  assertDestinationsDoNotReplaceControls,
+  assertDestinationsUseSafeNames,
+  validateWriteDestination,
+} from './lib/destination.js';
+import {
+  ACTION_NUMERIC_OUTPUTS,
+  collectActionMetrics,
+  emptyActionMetrics,
+  renderActionFailureSummary,
+  renderActionSummary,
+} from './lib/action-summary.js';
 import {
   collectAnnotations,
   limitAnnotations,
   renderAnnotationCommands,
 } from './lib/annotations.js';
 
-const FORMATS = new Set(['toon', 'json', 'text', 'sarif']);
+const FORMATS = new Set(['toon', 'json', 'text', 'csv', 'sarif', 'html']);
 const MODES = new Set(['major', 'minor', 'patch']);
 const SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
 const VISIBILITIES = new Set(['all', 'public', 'private', 'internal']);
 
 async function main() {
   const command = input('command') || 'audit';
-  const format = input('format') || 'toon';
+  const requestedFormat = input('format') || 'auto';
+  const format = requestedFormat === 'auto'
+    ? (command === 'org-scan' ? 'json' : 'toon')
+    : requestedFormat;
   const cwd = resolve(input('working-directory') || process.env.GITHUB_WORKSPACE || process.cwd());
   const workflows = parseStringList(input('workflow'), 'workflow');
   const token = input('token') || undefined;
@@ -53,15 +76,58 @@ async function main() {
   const includeForks = booleanInput('include-forks', false);
   const maxRepositories = optionalPositiveInteger(input('max-repos'), 'max-repos');
   const concurrency = positiveInteger(input('concurrency') || '4', 'concurrency');
-  const checkpointPath = input('checkpoint-path') || undefined;
+  const configuredCheckpointPath = input('checkpoint-path') || undefined;
   const resumeFrom = input('resume-from') || undefined;
+  const previousReportPath = input('previous-report') || undefined;
   const progress = booleanInput('progress', true);
+  const fresh = booleanInput('fresh', false);
+  const autoCheckpoint = booleanInput('auto-checkpoint', true);
+  let requestedOutput = input('output-path') || undefined;
 
   if (!FORMATS.has(format)) throw new Error(`invalid format: ${format}`);
+  if (command !== 'org-scan' && ['csv', 'html'].includes(format) && !requestedOutput) {
+    throw new Error(`output-path is required when format is ${format}`);
+  }
+  if (previousReportPath && command !== 'org-scan') {
+    throw new Error('previous-report applies only to org-scan');
+  }
+  if (previousReportPath && format === 'sarif') {
+    throw new Error('previous-report cannot be used with format sarif');
+  }
 
   let result;
   let payload;
-  let findings = 0;
+  let reportPath = '';
+  let activeCheckpointPath = '';
+  let checkpointResumed = false;
+  let repositoriesReused = 0;
+
+  if (requestedOutput && command !== 'org-scan') {
+    const outputDestination = await validateWriteDestination({
+      label: 'output-path',
+      path: requestedOutput,
+      cwd,
+    });
+    reportPath = outputDestination.path;
+    await assertDestinationsUseSafeNames([outputDestination], cwd);
+    const config = await loadConfig({
+      cwd,
+      path: ignoreConfig ? false : configPath,
+      ruleIds: listRules().map(rule => rule.id),
+    });
+    const baselinePath = baseline ?? config.baseline;
+    const baselineData = baselinePath
+      ? await loadBaseline({ path: baselinePath, cwd })
+      : { path: null };
+    await assertDestinationsDoNotReplaceControls(
+      [outputDestination],
+      [
+        { label: 'active config', path: config.path },
+        { label: 'active baseline', path: baselineData.path },
+        ...workflows.map(wf => ({ label: 'workflow file', path: resolve(cwd, wf) })),
+      ],
+    );
+  }
 
   switch (command) {
     case 'audit':
@@ -74,7 +140,6 @@ async function main() {
         baseline,
       });
       payload = renderAudit(result, { format, explain, cwd });
-      findings = result.summary.findings;
       break;
     case 'pin':
       result = await pin({ cwd, workflows, dryRun: !write, token, fix });
@@ -106,59 +171,164 @@ async function main() {
         baseline,
       });
       payload = renderReport(result, { format, mode, cwd });
-      findings = result.audit.summary.findings;
       break;
     case 'verify':
       result = await verify({ cwd, workflows, token });
       payload = renderVerify(result, { format, cwd });
       break;
-    case 'org-scan':
+    case 'org-scan': {
       if (!organization) throw new Error('organization is required for org-scan');
-      if (checkpointPath && resumeFrom) {
+      if (configuredCheckpointPath && resumeFrom) {
         throw new Error('checkpoint-path and resume-from cannot be used together');
       }
-      if (
-        (resumeFrom ?? checkpointPath)
-        && input('output-path')
-        && await sameFilePath(
-          resolve(cwd, resumeFrom ?? checkpointPath),
-          resolve(cwd, input('output-path')),
-        )
-      ) throw new Error('checkpoint and report output paths must be different');
-      result = await scanOrganization({
+      if (fresh && resumeFrom) {
+        throw new Error('fresh and resume-from cannot be used together');
+      }
+      const needsGeneratedCheckpoint = (
+        !configuredCheckpointPath
+        && !resumeFrom
+        && autoCheckpoint
+      );
+      const artifacts = await createOrganizationScanArtifacts({
         organization,
         cwd,
-        token,
         repositories,
         visibility,
         includeArchived,
         includeDisabled,
         includeForks,
         maxRepositories,
-        concurrency,
         severity,
         explain,
         configPath: ignoreConfig ? false : configPath,
         baseline,
-        checkpointPath: resumeFrom ?? checkpointPath,
-        resume: Boolean(resumeFrom),
-        onProgress: progress
-          ? event => {
-              const message = formatOrganizationProgress(event);
-              if (message) process.stderr.write(message);
-            }
-          : undefined,
+        reportFormat: format,
       });
+      requestedOutput ??= artifacts.reportPath;
+      const outputDestination = await validateWriteDestination({
+        label: 'output-path',
+        path: requestedOutput,
+        cwd,
+      });
+      reportPath = outputDestination.path;
+      const selectedCheckpointPath = resumeFrom
+        ?? configuredCheckpointPath
+        ?? (needsGeneratedCheckpoint ? artifacts.checkpointPath : undefined);
+      checkpointResumed = Boolean(resumeFrom);
+      if (selectedCheckpointPath && !resumeFrom) {
+        checkpointResumed = !fresh && await pathExists(resolve(cwd, selectedCheckpointPath));
+      }
+      const checkpointDestination = selectedCheckpointPath
+        ? await validateWriteDestination({
+            label: resumeFrom ? 'resume-from' : 'checkpoint-path',
+            path: selectedCheckpointPath,
+            cwd,
+          })
+        : null;
+      activeCheckpointPath = checkpointDestination?.path ?? '';
+      const destinations = [outputDestination, checkpointDestination].filter(Boolean);
+      await assertDestinationsAreDistinct(destinations);
+      await assertDestinationsUseSafeNames(destinations, cwd);
+      await assertDestinationsDoNotReplaceControls(
+        destinations,
+        [
+          { label: 'active config', path: artifacts.configPath },
+          { label: 'active baseline', path: artifacts.baselinePath },
+        ],
+      );
+      if (
+        activeCheckpointPath
+        && await sameFilePath(activeCheckpointPath, reportPath)
+      ) throw new Error('checkpoint and report output paths must be different');
+      if (
+        previousReportPath
+        && activeCheckpointPath
+        && await sameFilePath(
+          resolve(cwd, previousReportPath),
+          activeCheckpointPath,
+        )
+      ) throw new Error('checkpoint and previous report paths must be different');
+      if (
+        previousReportPath
+        && await sameFilePath(
+          resolve(cwd, previousReportPath),
+          reportPath,
+        )
+      ) throw new Error('output and previous report paths must be different');
+      const previousReport = previousReportPath
+        ? await loadOrganizationReport({ path: previousReportPath, cwd })
+        : null;
+      const progressReporter = createOrganizationProgressReporter({
+        mode: progress ? 'plain' : 'none',
+        context: 'ci',
+        stream: process.stderr,
+      });
+      try {
+        result = await scanOrganization({
+          organization,
+          cwd,
+          token,
+          repositories,
+          visibility,
+          includeArchived,
+          includeDisabled,
+          includeForks,
+          maxRepositories,
+          concurrency,
+          severity,
+          explain,
+          configPath: ignoreConfig ? false : configPath,
+          baseline,
+          checkpointPath: activeCheckpointPath || undefined,
+          resume: checkpointResumed,
+          onProgress: event => {
+            if (event.type === 'repository-completed' && event.reused) {
+              repositoriesReused += 1;
+            }
+            progressReporter.emit(event);
+          },
+        });
+      } catch (error) {
+        progressReporter.emit({
+          type: 'scan-failed',
+          organization,
+          error: String(error?.message ?? error),
+        });
+        throw error;
+      } finally {
+        progressReporter.close();
+      }
+      if (previousReport) {
+        const currentReport = JSON.parse(renderOrganizationScan(result, {
+          format: 'json',
+          cwd,
+        }));
+        result.comparison = compareOrganizationReports({
+          previous: previousReport,
+          current: currentReport,
+        });
+      }
       payload = renderOrganizationScan(result, { format, cwd });
-      findings = result.summary.findings;
+      await assertDestinationsDoNotReplaceControls(
+        [{ label: 'report output', path: reportPath }],
+        [
+          { label: 'active config', path: result.configPath },
+          { label: 'active baseline', path: result.baseline.path },
+        ],
+      );
       break;
+    }
     case 'rules': {
       const rules = listRules();
       result = { status: 'OK' };
       payload = renderFormat(
         format,
         rules.map(rule => ({ label: 'RULE', fields: rule })),
-        { status: 'OK', json: { schemaVersion: '1.0', rules, status: 'OK' } },
+        {
+          status: 'OK',
+          title: 'Audit rule catalog',
+          json: { schemaVersion: '1.0', rules, status: 'OK' },
+        },
       );
       break;
     }
@@ -166,38 +336,58 @@ async function main() {
       throw new Error(`unknown command: ${command}`);
   }
 
-  process.stdout.write(payload);
+  if (command !== 'org-scan' && (!['csv', 'html'].includes(format) || !requestedOutput)) {
+    process.stdout.write(payload);
+  }
   const annotationResult = annotationsEnabled
     ? limitAnnotations(collectAnnotations({ command, result, cwd }))
     : { emitted: [], omitted: 0 };
   const annotationCommands = renderAnnotationCommands(annotationResult.emitted);
   if (annotationCommands) process.stdout.write(annotationCommands);
 
-  let reportPath = '';
-  const requestedOutput = input('output-path');
   if (requestedOutput) {
-    reportPath = resolve(cwd, requestedOutput);
+    reportPath ||= resolve(cwd, requestedOutput);
     await writeFileGuarded({
       path: reportPath,
       content: payload,
       dryRun: false,
       cwd,
     });
+    if (command === 'org-scan') {
+      process.stdout.write(
+        `Organization ${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
+      );
+    } else if (['csv', 'html'].includes(format)) {
+      process.stdout.write(
+        `${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
+      );
+    }
   }
 
+  const metrics = collectActionMetrics({ command, result, repositoriesReused });
   await setOutput('status', result.status);
-  await setOutput('findings', String(findings));
+  await setNumericOutputs(metrics);
+  await setOutput(
+    'coverage-complete',
+    command === 'org-scan' ? String(result.coverage?.complete === true) : '',
+  );
   await setOutput('annotations', String(annotationResult.emitted.length));
   await setOutput('annotations-skipped', String(annotationResult.omitted));
-  if (reportPath) await setOutput('report-path', reportPath);
-  await writeSummary({
+  await setOutput('report-path', reportPath);
+  await setOutput('checkpoint-path', activeCheckpointPath);
+  await appendSummary(renderActionSummary({
     command,
-    status: result.status,
-    findings,
+    result,
+    cwd,
+    metrics,
     annotations: annotationResult.emitted.length,
     annotationsSkipped: annotationResult.omitted,
-    payload,
-  });
+    reportPath,
+    checkpointPath: activeCheckpointPath,
+    checkpointResumed,
+    repositoriesReused,
+    write,
+  }));
 
   if (shouldFailAction({ command, result, failOnFindings })) {
     process.exitCode = 1;
@@ -265,29 +455,43 @@ async function setOutput(name, value) {
   );
 }
 
-async function writeSummary({
-  command,
-  status,
-  findings,
-  annotations,
-  annotationsSkipped,
-  payload,
-}) {
+async function setNumericOutputs(metrics) {
+  for (const [output, key] of ACTION_NUMERIC_OUTPUTS) {
+    await setOutput(output, String(metrics[key]));
+  }
+}
+
+async function appendSummary(markdown) {
   if (!process.env.GITHUB_STEP_SUMMARY) return;
-  const indented = payload
-    .slice(0, 8000)
-    .split('\n')
-    .map(line => `    ${line}`)
-    .join('\n');
   await appendFile(
     process.env.GITHUB_STEP_SUMMARY,
-    `### actions-warden (${command})\n\nstatus: \`${status}\`  findings: \`${findings}\`  annotations: \`${annotations}\`  skipped: \`${annotationsSkipped}\`\n\n${indented}\n`,
+    markdown,
     'utf8',
   );
 }
 
+async function pathExists(path) {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+/** Redact and visibly escape control bytes before writing ordinary Action logs. */
+function actionLogText(value) {
+  return [...redact(value)].map(character => {
+    const codePoint = character.codePointAt(0);
+    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)
+      ? `\\u${codePoint.toString(16).padStart(4, '0')}`
+      : character;
+  }).join('');
+}
+
 main().catch(async error => {
-  const message = redact(String(error?.message ?? error));
+  const message = actionLogText(String(error?.message ?? error));
   process.stderr.write(`error: ${message}\n`);
   const annotationsEnabled = input('annotations') !== 'false';
   if (annotationsEnabled) {
@@ -298,9 +502,18 @@ main().catch(async error => {
       message,
     }]));
   }
+  const annotations = annotationsEnabled ? 1 : 0;
   await setOutput('status', 'FAIL').catch(() => {});
-  await setOutput('findings', '0').catch(() => {});
-  await setOutput('annotations', annotationsEnabled ? '1' : '0').catch(() => {});
+  await setNumericOutputs(emptyActionMetrics({ errors: 1 })).catch(() => {});
+  await setOutput('coverage-complete', '').catch(() => {});
+  await setOutput('annotations', String(annotations)).catch(() => {});
   await setOutput('annotations-skipped', '0').catch(() => {});
+  await setOutput('report-path', '').catch(() => {});
+  await setOutput('checkpoint-path', '').catch(() => {});
+  await appendSummary(renderActionFailureSummary({
+    command: input('command') || 'audit',
+    message,
+    annotations,
+  })).catch(() => {});
   process.exitCode = 2;
 });

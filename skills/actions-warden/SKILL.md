@@ -33,26 +33,30 @@ Invoke `actions-warden` when the user:
 The package is on npm as `actions-warden`. Invoke the reviewed version exactly:
 
 ```sh
-npx --yes actions-warden@0.4.0 audit
-npx --yes actions-warden@0.4.0 audit --severity=high --explain
-npx --yes actions-warden@0.4.0 audit --create-baseline=.actions-warden-baseline.json
-npx --yes actions-warden@0.4.0 audit --baseline=.actions-warden-baseline.json
-npx --yes actions-warden@0.4.0 audit --format=sarif
-npx --yes actions-warden@0.4.0 pin
-npx --yes actions-warden@0.4.0 pin --write
-npx --yes actions-warden@0.4.0 upgrade --mode=minor
-npx --yes actions-warden@0.4.0 upgrade --min-age=14 --write
-npx --yes actions-warden@0.4.0 verify
-npx --yes actions-warden@0.4.0 report --offline
-npx --yes actions-warden@0.4.0 org-scan my-org --severity=high --format=json
-npx --yes actions-warden@0.4.0 org-scan my-org --severity=high --agent-mode
-npx --yes actions-warden@0.4.0 org-scan my-org --severity=high --checkpoint=.actions-warden-org-checkpoint.json
-npx --yes actions-warden@0.4.0 org-scan my-org --severity=high --resume=.actions-warden-org-checkpoint.json
-npx --yes actions-warden@0.4.0 rules
+npx --yes actions-warden@0.5.0 audit
+npx --yes actions-warden@0.5.0 audit --severity=high --explain
+npx --yes actions-warden@0.5.0 audit --create-baseline=.actions-warden-baseline.json
+npx --yes actions-warden@0.5.0 audit --baseline=.actions-warden-baseline.json
+npx --yes actions-warden@0.5.0 audit --format=sarif
+npx --yes actions-warden@0.5.0 audit --format=csv --output-path=actions-warden.csv
+npx --yes actions-warden@0.5.0 pin
+npx --yes actions-warden@0.5.0 pin --write
+npx --yes actions-warden@0.5.0 upgrade --mode=minor
+npx --yes actions-warden@0.5.0 upgrade --min-age=14 --write
+npx --yes actions-warden@0.5.0 verify
+npx --yes actions-warden@0.5.0 report --offline
+npx --yes actions-warden@0.5.0 org-scan my-org --severity=high
+npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --format=html --output-path=actions-warden-org.html
+npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --previous-report=previous.json --format=json
+npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --report-dir=reports/actions-warden-org
+npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --agent-mode
+npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --checkpoint=.actions-warden-org-checkpoint.json
+npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --resume=.actions-warden-org-checkpoint.json
+npx --yes actions-warden@0.5.0 rules
 ```
 
 Useful shared command flags: `--workflow <path-or-glob>` (repeatable),
-`--cwd <dir>`, `--format toon|json|text|sarif`, `--output stdout|file`, and
+`--cwd <dir>`, `--format toon|json|text|csv|sarif|html`, `--output stdout|file`, and
 `--output-path <path>`. An output path implies file output; never combine it
 with explicit `--output=stdout`, and create its parent directory first.
 Network-backed commands accept `--token <gh-token>` and also read
@@ -62,13 +66,30 @@ Audit, report, and org-scan also accept `--config <path>` and `--baseline <path>
 `.actions-warden.yml` is loaded automatically when present.
 Organization scans accept `--repository <glob...>`, `--visibility`,
 `--include-archived`, `--include-disabled`, `--include-forks`, `--max-repos`,
-`--concurrency`, `--checkpoint` or `--resume`, and
-`--progress=auto|always|never`. Progress is stderr-only and never part of the
-selected report format. For an agent-initiated organization scan, pass
-`--agent-mode`; `ACTIONS_WARDEN_MODE=agent` is the integration-wide equivalent.
-The mode writes a scope-keyed report and checkpoint and emits a bounded JSON
-receipt. Explicit output, format, progress, and checkpoint options take
+`--concurrency`, `--checkpoint` or `--resume`, `--fresh`,
+`--no-auto-checkpoint`, `--previous-report <json-path>`, and
+`--report-dir <dedicated-directory>`, plus
+`--progress=auto|plain|json|none` (`always` and `never` remain aliases).
+Organization scans default to a scope-keyed JSON
+report, bounded receipt, and compatible automatic checkpoint/resume. Progress
+is stderr-only and never part of the selected report format. For an
+agent-initiated organization scan, pass
+`--agent-mode`; `ACTIONS_WARDEN_CONTEXT=agent` is the preferred
+integration-wide equivalent, while `ACTIONS_WARDEN_MODE=agent` is a legacy
+alias. The mode disables implicit progress and uses the agent receipt kind, but
+shares normal `.actions-warden-org-scan.*` artifacts so resume survives context
+switches. Explicit output, format, progress, and checkpoint options take
 precedence.
+
+CSV is a flat artifact format, not the lossless report schema. In the GitHub
+Action it requires `output-path` for non-organization commands and is not
+copied into step logs. Use JSON for
+programmatic parsing and future organization comparison inputs.
+
+For webhooks or ProjectDiscovery Notify, keep delivery in a separate CI step.
+Send bounded Action outputs and a workflow-run link, retain the complete report
+as a protected artifact, and source provider credentials only from masked
+secrets. Use `examples/notifications/README.md` as the reviewed pattern.
 
 Exit codes: `0` for a normal `OK` result, `1` for a normal structured `FAIL`
 result (findings or operational errors), and `2` for an invocation-level error.
@@ -124,27 +145,30 @@ authorized workflow mutation whenever the needed path information is known.
 
 7. **Report organization coverage before risk.** For `org-scan`, state the
    discovered, eligible, selected, scanned, and failed repository counts before
-   summarizing findings. Any repository error means coverage is incomplete;
-   never describe that result as a clean organization scan.
+   summarizing findings. Inspect `coverage.complete`: any repository error or
+   repository cap means eligible coverage is incomplete, even when a capped
+   selected scan otherwise returns `OK`.
 
 8. **Keep organization reports out of model context by default.** An
    agent-initiated broad scan must use the explicit agent mode:
 
    ```sh
-   npx --yes actions-warden@0.4.0 org-scan my-org \
+   npx --yes actions-warden@0.5.0 org-scan my-org \
      --agent-mode
    ```
 
-   Agent mode writes the complete report to a scope-keyed file, disables
-   progress, creates or resumes a compatible scope-keyed checkpoint, and emits
-   only a bounded JSON receipt. Read the report path from that receipt. First
+   Organization scans already write the complete report to a scope-keyed file,
+   create or resume a compatible checkpoint, and emit only a bounded JSON
+   receipt. Agent mode additionally disables implicit progress and selects the
+   agent receipt kind without changing artifact identity. Read the report path from that receipt. First
    inspect only status, scope, summary, error counts, and severity/rule
    aggregates from the saved report. Read error details and findings afterward
    in bounded, task-relevant batches. Do not emit or ingest the whole report
    merely to summarize it. Do not narrow the user's requested repositories,
    severities, policy, or baseline to reduce context. Omit `--explain` on a
-   broad first pass unless remediation was requested. Add `--progress=always`
-   only when the user requests live progress. Explicit CLI options override
+   broad first pass unless remediation was requested. Add `--progress=plain`
+   only when the user requests human-readable live progress, or
+   `--progress=json` for a JSON Lines integration. Explicit CLI options override
    agent defaults.
 
    The scanner does not call a language model, but the surrounding agent uses
@@ -154,6 +178,19 @@ authorized workflow mutation whenever the needed path information is known.
    artifact key rather than overwriting an incompatible checkpoint. Compatible
    package upgrades retain the same key and resume state; an analysis-behavior
    change receives a new key.
+
+   For a broad report that will be inspected per repository, use
+   `--report-dir=reports/actions-warden-org`, inspect its compact aggregate and
+   manifest first, and read only relevant repository artifacts. The directory
+   layout does not reduce scanner memory and is not a future
+   `--previous-report` input.
+
+9. **Use CSV/HTML as artifacts, not model context.** CSV is useful for flat
+   spreadsheet or warehouse export, and self-contained HTML is useful for
+   human review. Do not read either complete artifact into the conversation.
+   For change reporting, retain JSON and pass it with `--previous-report`.
+   Report new, resolved, unchanged, and unknown counts; unmatched prior
+   findings are unknown when current repository coverage failed or disappeared.
 
 ## Audit rules
 
@@ -216,7 +253,8 @@ const orgResult = await scanOrganization({
 Other exports include `listRules`, `discoverWorkflows`, `parseWorkflowFile`,
 `parseWorkflowSource`, `collectUses`, `collectImages`, `parseActionRef`,
 `renderAudit`, `renderPin`, `renderUpgrade`, `renderVerify`, `renderReport`,
-`renderOrganizationScan`, `renderSarif`, `format`, `redact`, and
+`renderOrganizationScan`, `renderSarif`, `renderHtml`, `format`, `redact`,
+`compareOrganizationReports`, `loadOrganizationReport`, and
 `parseIgnoreDirectives`.
 
 ## Notes
@@ -233,8 +271,10 @@ Other exports include `listRules`, `discoverWorkflows`, `parseWorkflowFile`,
 - Organization checkpoints are atomic and contain redacted report data plus
   tree revisions, not tokens or raw YAML. Resume requires matching scan/policy
   identity, rechecks fresh tree SHAs, reuses only unchanged error-free results,
-  and retries changed or failed repositories. Treat the checkpoint as a
-  sensitive report artifact.
+  and retries changed or failed repositories. Repeating the same command or
+  explicit `--checkpoint` path resumes automatically; use `--fresh` to replace
+  it or strict `--resume` when restored state must exist. Treat the checkpoint
+  as a sensitive report artifact.
 - Treat `.actions-warden.yml`, baselines, ignore directives, and
   `fail-on-findings` as security controls. Do not weaken them merely to make a
   scan pass.

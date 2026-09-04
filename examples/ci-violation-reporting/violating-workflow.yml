@@ -1,0 +1,17 @@
+# INTENTIONALLY UNSAFE: use only as scanner input in a test or throwaway branch.
+name: intentionally unsafe workflow
+
+on:
+  pull_request:
+
+permissions: write-all
+
+jobs:
+  demonstrate-findings:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mutable third-party Action reference
+        uses: actions/checkout@v5
+
+      - name: Unsafe pull-request data interpolation
+        run: echo "PR title is ${{ github.event.pull_request.title }}"

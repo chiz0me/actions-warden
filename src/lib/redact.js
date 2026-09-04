@@ -5,6 +5,8 @@
  * with `<redacted>`. Conservative by design: prefers false positives over leaks.
  */
 
+import { RULES } from '../rules/index.js';
+
 const TOKEN_PATTERNS = [
   /ghp_[A-Za-z0-9]{30,}/g,
   /ghs_[A-Za-z0-9]{30,}/g,
@@ -25,11 +27,17 @@ const TOKEN_PATTERNS = [
 const SENSITIVE_KEY = /(?:token|secret|password|api[_-]?key|auth[_-]?token|access[_-]?key|private[_-]?key)$/i;
 const KV_TOKEN_KEYS = /([\w-]*(?:token|secret|password|api[_-]?key|auth[_-]?token|access[_-]?key|private[_-]?key))(\s*[:=]\s*)["']?([^"'\s,]+)/gi;
 const HIGH_ENTROPY = /[A-Za-z0-9_+/-]{32,}={0,2}/g;
-// This public rule ID is long enough to trip the generic entropy heuristic.
-// Keep the exception exact instead of weakening detection for arbitrary
-// kebab-case values, which may still be credentials or passphrases.
+// Public rule IDs and artifact kinds long enough to trip the generic entropy
+// heuristic. Keep the exceptions exact instead of weakening detection for
+// arbitrary kebab-case values, which may still be credentials or passphrases.
 const SAFE_PUBLIC_VALUES = new Set([
-  'reusable-workflow-secrets-inherit',
+  ...RULES.map(rule => rule.id),
+  'actions-warden-agent-receipt',
+  'actions-warden-org-scan-receipt',
+  'actions-warden-org-scan-directory',
+  'actions-warden-org-scan-manifest',
+  'actions-warden-org-scan-progress',
+  'actions-warden-org-scan-repository',
 ]);
 
 /**
@@ -62,7 +70,26 @@ export function redactDeep(input, seen = new WeakSet()) {
   if (seen.has(input)) return '<circular>';
   seen.add(input);
   let output;
-  if (Array.isArray(input)) {
+  if (input instanceof Date) {
+    output = input.toISOString();
+  } else if (input instanceof Error) {
+    output = {
+      name: redact(input.name),
+      message: redact(input.message),
+    };
+    for (const [key, value] of Object.entries(input)) {
+      output[key] = SENSITIVE_KEY.test(key) ? '<redacted>' : redactDeep(value, seen);
+    }
+  } else if (input instanceof Set) {
+    output = [...input].map(item => redactDeep(item, seen));
+  } else if (input instanceof Map) {
+    output = Object.fromEntries(
+      [...input.entries()].map(([k, v]) => [
+        redact(String(k)),
+        SENSITIVE_KEY.test(String(k)) ? '<redacted>' : redactDeep(v, seen),
+      ]),
+    );
+  } else if (Array.isArray(input)) {
     output = input.map(item => redactDeep(item, seen));
   } else {
     output = {};

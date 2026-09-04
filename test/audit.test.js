@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { audit, renderAudit } from '../src/commands/audit.js';
+import { audit, auditSources, renderAudit } from '../src/commands/audit.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -49,6 +49,24 @@ describe('audit', () => {
   it('rejects an explicit target that does not match anything', async () => {
     await expect(audit({ cwd, workflows: ['does-not-exist.yml'] }))
       .rejects.toThrow(/no workflows matched/);
+  });
+
+  it('audits caller-supplied workflow evidence without reading it from disk', async () => {
+    const file = resolve(cwd, 'virtual/acme/service/.github/workflows/ci.yml');
+    const result = await auditSources({
+      cwd,
+      sources: [{
+        file,
+        source: 'name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n',
+      }],
+      severity: 'low',
+      explain: true,
+    });
+
+    expect(result.files).toEqual([file]);
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ ruleId: 'unpinned-action', file }),
+    ]));
   });
 });
 

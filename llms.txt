@@ -6,11 +6,17 @@
 Requires Node.js 20+. The CLI is non-interactive. `pin` and `upgrade` are
 dry-run by default. Normal JSON payloads use `schemaVersion: "1.0"`. Exit code
 1 is a completed `FAIL` result to inspect; exit code 2 is an invocation error.
-Organization scans support guarded `--checkpoint` / `--resume` state and
-stderr-only live progress while retaining fresh repository tree validation.
+Organization scans default to a guarded scope-keyed JSON report, bounded stdout
+receipt, compatible automatic checkpoint/resume state, and stderr-only live
+progress while retaining fresh repository tree validation.
+They can emit spreadsheet-safe CSV or self-contained HTML reports, split broad
+JSON evidence into a compact aggregate plus integrity-manifested repository
+artifacts, and compare a compatible prior JSON report without calling missing
+or failed repository findings resolved.
 For agent-initiated organization scans, pass `--agent-mode` or set
-`ACTIONS_WARDEN_MODE=agent`. It defaults to scope-keyed JSON report and
-checkpoint files, compatible resume, no progress, and a bounded stdout receipt.
+`ACTIONS_WARDEN_CONTEXT=agent` (`ACTIONS_WARDEN_MODE=agent` is a legacy alias).
+It disables implicit progress and uses the agent receipt kind while sharing the
+normal artifact identity so compatible resume state survives context switches.
 Preserve requested scope; do not load the complete report into model context.
 
 ## Start
@@ -18,7 +24,7 @@ Preserve requested scope; do not load the complete report into model context.
 - [README](./README.md): product overview and quick start
 - [CLI reference](./docs/CLI.md): commands, options, organization scans, cache
 - [Configuration](./docs/CONFIGURATION.md): policy, rule IDs, ignores, baselines
-- [Output contracts](./docs/OUTPUTS.md): JSON shapes, TOON, SARIF, status, exits
+- [Output contracts](./docs/OUTPUTS.md): JSON shapes, TOON, CSV, HTML, comparison, SARIF, status, exits
 - [GitHub Action](./docs/GITHUB-ACTION.md): workflow setup, inputs, outputs
 - [JavaScript API](./docs/JAVASCRIPT-API.md): public functions and renderers
 
@@ -34,5 +40,8 @@ Preserve requested scope; do not load the complete report into model context.
 ## Copyable examples
 
 - [Organization report workflow](./examples/org-scan.yml)
+- [HTML organization report](./examples/html-organization-report/README.md)
+- [CSV reporting](./examples/csv-reporting/README.md)
+- [Webhook and ProjectDiscovery Notify](./examples/notifications/README.md)
 - [Upgrade pull request workflow](./examples/upgrade-pr.yml)
 - [Claude Code skill](./skills/actions-warden/SKILL.md)

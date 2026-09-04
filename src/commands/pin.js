@@ -155,7 +155,8 @@ export function rewriteUses(source, ref, sha) {
 
 /**
  * @param {Awaited<ReturnType<typeof pin>>} result
- * @param {{format: 'toon'|'json'|'text', dryRun: boolean, cwd?: string}} opts
+ * @param {{format: 'toon'|'json'|'text'|'csv'|'sarif'|'html', dryRun: boolean,
+ *   cwd?: string}} opts
  */
 export function renderPin(result, opts) {
   const cwd = opts.cwd ?? process.cwd();
@@ -194,7 +195,11 @@ export function renderPin(result, opts) {
     records.push({ label: 'ERROR', fields: { file: rel(e.file ?? '', cwd), action: e.action ?? '', msg: e.error } });
   }
   records.push({ label: 'SUMMARY', fields: { changes: result.changes.length, errors: result.errors.length, dry_run: opts.dryRun } });
-  return format(opts.format, records, { status: result.status });
+  return format(opts.format, records, {
+    status: result.status,
+    title: opts.dryRun ? 'Action pin plan' : 'Applied action pins',
+    metadata: { mode: opts.dryRun ? 'dry run' : 'write' },
+  });
 }
 
 function rel(p, cwd) {

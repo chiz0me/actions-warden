@@ -9,7 +9,7 @@ documentation.
 |---|---|
 | [CLI reference](./CLI.md) | Running audits, pinning, upgrades, verification, reports, or organization scans |
 | [Configuration](./CONFIGURATION.md) | Defining policy, baselines, path exclusions, inline ignores, or runner trust |
-| [Output contracts](./OUTPUTS.md) | Parsing JSON or TOON, uploading SARIF, or handling status and exit codes |
+| [Output contracts](./OUTPUTS.md) | Parsing JSON/TOON/CSV/JSONL, reviewing HTML or directory manifests, comparing scans, uploading SARIF, or handling status and exits |
 | [GitHub Action](./GITHUB-ACTION.md) | Adding repository or organization scanning to a workflow |
 | [JavaScript API](./JAVASCRIPT-API.md) | Calling commands or parser utilities from Node.js |
 

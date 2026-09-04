@@ -1,0 +1,56 @@
+name: enforce new GitHub Actions violations
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actions-warden:
+    name: Report new Actions violations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Audit against reviewed baseline
+        id: warden
+        uses: chiz0me/actions-warden@<FULL_COMMIT_SHA>
+        with:
+          command: audit
+          config: .actions-warden.yml
+          severity: high
+          explain: 'true'
+          format: json
+          output-path: actions-warden-new-violations.json
+          annotations: 'true'
+          # The required policy loads .actions-warden-baseline.json.
+          # Defer finding failure so the evidence artifact is always attempted.
+          fail-on-findings: 'false'
+
+      - name: Upload new-violation report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: actions-warden-new-violations-${{ github.run_id }}
+          path: actions-warden-new-violations.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Enforce Actions Warden result
+        if: always() && steps.warden.outputs.status == 'FAIL'
+        shell: bash
+        env:
+          ACTIONS_WARDEN_FINDINGS: ${{ steps.warden.outputs.findings }}
+        run: |
+          printf 'actions-warden reported %s new blocking finding(s).\n' \
+            "${ACTIONS_WARDEN_FINDINGS:-unknown}" >&2
+          printf 'Review the annotations and downloaded JSON report.\n' >&2
+          exit 1

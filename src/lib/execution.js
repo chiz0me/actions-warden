@@ -4,7 +4,7 @@
  * code execution while covering common build/test/package entry points.
  */
 
-const WORKSPACE_COMMAND = /(?:^|[;&|])\s*(?:sudo\s+)?(?:(?:\.{0,2}[\\/]|[A-Za-z]:[\\/]|[A-Za-z0-9_.-]+[\\/])[^\s;&|]+|source\s+[^\s;&|]+|make(?:\s|$)|npm\s+(?:ci|install|test|run|exec)\b|npx\b|pnpm\s+(?:install|test|run|exec)\b|yarn\s+(?:install|test|run|exec)\b|bun\s+(?:install|test|run|x)\b|(?:bash|sh|zsh|python3?|ruby|node|perl|php)\s+[^\s;&|]+|(?:pwsh|powershell)(?:\.exe)?\s+(?:-File\s+)?[^\s;&|]+|cmd(?:\.exe)?\s+\/c\s+[^\s;&|]+|java\s+-jar\s+[^\s;&|]+|cargo\s+(?:build|test|run)\b|go\s+(?:build|test|run)\b|mvn\b|gradle\b|\.\/gradlew\b|dotnet\s+(?:build|test|run|publish)\b|bundle\s+exec\b|rake\b|pytest\b)/im;
+const WORKSPACE_COMMAND = /(?:^|[;&|])\s*(?:sudo\s+)?(?:(?:\.{0,2}[\\/]|[A-Za-z]:[\\/]|[A-Za-z0-9_.-]+[\\/])[^\s;&|]+|source\s+[^\s;&|]+|make(?:\s|$)|npm\s+(?:ci|install|test|run|exec)\b|npx\b|pnpm\s+(?:install|test|run|exec)\b|yarn\s+(?:install|test|run|exec)\b|bun\s+(?:install|test|run|x)\b|deno\s+(?:run|test|task)\b|(?:pip3?|uv\s+pip|poetry)\s+(?:install|run)\b|uv\s+run\b|tox\b|nox\b|composer\s+(?:install|run|exec)\b|swift\s+(?:build|test)\b|sbt\b|cmake\s+--build\b|(?:bash|sh|zsh|python3?|ruby|node|perl|php)\s+[^\s;&|]+|(?:pwsh|powershell)(?:\.exe)?\s+(?:-File\s+)?[^\s;&|]+|cmd(?:\.exe)?\s+\/c\s+[^\s;&|]+|java\s+-jar\s+[^\s;&|]+|cargo\s+(?:build|test|run|check|clippy)\b|go\s+(?:build|test|run)\b|mvn\b|gradle\b|\.\/gradlew\b|dotnet\s+(?:build|test|run|publish)\b|bundle\s+exec\b|rake\b|pytest\b|docker(?:\s+compose)?\s+(?:build|run)\b)/im;
 const WORKSPACE_ACTION = /(?:^|[-_/])(build|builder|compile|exec|package|publish|runner|test|deploy)(?:[-_/]|$)/i;
 
 /**
@@ -40,6 +40,10 @@ export function executesWorkspace(step, { sourcePaths = ['.'] } = {}) {
   ));
 }
 
+/**
+ * Normalize a configured source path, conservatively treating dynamic
+ * expressions and empty values as the workspace root.
+ */
 export function normalizeSourcePath(value) {
   if (typeof value !== 'string' || !value.trim()) return '.';
   const expanded = normalizeTrustedRoots(value);

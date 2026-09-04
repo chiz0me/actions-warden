@@ -263,7 +263,8 @@ function relPath(p, cwd) {
  * Render an audit result to the chosen format.
  *
  * @param {Awaited<ReturnType<typeof audit>>} result
- * @param {{format: 'toon'|'json'|'text', explain?: boolean, cwd?: string}} opts
+ * @param {{format: 'toon'|'json'|'text'|'csv'|'sarif'|'html', explain?: boolean,
+ *   cwd?: string}} opts
  */
 export function renderAudit(result, opts) {
   const cwd = opts.cwd ?? process.cwd();
@@ -310,5 +311,12 @@ export function renderAudit(result, opts) {
     records.push({ label: 'FINDING', fields });
   }
   records.push({ label: 'SUMMARY', fields: result.summary });
-  return format(opts.format, records, { status: result.status });
+  return format(opts.format, records, {
+    status: result.status,
+    title: 'Workflow security audit',
+    metadata: {
+      config: result.configPath ? relPath(result.configPath, cwd) : 'built-in defaults',
+      baseline: result.baseline.path ? relPath(result.baseline.path, cwd) : 'none',
+    },
+  });
 }

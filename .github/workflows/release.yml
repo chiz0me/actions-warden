@@ -66,7 +66,7 @@ jobs:
       - name: Validate YAML
         run: npm run check:yaml
 
-      - name: Validate documentation links
+      - name: Validate documentation coverage
         run: npm run check:docs
 
       - name: Verify deps pinned

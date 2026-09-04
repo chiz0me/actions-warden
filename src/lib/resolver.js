@@ -37,6 +37,7 @@ export function resolveToken(explicit) {
  * @param {string} [opts.cwd]
  * @param {boolean} [opts.useCache]
  * @param {(event: {attempt: number, maxRetries: number, reason: 'network'|'rate-limit'|'server-error', delayMs: number, status?: number}) => void|Promise<void>} [opts.onRetry]
+ * @param {(event: {status: number, rateLimit: object|null}) => void|Promise<void>} [opts.onResponse]
  * @returns {Promise<{status: number, body: unknown}>}
  */
 export function ghFetch(options) {
@@ -63,9 +64,13 @@ async function ghFetchInternal({
   cwd = process.cwd(),
   useCache = true,
   onRetry,
+  onResponse,
 }) {
   if (onRetry !== undefined && typeof onRetry !== 'function') {
     throw new Error('onRetry must be a function');
+  }
+  if (onResponse !== undefined && typeof onResponse !== 'function') {
+    throw new Error('onResponse must be a function');
   }
   const cacheKey = requestCacheKey(url, token);
   const cached = useCache
@@ -110,11 +115,28 @@ async function ghFetchInternal({
         etag: cached.etag,
         cwd,
       });
+      await notifyResponse(onResponse, response);
       return { status: 200, body: cached.value };
     }
-    if ((response.status === 403 && remaining === '0') || response.status === 429) {
+    const retryAfterHeader = response.headers.get('retry-after');
+    const isRateLimit = (response.status === 403 && (remaining === '0' || retryAfterHeader !== null))
+      || response.status === 429;
+    if (isRateLimit) {
+      let retryAfterMs = 0;
+      if (retryAfterHeader) {
+        if (/^\d+$/.test(retryAfterHeader)) {
+          retryAfterMs = Number(retryAfterHeader) * 1000;
+        } else {
+          const parsedDate = Date.parse(retryAfterHeader);
+          if (Number.isFinite(parsedDate) && parsedDate > Date.now()) {
+            retryAfterMs = parsedDate - Date.now();
+          }
+        }
+      }
       const reset = Number(response.headers.get('x-ratelimit-reset') ?? 0) * 1000;
-      const wait = Math.max(reset - Date.now(), backoff(attempt));
+      const wait = retryAfterMs > 0
+        ? retryAfterMs
+        : Math.max(reset - Date.now(), backoff(attempt));
       if (attempt >= retries) {
         const resetMessage = Number.isFinite(reset) && reset > Date.now()
           ? `; resets at ${new Date(reset).toISOString()}`
@@ -158,6 +180,7 @@ async function ghFetchInternal({
         cwd,
       });
     }
+    await notifyResponse(onResponse, response);
     return { status: response.status, body };
   }
 }
@@ -177,6 +200,40 @@ function sleep(ms) {
 
 async function notifyRetry(onRetry, event) {
   if (onRetry) await onRetry(event);
+}
+
+async function notifyResponse(onResponse, response) {
+  if (!onResponse) return;
+  const integerHeader = name => {
+    const value = response.headers.get(name);
+    if (value === null || !/^\d+$/.test(value)) return undefined;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : undefined;
+  };
+  const limit = integerHeader('x-ratelimit-limit');
+  const remaining = integerHeader('x-ratelimit-remaining');
+  const used = integerHeader('x-ratelimit-used');
+  const reset = integerHeader('x-ratelimit-reset');
+  const rawResource = response.headers.get('x-ratelimit-resource');
+  const resource = rawResource && /^[A-Za-z0-9_.-]{1,64}$/.test(rawResource)
+    ? rawResource
+    : undefined;
+  const resetDate = reset === undefined ? null : new Date(reset * 1000);
+  const resetAt = resetDate && !Number.isNaN(resetDate.getTime())
+    ? resetDate.toISOString()
+    : undefined;
+  const hasRateLimit = [limit, remaining, used, reset, resource]
+    .some(value => value !== undefined);
+  await onResponse({
+    status: response.status,
+    rateLimit: hasRateLimit ? {
+      ...(limit === undefined ? {} : { limit }),
+      ...(remaining === undefined ? {} : { remaining }),
+      ...(used === undefined ? {} : { used }),
+      ...(resetAt === undefined ? {} : { resetAt }),
+      ...(resource === undefined ? {} : { resource }),
+    } : null,
+  });
 }
 
 /**

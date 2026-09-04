@@ -1,0 +1,66 @@
+name: publish Actions Warden SARIF
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '41 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actions-warden:
+    name: Publish Actions Warden findings
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Generate SARIF
+        id: warden
+        uses: chiz0me/actions-warden@<FULL_COMMIT_SHA>
+        with:
+          command: audit
+          severity: high
+          explain: 'true'
+          format: sarif
+          output-path: actions-warden.sarif
+          annotations: 'true'
+          # Defer finding failure until the SARIF evidence has been published.
+          fail-on-findings: 'false'
+
+      - name: Retain SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: actions-warden-sarif-${{ github.run_id }}
+          path: actions-warden.sarif
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload SARIF to Code Scanning
+        if: always() && hashFiles('actions-warden.sarif') != ''
+        uses: github/codeql-action/upload-sarif@4e94bd11f71e507f7f87df81788dff88d1dacbfb # v4.31.4
+        with:
+          sarif_file: actions-warden.sarif
+          category: actions-warden
+
+      - name: Enforce Actions Warden result
+        if: always() && steps.warden.outputs.status == 'FAIL'
+        shell: bash
+        env:
+          ACTIONS_WARDEN_FINDINGS: ${{ steps.warden.outputs.findings }}
+        run: |
+          printf 'actions-warden published %s blocking finding(s).\n' \
+            "${ACTIONS_WARDEN_FINDINGS:-unknown}" >&2
+          printf 'Review Code Scanning, annotations, and the SARIF artifact.\n' >&2
+          exit 1

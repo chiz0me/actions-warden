@@ -6,7 +6,11 @@ import {
   renderOrganizationScan,
   scanOrganization,
 } from '../src/commands/org-scan.js';
-import { ORGANIZATION_ANALYSIS_GENERATION } from '../src/lib/org-checkpoint.js';
+import {
+  ORGANIZATION_ANALYSIS_GENERATION,
+  createOrganizationCheckpointArtifactKey,
+} from '../src/lib/org-checkpoint.js';
+import { compareOrganizationReports } from '../src/lib/org-report-comparison.js';
 import { VERSION } from '../src/version.js';
 
 describe('organization scan command', () => {
@@ -101,6 +105,15 @@ describe('organization scan command', () => {
       high: 1,
       errors: 0,
     });
+    expect(result.coverage).toEqual({
+      complete: true,
+      enumerationComplete: true,
+      selectedRepositoriesComplete: true,
+      eligibleRepositoriesComplete: true,
+      limitedByMaxRepositories: false,
+      repositoriesOmittedByLimit: 0,
+      incompleteRepositories: [],
+    });
     expect(result.findings[0]).toMatchObject({
       repository: 'octo-org/app',
       ruleId: 'unpinned-action',
@@ -111,12 +124,96 @@ describe('organization scan command', () => {
     );
 
     const json = JSON.parse(renderOrganizationScan(result, { format: 'json', cwd }));
+    expect(json.analysis).toEqual({
+      generation: ORGANIZATION_ANALYSIS_GENERATION,
+      identity: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
     expect(json.findings[0].file).toBe('octo-org/app/.github/workflows/ci.yml');
     expect(json.findings[0].fields.action).toBe('actions/checkout@v5');
     expect(json.repositories[0].files).toEqual(['.github/workflows/ci.yml']);
+    expect(json.coverage).toEqual(result.coverage);
+    expect(compareOrganizationReports({ previous: json, current: json }).summary)
+      .toMatchObject({ unchangedFindings: 1, complete: true });
     const sarif = JSON.parse(renderOrganizationScan(result, { format: 'sarif', cwd }));
     expect(sarif.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri)
       .toBe('octo-org/app/.github/workflows/ci.yml');
+
+    const html = renderOrganizationScan(result, { format: 'html', cwd });
+    expect(html).toMatch(/^<!doctype html>/);
+    expect(html).toContain('Organization scan: octo-org');
+    expect(html).toContain('Repository breakdown');
+    expect(html).toContain('octo-org/app');
+    expect(html).toContain('https://github.com/octo-org/app/blob/main/');
+
+    const csv = renderOrganizationScan(result, { format: 'csv', cwd });
+    expect(csv).toMatch(/^record_type,status,organization,repo,/);
+    expect(csv).toContain('\r\nREPOSITORY,');
+    expect(csv).toContain('\r\nFINDING,');
+    expect(csv).toContain('\r\nCOVERAGE,');
+    expect(csv).toMatch(/\r\nSTATUS,FAIL(?:,)*\r\n$/);
+
+    result.comparison = {
+      summary: {
+        newFindings: 1,
+        resolvedFindings: 0,
+        unchangedFindings: 0,
+        unknownFindings: 0,
+        complete: true,
+      },
+      findings: {
+        new: json.findings,
+        resolved: [],
+        unchanged: [],
+        unknown: [],
+      },
+    };
+    const compared = JSON.parse(renderOrganizationScan(result, { format: 'json', cwd }));
+    expect(compared.comparison.summary.newFindings).toBe(1);
+    expect(renderOrganizationScan(result, { format: 'toon', cwd }))
+      .toContain('NEW_FINDING:');
+    expect(renderOrganizationScan(result, { format: 'csv', cwd }))
+      .toContain('\r\nNEW_FINDING,');
+  });
+
+  it('reports a repository limit as explicit incomplete eligible coverage', async () => {
+    vi.stubGlobal('fetch', vi.fn(async url => {
+      const value = String(url);
+      if (value.includes('/orgs/octo-org/repos?')) {
+        return response([repository('app'), repository('worker')]);
+      }
+      if (value.includes('/git/trees/')) {
+        return response({ sha: treeSha, truncated: false, tree: [] });
+      }
+      return response({}, 404);
+    }));
+
+    const result = await scanOrganization({
+      organization: 'octo-org',
+      cwd,
+      maxRepositories: 1,
+    });
+
+    expect(result.status).toBe('OK');
+    expect(result.coverage).toMatchObject({
+      complete: false,
+      selectedRepositoriesComplete: true,
+      eligibleRepositoriesComplete: false,
+      limitedByMaxRepositories: true,
+      repositoriesOmittedByLimit: 1,
+      incompleteRepositories: [],
+    });
+    const cappedReport = JSON.parse(renderOrganizationScan(result, { format: 'json', cwd }));
+    const comparison = compareOrganizationReports({
+      previous: cappedReport,
+      current: cappedReport,
+    });
+    expect(comparison.summary).toMatchObject({
+      complete: false,
+      resolvedFindings: 0,
+      unknownFindings: 0,
+    });
+    expect(renderOrganizationScan(result, { format: 'html', cwd }))
+      .toContain('Coverage is incomplete');
   });
 
   it('forwards one resolved token through organization, tree, and blob requests', async () => {
@@ -154,6 +251,12 @@ describe('organization scan command', () => {
     expect(result.summary.repositoriesFailed).toBe(1);
     expect(result.summary.errors).toBe(1);
     expect(result.errors[0]).toMatchObject({ repository: 'octo-org/denied' });
+    expect(result.coverage).toMatchObject({
+      complete: false,
+      selectedRepositoriesComplete: false,
+      eligibleRepositoriesComplete: false,
+      incompleteRepositories: ['octo-org/denied'],
+    });
     expect(result.status).toBe('FAIL');
   });
 
@@ -300,7 +403,56 @@ describe('organization scan command', () => {
     });
   });
 
-  it('atomically migrates a compatible v0.3.0 checkpoint before reusing it', async () => {
+  it('rejects generation-1 checkpoints due to analysis-generation mismatch', async () => {
+    const checkpointPath = 'scan-checkpoint.json';
+    vi.stubGlobal('fetch', organizationFetch({ treeSha, workflowSha, workflow }));
+    await scanOrganization({ organization: 'octo-org', cwd, checkpointPath });
+
+    const current = JSON.parse(await readFile(join(cwd, checkpointPath), 'utf8'));
+    current.identity.analysisGeneration = 1;
+    await writeFile(join(cwd, checkpointPath), `${JSON.stringify(current)}\n`);
+    vi.stubGlobal('fetch', vi.fn());
+
+    await expect(scanOrganization({
+      organization: 'octo-org',
+      cwd,
+      checkpointPath,
+      resume: true,
+    })).rejects.toThrow(/does not match current analysisGeneration/);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('produces different automatic artifact keys for generation 1 and generation 2', () => {
+    const baseIdentity = {
+      rulesHash: 'a'.repeat(64),
+      organization: 'octo-org',
+      scope: {
+        repositories: [],
+        visibility: 'all',
+        includeArchived: false,
+        includeDisabled: false,
+        includeForks: false,
+        maxRepositories: null,
+        severity: null,
+        explain: false,
+      },
+      configHash: null,
+      baselineHash: null,
+    };
+    const keyGen1 = createOrganizationCheckpointArtifactKey({
+      ...baseIdentity,
+      analysisGeneration: 1,
+    });
+    const keyGen2 = createOrganizationCheckpointArtifactKey({
+      ...baseIdentity,
+      analysisGeneration: 2,
+    });
+    expect(keyGen1).not.toBe(keyGen2);
+    expect(keyGen1).toMatch(/^[0-9a-f]{32}$/);
+    expect(keyGen2).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('rejects a legacy v0.3.0 checkpoint due to analysis-generation mismatch', async () => {
     const checkpointPath = 'scan-checkpoint.json';
     vi.stubGlobal('fetch', organizationFetch({ treeSha, workflowSha, workflow }));
     await scanOrganization({ organization: 'octo-org', cwd, checkpointPath });
@@ -310,29 +462,15 @@ describe('organization scan command', () => {
       join(cwd, checkpointPath),
       `${JSON.stringify(asLegacyCheckpoint(current))}\n`,
     );
-    vi.stubGlobal('fetch', vi.fn(async url => {
-      const value = String(url);
-      if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
-      if (value.includes('/git/trees/')) return treeResponse(treeSha, workflowSha, workflow);
-      return response({}, 500);
-    }));
+    vi.stubGlobal('fetch', vi.fn());
 
-    const result = await scanOrganization({
+    await expect(scanOrganization({
       organization: 'octo-org',
       cwd,
       checkpointPath,
       resume: true,
-    });
-
-    expect(result.findings).toHaveLength(1);
-    expect(fetch).toHaveBeenCalledTimes(2);
-    const migrated = JSON.parse(await readFile(join(cwd, checkpointPath), 'utf8'));
-    expect(migrated).toMatchObject({
-      schemaVersion: '1.1',
-      toolVersion: VERSION,
-      identity: { analysisGeneration: ORGANIZATION_ANALYSIS_GENERATION },
-    });
-    expect(migrated.identity).not.toHaveProperty('toolVersion');
+    })).rejects.toThrow(/does not match current analysisGeneration/);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it('rejects a legacy checkpoint without a known analysis-generation mapping', async () => {
@@ -462,6 +600,21 @@ describe('organization scan command', () => {
         expect.objectContaining({ repository: 'octo-org/app', reused: true }),
         expect.objectContaining({ repository: 'octo-org/worker', reused: false }),
       ]);
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: 'discovery-page',
+      page: 1,
+      repositoriesDiscovered: 2,
+    }));
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: 'repository-phase',
+      repository: 'octo-org/worker',
+      phase: 'auditing workflows',
+    }));
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: 'checkpoint-written',
+      repository: 'octo-org/worker',
+      repositories: 2,
+    }));
   });
 
   it('retries checkpointed repository failures instead of reusing them', async () => {
@@ -492,6 +645,50 @@ describe('organization scan command', () => {
       onProgress: event => progress.push(event),
     });
     expect(resumed.status).toBe('OK');
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: 'repository-completed',
+      reused: false,
+    }));
+  });
+
+  it('retries checkpointed repositories containing parse-error findings instead of reusing them', async () => {
+    const checkpointPath = 'scan-checkpoint.json';
+    const brokenWorkflow = 'name: [invalid yaml\n';
+    const brokenWorkflowSha = 'e'.repeat(40);
+    vi.stubGlobal('fetch', vi.fn(async url => {
+      const value = String(url);
+      if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
+      if (value.includes('/repos/octo-org/app/git/trees/')) {
+        return treeResponse(treeSha, brokenWorkflowSha, brokenWorkflow);
+      }
+      if (value.endsWith(`/git/blobs/${brokenWorkflowSha}`)) {
+        return blobResponse(brokenWorkflowSha, brokenWorkflow);
+      }
+      return response({}, 404);
+    }));
+    const initial = await scanOrganization({ organization: 'octo-org', cwd, checkpointPath });
+    expect(initial.findings.some(f => f.ruleId === 'parse-error')).toBe(true);
+
+    const progress = [];
+    vi.stubGlobal('fetch', vi.fn(async url => {
+      const value = String(url);
+      if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
+      if (value.includes('/repos/octo-org/app/git/trees/')) {
+        return treeResponse(treeSha, workflowSha, workflow);
+      }
+      if (value.endsWith(`/git/blobs/${workflowSha}`)) {
+        return blobResponse(workflowSha, workflow);
+      }
+      return response({}, 404);
+    }));
+    const resumed = await scanOrganization({
+      organization: 'octo-org',
+      cwd,
+      checkpointPath,
+      resume: true,
+      onProgress: event => progress.push(event),
+    });
+    expect(resumed.findings.some(f => f.ruleId === 'parse-error')).toBe(false);
     expect(progress).toContainEqual(expect.objectContaining({
       type: 'repository-completed',
       reused: false,

@@ -13,6 +13,17 @@ import { mapLimit } from '../lib/concurrency.js';
 
 const SHA_RE = /^[0-9a-f]{40}$/i;
 
+/**
+ * Verify that external action references are full repository-owned commit
+ * SHAs and that optional actions-warden version metadata resolves to the same
+ * commit.
+ *
+ * @param {object} [options]
+ * @param {string} [options.cwd]
+ * @param {string[]} [options.workflows]
+ * @param {string} [options.token]
+ * @returns {Promise<{files: string[], checks: object[], warnings: object[], errors: object[], status: 'OK'|'FAIL'}>}
+ */
 export async function verify({ cwd = process.cwd(), workflows, token } = {}) {
   const files = await resolveTargets({ workflows, cwd });
   const resolvedToken = resolveToken(token);
@@ -123,6 +134,13 @@ export async function verify({ cwd = process.cwd(), workflows, token } = {}) {
   };
 }
 
+/**
+ * Render a verification result in a supported public output format.
+ *
+ * @param {Awaited<ReturnType<typeof verify>>} result
+ * @param {{format: 'toon'|'json'|'text'|'csv'|'sarif'|'html', cwd?: string}} options
+ * @returns {string}
+ */
 export function renderVerify(result, { format: outputFormat, cwd = process.cwd() }) {
   if (outputFormat === 'json') {
     return format('json', [], {
@@ -189,5 +207,8 @@ export function renderVerify(result, { format: outputFormat, cwd = process.cwd()
       errors: result.errors.length,
     },
   });
-  return format(outputFormat, records, { status: result.status });
+  return format(outputFormat, records, {
+    status: result.status,
+    title: 'Pinned action verification',
+  });
 }

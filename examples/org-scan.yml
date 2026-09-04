@@ -19,6 +19,7 @@ jobs:
           persist-credentials: false
 
       - name: Scan organization workflows
+        id: warden
         uses: chiz0me/actions-warden@<FULL_COMMIT_SHA>
         with:
           command: org-scan
@@ -26,10 +27,27 @@ jobs:
           token: ${{ secrets.ACTIONS_WARDEN_ORG_TOKEN }}
           severity: high
           explain: 'true'
-          format: json
-          output-path: actions-warden-org-report.json
-          checkpoint-path: .actions-warden-org-checkpoint.json
           fail-on-findings: 'false'
+
+      - name: Show organization coverage
+        if: always()
+        shell: bash
+        env:
+          WARDEN_STATUS: ${{ steps.warden.outputs.status }}
+          WARDEN_DISCOVERED: ${{ steps.warden.outputs['repositories-discovered'] }}
+          WARDEN_SELECTED: ${{ steps.warden.outputs['repositories-selected'] }}
+          WARDEN_SCANNED: ${{ steps.warden.outputs['repositories-scanned'] }}
+          WARDEN_RESUMED: ${{ steps.warden.outputs['repositories-resumed'] }}
+          WARDEN_FAILED: ${{ steps.warden.outputs['repositories-failed'] }}
+          WARDEN_COVERAGE_COMPLETE: ${{ steps.warden.outputs['coverage-complete'] }}
+          WARDEN_FINDINGS: ${{ steps.warden.outputs.findings }}
+          WARDEN_ERRORS: ${{ steps.warden.outputs.errors }}
+        run: |
+          printf 'status=%s coverage_complete=%s discovered=%s selected=%s scanned=%s resumed=%s failed=%s findings=%s errors=%s\n' \
+            "$WARDEN_STATUS" "$WARDEN_COVERAGE_COMPLETE" \
+            "$WARDEN_DISCOVERED" "$WARDEN_SELECTED" \
+            "$WARDEN_SCANNED" "$WARDEN_RESUMED" "$WARDEN_FAILED" \
+            "$WARDEN_FINDINGS" "$WARDEN_ERRORS"
 
       - name: Upload organization report
         if: always()
@@ -37,6 +55,7 @@ jobs:
         with:
           name: actions-warden-org-report
           path: |
-            actions-warden-org-report.json
-            .actions-warden-org-checkpoint.json
+            ${{ steps.warden.outputs['report-path'] }}
+            ${{ steps.warden.outputs['checkpoint-path'] }}
+          include-hidden-files: true
           if-no-files-found: error

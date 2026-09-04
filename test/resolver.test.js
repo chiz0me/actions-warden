@@ -82,6 +82,31 @@ describe('GitHub tag resolution errors and age evidence', () => {
       .rejects.toThrow(/HTTP 403/);
   });
 
+  it('retries on secondary rate limit with retry-after header', async () => {
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(JSON.stringify({ message: 'You have exceeded a secondary rate limit' }), {
+          status: 403,
+          headers: { 'retry-after': '0', 'x-ratelimit-remaining': '100' },
+        });
+      }
+      return new Response(JSON.stringify([{ name: 'v1.0.0', commit: { sha: 'a'.repeat(40) } }]), {
+        status: 200,
+        headers: { 'x-ratelimit-remaining': '99' },
+      });
+    }));
+
+    const tags = await listTags({
+      owner: 'o',
+      repo: 'r',
+      cwd,
+    });
+    expect(tags).toHaveLength(1);
+    expect(calls).toBe(2);
+  });
+
   it('revalidates expired cached responses with an ETag', async () => {
     const url = 'https://api.github.com/repos/o/r/example';
     const body = { value: 42 };
@@ -130,6 +155,37 @@ describe('GitHub tag resolution errors and age evidence', () => {
       reason: 'server-error',
       delayMs: 1000,
       status: 503,
+    }]);
+  });
+
+  it('reports sanitized response and rate-limit metadata without changing the result', async () => {
+    const responses = [];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', {
+      status: 200,
+      headers: {
+        'x-ratelimit-limit': '5000',
+        'x-ratelimit-remaining': '4999',
+        'x-ratelimit-used': '1',
+        'x-ratelimit-reset': '1788291000',
+        'x-ratelimit-resource': 'core',
+      },
+    })));
+
+    await expect(ghFetch({
+      url: 'https://api.github.com/repos/o/r/response-example',
+      cwd,
+      useCache: false,
+      onResponse: event => responses.push(event),
+    })).resolves.toEqual({ status: 200, body: { ok: true } });
+    expect(responses).toEqual([{
+      status: 200,
+      rateLimit: {
+        limit: 5000,
+        remaining: 4999,
+        used: 1,
+        resetAt: '2026-09-01T19:30:00.000Z',
+        resource: 'core',
+      },
     }]);
   });
 

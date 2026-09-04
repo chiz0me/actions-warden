@@ -13,6 +13,10 @@ const TOP_LEVEL_KEYS = new Set([
   'runner-policy',
 ]);
 
+/**
+ * Normalized built-in policy used when no repository configuration is found.
+ * Callers should treat the nested values as read-only defaults.
+ */
 export const DEFAULT_CONFIG = Object.freeze({
   path: null,
   baseline: null,
@@ -83,6 +87,7 @@ export async function loadConfig({
   };
 }
 
+/** Remove files matched by repository-relative policy ignore globs. */
 export function filterIgnoredPaths(files, config, cwd) {
   if (config.ignorePaths.length === 0) return files;
   const matchers = config.ignorePaths.map(pattern => picomatch(pattern, { dot: true }));
@@ -92,6 +97,10 @@ export function filterIgnoredPaths(files, config, cwd) {
   });
 }
 
+/**
+ * Resolve an existing repository path after rejecting lexical and real-path
+ * escapes, including escapes through symbolic links.
+ */
 export async function resolveRepositoryFile(path, cwd = process.cwd()) {
   const requestedRoot = resolve(cwd);
   const requested = resolve(requestedRoot, path);

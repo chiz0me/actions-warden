@@ -30,10 +30,15 @@ describe('GitHub organization source discovery', () => {
 
   it('paginates and normalizes every visible organization repository', async () => {
     const firstPage = Array.from({ length: 100 }, (_, index) => repository(`repo-${index}`));
+    const pages = [];
     vi.stubGlobal('fetch', vi.fn(async url => {
       const page = new URL(String(url)).searchParams.get('page');
       return new Response(JSON.stringify(page === '1' ? firstPage : [repository('repo-100')]), {
         status: 200,
+        headers: {
+          'x-ratelimit-remaining': page === '1' ? '4999' : '4998',
+          'x-ratelimit-resource': 'core',
+        },
       });
     }));
 
@@ -41,6 +46,7 @@ describe('GitHub organization source discovery', () => {
       organization: 'octo-org',
       token: 'test-token',
       cwd,
+      onPage: event => pages.push(event),
     });
     expect(repositories).toHaveLength(101);
     expect(repositories[0]).toMatchObject({
@@ -51,6 +57,18 @@ describe('GitHub organization source discovery', () => {
     });
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(fetch.mock.calls[0][1].headers.authorization).toBe('Bearer test-token');
+    expect(pages).toEqual([
+      {
+        page: 1,
+        repositoriesDiscovered: 100,
+        rateLimit: { remaining: 4999, resource: 'core' },
+      },
+      {
+        page: 2,
+        repositoriesDiscovered: 101,
+        rateLimit: { remaining: 4998, resource: 'core' },
+      },
+    ]);
   });
 
   it('fetches only workflow and composite-action blobs as validated UTF-8', async () => {

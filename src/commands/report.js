@@ -79,7 +79,8 @@ export async function report({
 
 /**
  * @param {Awaited<ReturnType<typeof report>>} result
- * @param {{format: 'toon'|'json'|'text', mode: string, cwd?: string}} opts
+ * @param {{format: 'toon'|'json'|'text'|'csv'|'sarif'|'html', mode: string,
+ *   cwd?: string}} opts
  */
 export function renderReport(result, opts) {
   const cwd = opts.cwd ?? process.cwd();
@@ -197,7 +198,11 @@ export function renderReport(result, opts) {
       offline: result.offline,
     },
   });
-  return format(opts.format, records, { status: result.status });
+  return format(opts.format, records, {
+    status: result.status,
+    title: 'Security and dependency report',
+    metadata: { upgradeMode: opts.mode, offline: result.offline },
+  });
 }
 
 function rel(p, cwd) {

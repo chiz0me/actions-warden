@@ -1,0 +1,7 @@
+version: 1
+baseline: .actions-warden-baseline.json
+
+# This example promotes broad token permissions into the high-severity gate.
+rules:
+  excessive-permissions:
+    severity: high

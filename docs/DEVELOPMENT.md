@@ -39,7 +39,7 @@ pre-commit install --hook-type pre-push
 | `npm run test:watch` | Run Vitest in watch mode |
 | `npm run lint` | Lint source, scripts, and tests |
 | `npm run check:yaml` | Parse repository YAML files |
-| `npm run check:docs` | Validate local documentation links |
+| `npm run check:docs` | Validate links and require 100% public-surface documentation/JSDoc coverage |
 | `npm run check:package` | Inspect the exact npm tarball manifest, required files, executable mode, and size bounds |
 | `npm run verify-deps` | Require exact runtime and development versions |
 | `npm run verify-version-sync` | Keep package, lockfile, bundled runtime, plugin, and public invocations aligned |
@@ -85,13 +85,16 @@ src/
     config.js, baseline.js  policy and accepted-finding controls
     resolver.js, cache.js   GitHub API, caching, ref and ownership checks
     github-org.js           read-only organization/tree/blob access
-    agent-mode.js           explicit bounded AI-agent CLI defaults
+    agent-mode.js           scope-keyed organization artifacts and receipts
     org-checkpoint.js       validated atomic organization resume state
-    org-progress.js         human rendering of structured scan progress
+    org-report-comparison.js validated fail-closed report change analysis
+    org-report-directory.js guarded compact/per-repository report layout
+    org-progress.js         plain and JSONL structured scan progress
     identity.js             stable IDs and semantic fingerprints
     patcher.js, writer.js   source-range rewrites and guarded atomic writes
-    formatter.js, redact.js structured output and credential redaction
+    formatter.js, redact.js structured/CSV/HTML output and credential redaction
     annotations.js          GitHub workflow annotations
+    action-summary.js       bounded Action metrics and job summaries
     concurrency.js          bounded async work
   rules/                    one module per audit rule
 
@@ -128,11 +131,25 @@ An organization scan follows:
 repository listing → default-branch Git tree → bounded YAML blob reads
                    → in-memory auditSources → repository aggregation
 
-optional checkpoint → identity validation → fresh tree SHA comparison
-                    → reuse unchanged error-free result or rescan
+default/explicit checkpoint → identity validation → fresh tree SHA comparison
+                            → reuse unchanged error-free result or rescan
+
+optional previous JSON report → analysis identity validation
+                              → fingerprint comparison
+                              → new/resolved/unchanged/unknown evidence
+
+optional report directory → compact aggregate + repository evidence
+                          → integrity manifest written last
 ```
 
 Remote repositories are never cloned, checked out, imported, or executed.
+
+Broader scanners that already own a bounded GitHub evidence snapshot integrate
+at `auditSources`; they must not invoke `scanOrganization` over the same scope.
+The caller retains acquisition, snapshot, and aggregate-policy ownership while
+actions-warden retains parser, suppression, identity, and workflow-rule
+ownership. Caller caches must include the exact actions-warden version and live
+rule catalog in their compatibility identity.
 
 ## Safety invariants
 
@@ -151,29 +168,50 @@ Changes must preserve these boundaries:
   network or workflow mutation, cannot replace selected/default-discovery
   workflows or reserved policy paths, and are checked against active controls
   again before output is written.
-- Credentials are redacted in JSON, TOON, text, SARIF, annotations, and
+- Credentials are redacted in JSON, TOON, text, CSV, SARIF, HTML, annotations, and
   top-level errors.
+- HTML contains no externally loaded assets or dynamic report data in
+  executable JavaScript. Values are escaped, links require HTTPS, a restrictive
+  content security policy is emitted, and output is capped at 32 MiB.
+- CSV keeps one physical line per record, escapes control characters, applies
+  spreadsheet-formula protection, uses deterministic columns, and retains an
+  explicit final status row.
 - Finding and change IDs exclude absolute checkout paths.
 - Parser errors remain findings and cannot be baselined away.
-- Organization coverage failures remain visible and make status fail.
+- Organization operational coverage failures remain visible and make status
+  fail; intentional repository caps remain visible through `coverage.complete`.
+- Organization comparison requires a matching scope/policy/rule analysis
+  identity. Unmatched previous findings are resolved only when the current
+  repository result has complete coverage; otherwise they remain unknown.
 - Organization source reads remain count- and size-bounded and bypass disk
   cache.
+- Embedded source audits consume only the caller-supplied file set; they do not
+  perform a second repository discovery pass.
 - Organization resume never trusts a stale result without fresh discovery and
-  a matching repository identity, default branch, and tree SHA. Failed results
-  are never reused.
+  a matching repository identity, default branch, and tree SHA. Results with
+  operational failures or parse-error findings are never reused and are always
+  rescanned.
 - Organization result compatibility is controlled by
   `ORGANIZATION_ANALYSIS_GENERATION`, not by the package version. Producer
   versions remain checkpoint metadata and compatible checkpoints migrate
   through the guarded atomic writer.
 - Checkpoints use guarded atomic writes, remain inside the working directory,
   omit tokens and raw YAML, and cannot replace active policy or baseline files.
+- Report directories remain dedicated and inside the working directory, reject
+  symbolic links and control-file overlap, preserve unrelated regular files,
+  and use a final manifest as the authoritative artifact set.
 - Progress stays outside deterministic report serialization; CLI progress is
-  stderr-only and Action progress cannot form workflow commands.
+  stderr-only, JSONL envelopes cannot be overridden by callback data, and
+  Action progress cannot form workflow commands.
+- Organization CLI and Action adapters default complete reports to guarded,
+  scope-keyed files, emit only bounded log/stdout metadata, and create or
+  resume compatible checkpoints. Fresh and stateless execution remain explicit
+  caller choices.
 - Agent mode is an explicit opt-in, never a TTY, parent-process, CI, or
-  vendor-environment heuristic. Explicit CLI output and progress options win.
-  Its automatic artifact key uses the validated checkpoint compatibility
-  identity, and its stdout receipt never includes findings or repository result
-  arrays.
+  vendor-environment heuristic. It changes progress presentation and receipt
+  kind, not artifact identity; explicit CLI output and progress options win.
+  Automatic artifact keys use the validated checkpoint compatibility identity,
+  and receipts never include findings or repository result arrays.
 - Attacker-controlled values cannot forge TOON lines or GitHub annotations.
 
 Tests should demonstrate the fail-closed behavior for any change touching these
@@ -295,8 +333,8 @@ or other persisted repository-result semantics can change. Keep it unchanged
 for documentation, release metadata, progress rendering, authentication,
 concurrency, or internal refactors that preserve those results. The rule
 catalog hash independently invalidates catalog changes. A generation change
-must add tests proving the old checkpoint fails closed and agent mode selects a
-new artifact key; a compatible format migration must prove the old checkpoint
+must add tests proving the old checkpoint fails closed and automatic scans
+select a new artifact key; a compatible format migration must prove the old checkpoint
 is validated, rewritten atomically, and still subject to fresh tree checks.
 
 ## Output compatibility
@@ -310,7 +348,7 @@ When changing output:
 - retain top-level `status`;
 - treat new fields as additive where possible;
 - update `docs/OUTPUTS.md`;
-- test all four formats;
+- test every supported format;
 - prevent embedded control characters from forging records;
 - ensure error details are visible in every format;
 - verify stable IDs remain stable unless their semantic input changed.
@@ -362,6 +400,24 @@ When CLI, Action, config, output, or API behavior changes:
 
 Keep examples copyable, use exact package versions for `npx`, and use full
 commit placeholders for the Action itself.
+
+`check:docs` calculates coverage from live repository surfaces rather than a
+manually maintained percentage. It requires:
+
+- every exported runtime function or class under `src/` to have directly
+  leading, non-empty JSDoc that states its contract;
+- every package-root JavaScript export to have direct JSDoc and a non-empty
+  entry in the complete API reference;
+- every package subpath, CLI command and option, Action input and output, and
+  audit rule to appear in its owning reference;
+- every focused guide to be linked from the documentation index;
+- every example file to be reachable from the examples index through its
+  local README links.
+
+The check prints the covered and total surface count and fails if the result is
+below 100%, or if an API/table entry is stale. `test/doc-coverage.test.js`
+locks the reviewed category totals so a public-surface change updates both its
+documentation and the expected inventory deliberately.
 
 ## Releases
 

@@ -244,4 +244,17 @@ runs:
     expect(collectImages(doc).map(image => image.raw)).toEqual(['node:20', 'node:20']);
     expect(collectImages(doc)[1].line).toBe(10);
   });
+
+  it('rejects parallel step nesting beyond maximum depth', () => {
+    let yaml = 'name: deep\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n';
+    let indent = '      ';
+    for (let i = 0; i < 12; i += 1) {
+      yaml += `${indent}- parallel:\n`;
+      indent += '    ';
+    }
+    yaml += `${indent}- run: echo deep\n`;
+    expect(() => parseWorkflowSource(yaml, 'deep.yml')).toThrow(
+      /parallel step nesting exceeded maximum depth of 10/,
+    );
+  });
 });
