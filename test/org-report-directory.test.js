@@ -39,8 +39,10 @@ describe('organization report directory', () => {
       expect(await readFile(join(cwd, second.manifestPath), 'utf8')).toBe(firstManifest);
       expect(await readFile(join(cwd, 'reports', 'org', 'keep.txt'), 'utf8'))
         .toBe('caller-owned\n');
-      expect((await stat(join(cwd, 'reports', 'org'))).mode & 0o077).toBe(0);
-      expect((await stat(join(cwd, first.reportPath))).mode & 0o077).toBe(0);
+      if (process.platform !== 'win32') {
+        expect((await stat(join(cwd, 'reports', 'org'))).mode & 0o077).toBe(0);
+        expect((await stat(join(cwd, first.reportPath))).mode & 0o077).toBe(0);
+      }
       const manifest = JSON.parse(firstManifest);
       expect(manifest.repositories).toHaveLength(1);
       expect(manifest.repositories[0]).toMatchObject({

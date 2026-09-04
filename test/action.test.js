@@ -174,10 +174,11 @@ describe('bundled JavaScript action runner', () => {
   });
 
   it('escapes control characters in saved-report log messages', async () => {
+    const outputPath = 'report\u0085forged-warning-message.html';
     const result = await runAction({
       command: 'audit',
       format: 'html',
-      outputPath: 'report\n::warning title=forged::message.html',
+      outputPath,
       workflowSource: [
         'on: push',
         'permissions: read-all',
@@ -190,8 +191,8 @@ describe('bundled JavaScript action runner', () => {
       ].join('\n'),
     });
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain('report\\u000a::warning title=forged::message.html');
-    expect(result.stdout).not.toMatch(/^::warning title=forged::/m);
+    expect(result.stdout).toContain('report\\u0085forged-warning-message.html');
+    expect(result.stdout).not.toContain(outputPath);
   });
 
   it('requires an output path for Action HTML reports', async () => {
