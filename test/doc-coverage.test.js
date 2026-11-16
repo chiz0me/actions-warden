@@ -18,8 +18,8 @@ describe('documentation coverage', () => {
 
     expect(result.errors).toEqual([]);
     expect(result.percentage).toBe(100);
-    expect(result.covered).toBe(362);
-    expect(result.total).toBe(362);
+    expect(result.covered).toBe(364);
+    expect(result.total).toBe(364);
     expect(result.byCategory).toEqual({
       'Action inputs documented': { covered: 33, total: 33 },
       'Action outputs documented': { covered: 23, total: 23 },
@@ -28,7 +28,7 @@ describe('documentation coverage', () => {
       'CLI options documented': { covered: 36, total: 36 },
       'Documentation guides indexed': { covered: 7, total: 7 },
       'Examples indexed': { covered: 18, total: 18 },
-      'Exported runtime functions commented': { covered: 127, total: 127 },
+      'Exported runtime functions commented': { covered: 129, total: 129 },
       'JavaScript exports commented': { covered: 47, total: 47 },
       'JavaScript exports documented': { covered: 47, total: 47 },
       'Package entry points documented': { covered: 6, total: 6 },

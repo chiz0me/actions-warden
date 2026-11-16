@@ -3,7 +3,7 @@
  * Plain-text, one-record-per-line serialization for human-readable logs.
  */
 
-import { redact } from '../redact.js';
+import { redactField } from '../redact.js';
 
 /**
  * Render plain text (human-readable summary).
@@ -16,7 +16,7 @@ export function renderText(records, options = {}) {
   const lines = records.map(r => {
     const kv = Object.entries(r.fields)
       .filter(([, v]) => v !== null && v !== undefined && v !== '')
-      .map(([k, v]) => `${k}=${escapeText(redact(String(v)))}`)
+      .map(([k, v]) => `${k}=${escapeText(redactField(k, String(v)))}`)
       .join(' ');
     return `[${r.label}] ${kv}`;
   });

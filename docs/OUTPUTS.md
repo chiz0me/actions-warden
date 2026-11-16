@@ -29,6 +29,18 @@ credential-shaped key/value pairs, private keys, JWTs, and likely high-entropy
 secrets are replaced with `<redacted>`. Do not use the output as a secret
 transport.
 
+Names are the one narrow exception to the generic high-entropy heuristic. In
+identifier fields (`repository`, `repo`, `fullName`, `incompleteRepositories`,
+`htmlUrl`, `file`, `files`, `path`, `workflow`, `action`, `url`, `permalink`, and
+the SARIF `uri` and `repositoryUri`), a long run stays readable when every `-`,
+`_`, `.`, or `/` separated part is at most 24 alphanumeric characters, changes
+between lowercase, uppercase, and digits at most four times, and is not hex-like.
+`payments-platform-service-gateway-v2` stays readable; hex, base64, UUID-like, and
+mixed-case random tokens are still redacted, as is a single camelCase name longer
+than 24 characters. Token formats and `key=value` secrets are redacted in every
+field, free text such as `explain` and `msg` is never relaxed, and a source link is
+readable only when each segment is a commit SHA or reads like words.
+
 ## Status and exit codes
 
 Every normal command result has semantic status `OK` or `FAIL`. TOON ends with

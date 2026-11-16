@@ -12,7 +12,7 @@ Please include:
 
 - A clear description of the issue.
 - A minimal reproduction (workflow YAML, command line, expected vs. actual).
-- The version of `actions-warden` (`npx --yes actions-warden@0.6.0 --version`).
+- The version of `actions-warden` (`npx --yes actions-warden@0.6.1 --version`).
 - Any disclosure constraints on your side.
 
 We aim to acknowledge within **3 business days** and to ship a fix or a
@@ -66,6 +66,12 @@ Out of scope:
   metadata rather than a compatibility boundary. They still contain redacted
   repository and finding evidence and should be protected like organization
   reports.
+- Redaction treats names, not credentials, as readable. Repository names, file paths,
+  action references, and URLs in fixed identifier fields keep long runs that read like
+  words; token formats, `key=value` secrets, and random-looking runs are still
+  redacted there. This residual risk applies only to a secret written as a readable,
+  separator-joined lowercase or capitalized word sequence inside a name. See
+  [`docs/OUTPUTS.md`](./docs/OUTPUTS.md).
 - Explicit CLI agent mode shares the normal scope-keyed report and checkpoint
   identity, uses the same guarded writer and `0600` creation mode, and changes
   only presentation defaults plus the bounded receipt kind.
