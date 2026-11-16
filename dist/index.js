@@ -14670,6 +14670,22 @@ function normalizePatterns(patterns) {
   return [...new Set(patterns)];
 }
 
+/** Scan outcomes recorded for each workflow file in a repository result. */
+const FILE_STATUSES = new Set(['scanned', 'parse-error', 'unreadable']);
+
+/**
+ * Compare repository paths by UTF-16 code unit so ordering does not depend on
+ * the runtime locale.
+ *
+ * @param {string} left
+ * @param {string} right
+ * @returns {number}
+ */
+function comparePaths(left, right) {
+  if (left < right) return -1;
+  return left > right ? 1 : 0;
+}
+
 ;// CONCATENATED MODULE: ./src/rules/unpinned-action.js
 /**
  * Rule: external action references must be pinned to a 40-character commit SHA.
@@ -16130,6 +16146,17 @@ const TOKEN_PATTERNS = [
 const SENSITIVE_KEY = /(?:token|secret|password|api[_-]?key|auth[_-]?token|access[_-]?key|private[_-]?key)$/i;
 const KV_TOKEN_KEYS = /([\w-]*(?:token|secret|password|api[_-]?key|auth[_-]?token|access[_-]?key|private[_-]?key))(\s*[:=]\s*)["']?([^"'\s,]+)/gi;
 const HIGH_ENTROPY = /[A-Za-z0-9_+/-]{32,}={0,2}/g;
+// Source links the scanner itself builds: https://github.com/<owner>/<repo>/blob/<ref>/<path>
+// with an optional #L<line>. A commit SHA in the ref makes the whole link one long
+// high-entropy run, so these links are exempt from the entropy heuristic only; explicit
+// token patterns above still redact credential-shaped text inside them. The shape is exact
+// (encodeURIComponent characters only) so it cannot shelter arbitrary secret-like text.
+const URL_SEGMENT = "[A-Za-z0-9._~%!'()*-]+";
+const GITHUB_SOURCE_URL = new RegExp(
+  `https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/blob/${URL_SEGMENT}`
+  + `(?:/${URL_SEGMENT})+(?:#L\\d{1,9})?`,
+  'g',
+);
 // Public rule IDs and artifact kinds long enough to trip the generic entropy
 // heuristic. Keep the exceptions exact instead of weakening detection for
 // arbitrary kebab-case values, which may still be credentials or passphrases.
@@ -16154,10 +16181,23 @@ function redact(input) {
   let s = typeof input === 'string' ? input : String(input);
   for (const re of TOKEN_PATTERNS) s = s.replace(re, '<redacted>');
   s = s.replace(KV_TOKEN_KEYS, (_, key, separator) => `${key}${separator}<redacted>`);
-  s = s.replace(HIGH_ENTROPY, value => (
+  return redactHighEntropyOutsideSourceUrls(s);
+}
+
+function redactHighEntropyOutsideSourceUrls(input) {
+  let output = '';
+  let position = 0;
+  for (const match of input.matchAll(GITHUB_SOURCE_URL)) {
+    output += redactHighEntropy(input.slice(position, match.index)) + match[0];
+    position = match.index + match[0].length;
+  }
+  return output + redactHighEntropy(input.slice(position));
+}
+
+function redactHighEntropy(text) {
+  return text.replace(HIGH_ENTROPY, value => (
     shouldRedactHighEntropy(value) ? '<redacted>' : value
   ));
-  return s;
 }
 
 /**
@@ -16256,6 +16296,7 @@ const CSV_PREFERRED_COLUMNS = Object.freeze([
   'repo',
   'repository',
   'file',
+  'path',
   'line',
   'id',
   'type',
@@ -16273,6 +16314,7 @@ const CSV_PREFERRED_COLUMNS = Object.freeze([
   'msg',
   'explain',
   'url',
+  'permalink',
 ]);
 
 /**
@@ -16719,6 +16761,7 @@ function renderHtmlGroup(label, records) {
 function recordGroupTitle(label) {
   const names = new Map([
     ['REPOSITORY', 'Repository breakdown'],
+    ['FILE', 'Scanned files'],
     ['FINDING', 'Findings'],
     ['ERROR', 'Operational errors'],
     ['WARNING', 'Warnings'],
@@ -16734,7 +16777,7 @@ function recordGroupTitle(label) {
 function renderHtmlCell(key, value) {
   if (value === undefined) return '';
   if (['severity', 'sev', 'status', 'change'].includes(key)) return renderBadge(value);
-  if (key === 'url' && safeHttpsUrl(value)) {
+  if ((key === 'url' || key === 'permalink') && safeHttpsUrl(value)) {
     return `<a href="${escapeHtml(value)}" target="_blank" rel="noopener noreferrer">${escapeHtml(value)}</a>`;
   }
   return `<code>${escapeHtml(value)}</code>`;
@@ -16905,7 +16948,9 @@ function sarifLevel(severity) {
 
 function summarizeFields(label, fields) {
   const details = Object.entries(fields)
-    .filter(([key, value]) => !['id', 'file', 'line'].includes(key) && value != null && value !== '')
+    .filter(([key, value]) => (
+      !['id', 'file', 'line', 'path', 'permalink'].includes(key) && value != null && value !== ''
+    ))
     .map(([key, value]) => `${key}=${String(value)}`)
     .join(' ');
   return `${label}: ${details}`;
@@ -19804,6 +19849,9 @@ const external_node_util_namespaceObject = __WEBPACK_EXTERNAL_createRequire(impo
 
 const github_org_API = 'https://api.github.com';
 
+/** HTTP status GitHub returns for Git requests against a repository with no commits. */
+const EMPTY_REPOSITORY_STATUS = 409;
+
 /** Maximum decoded bytes accepted for one remote workflow YAML blob. */
 const MAX_WORKFLOW_BYTES = 2 * 1024 * 1024;
 
@@ -19888,6 +19936,8 @@ async function listOrganizationRepositories({
 
 /**
  * Fetch and validate the workflow-bearing portion of a repository tree.
+ * The default-branch commit is resolved first and the tree is then read by that
+ * commit's tree SHA, so the evidence and its permalinks describe one revision.
  * The returned snapshot can be compared with a checkpoint before any blobs
  * are downloaded.
  */
@@ -19902,65 +19952,39 @@ async function fetchRepositoryWorkflowTree({
   if (includePath !== undefined && typeof includePath !== 'function') {
     throw new Error('includePath must be a function');
   }
-  if (!normalized.defaultBranch) {
-    return workflowTree(normalized, { entries: [], empty: true, treeSha: null });
-  }
-  const treeUrl = `${github_org_API}/repos/${encodeURIComponent(normalized.owner)}`
-    + `/${encodeURIComponent(normalized.name)}/git/trees/`
-    + `${encodeURIComponent(normalized.defaultBranch)}?recursive=1`;
+  const emptyTree = () => workflowTree(normalized, {
+    entries: [],
+    empty: true,
+    treeSha: null,
+    commitSha: null,
+  });
+  if (!normalized.defaultBranch) return emptyTree();
+  const commit = await fetchDefaultBranchCommit({ repository: normalized, token, cwd, onRetry });
+  if (commit === null) return emptyTree();
+
   const treeResponse = await ghFetch({
-    url: treeUrl,
+    url: `${repositoryApiUrl(normalized)}/git/trees/${commit.treeSha}?recursive=1`,
     token,
     cwd,
     useCache: false,
     onRetry,
   });
-  if (treeResponse.status === 409) {
-    return workflowTree(normalized, { entries: [], empty: true, treeSha: null });
-  }
   if (treeResponse.status !== 200) {
-    throw new Error(`could not read ${normalized.fullName}@${normalized.defaultBranch} tree (HTTP ${treeResponse.status})`);
-  }
-  if (!treeResponse.body || typeof treeResponse.body !== 'object' || !Array.isArray(treeResponse.body.tree)) {
-    throw new Error(`invalid tree response for ${normalized.fullName}`);
-  }
-  if (typeof treeResponse.body.truncated !== 'boolean') {
-    throw new Error(`invalid tree truncation state for ${normalized.fullName}`);
-  }
-  if (!GIT_SHA_RE.test(String(treeResponse.body.sha ?? ''))) {
-    throw new Error(`invalid tree SHA for ${normalized.fullName}`);
-  }
-  if (treeResponse.body.truncated === true) {
-    throw new Error(`tree response for ${normalized.fullName} was truncated; refusing an incomplete scan`);
-  }
-
-  const entries = treeResponse.body.tree
-    .filter(entry => (
-      entry?.type === 'blob'
-      && github_org_isWorkflowPath(entry.path)
-      && (includePath === undefined || includePath(entry.path))
-    ))
-    .sort((left, right) => left.path.localeCompare(right.path));
-  if (entries.length > MAX_WORKFLOW_FILES) {
     throw new Error(
-      `${normalized.fullName} has more than ${MAX_WORKFLOW_FILES} workflow files; refusing an unbounded scan`,
+      `could not read ${normalized.fullName}@${normalized.defaultBranch} tree`
+      + ` (HTTP ${treeResponse.status})`,
     );
   }
-  const declaredBytes = entries.reduce(
-    (total, entry) => total + (
-      Number.isSafeInteger(entry.size) && entry.size >= 0 ? entry.size : 0
-    ),
-    0,
-  );
-  if (declaredBytes > MAX_REPOSITORY_WORKFLOW_BYTES) {
-    throw new Error(
-      `${normalized.fullName} workflow sources exceed the ${MAX_REPOSITORY_WORKFLOW_BYTES}-byte repository limit`,
-    );
-  }
+  const entries = selectWorkflowEntries(treeResponse.body, {
+    repository: normalized,
+    expectedTreeSha: commit.treeSha,
+    includePath,
+  });
   return workflowTree(normalized, {
     entries,
     empty: false,
-    treeSha: String(treeResponse.body.sha).toLowerCase(),
+    treeSha: commit.treeSha,
+    commitSha: commit.commitSha,
   });
 }
 
@@ -19987,60 +20011,30 @@ async function fetchRepositoryWorkflows({
     onRetry,
   });
   validateWorkflowTree(tree, normalized);
-  if (tree.empty) {
-    return { sources: [], errors: [], empty: true, treeSha: tree.treeSha };
-  }
-
-  const sources = [];
-  const errors = [];
-  let sourceBytes = 0;
-  for (const entry of tree.entries) {
-    if (!GIT_SHA_RE.test(String(entry.sha ?? ''))) {
-      errors.push({ path: entry.path, error: 'workflow tree entry has an invalid blob SHA' });
-      continue;
-    }
-    if (
-      entry.size !== undefined
-      && (!Number.isSafeInteger(entry.size) || entry.size < 0)
-    ) {
-      errors.push({ path: entry.path, error: 'workflow tree entry has an invalid size' });
-      continue;
-    }
-    if (Number.isFinite(entry.size) && entry.size > MAX_WORKFLOW_BYTES) {
-      errors.push({
-        path: entry.path,
-        error: `workflow exceeds the ${MAX_WORKFLOW_BYTES}-byte scan limit`,
-      });
-      continue;
-    }
-    let source;
-    try {
-      source = await fetchBlobText({
-        owner: normalized.owner,
-        repo: normalized.name,
-        sha: entry.sha,
-        token,
-        cwd,
-        onRetry,
-      });
-    } catch (error) {
-      errors.push({ path: entry.path, error: String(error.message ?? error) });
-      continue;
-    }
-    sourceBytes += Buffer.byteLength(source);
-    if (sourceBytes > MAX_REPOSITORY_WORKFLOW_BYTES) {
-      throw new Error(
-        `${normalized.fullName} workflow sources exceed the ${MAX_REPOSITORY_WORKFLOW_BYTES}-byte repository limit`,
-      );
-    }
-    sources.push({ path: entry.path, source, sha: String(entry.sha).toLowerCase() });
-  }
-  return {
-    sources,
-    errors,
-    empty: false,
+  const result = {
+    sources: [],
+    errors: [],
+    entries: [],
+    empty: tree.empty,
     treeSha: tree.treeSha,
+    commitSha: tree.commitSha,
   };
+  if (tree.empty) return result;
+
+  let sourceBytes = 0;
+  const request = { owner: normalized.owner, repo: normalized.name, token, cwd, onRetry };
+  for (const entry of tree.entries) {
+    const outcome = await readWorkflowEntry(entry, request);
+    result.entries.push(outcome.detail);
+    if (outcome.error) {
+      result.errors.push({ path: entry.path, error: outcome.error });
+      continue;
+    }
+    sourceBytes += Buffer.byteLength(outcome.text);
+    if (sourceBytes > MAX_REPOSITORY_WORKFLOW_BYTES) throw repositoryLimitError(normalized);
+    result.sources.push({ path: entry.path, source: outcome.text, sha: outcome.detail.blobSha });
+  }
+  return result;
 }
 
 /**
@@ -20101,13 +20095,127 @@ async function fetchBlobText({ owner, repo, sha, token, cwd, onRetry }) {
     throw new Error(`workflow blob ${sha} size did not match its metadata`);
   }
   try {
-    return new external_node_util_namespaceObject.TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return { text: new external_node_util_namespaceObject.TextDecoder('utf-8', { fatal: true }).decode(bytes), bytes: bytes.length };
   } catch {
     throw new Error(`workflow blob ${sha} is not valid UTF-8`);
   }
 }
 
-function workflowTree(repository, { entries, empty, treeSha }) {
+async function readWorkflowEntry(entry, request) {
+  const blobSha = GIT_SHA_RE.test(String(entry.sha ?? ''))
+    ? String(entry.sha).toLowerCase()
+    : null;
+  const treeBytes = Number.isSafeInteger(entry.size) && entry.size >= 0 ? entry.size : null;
+  const unreadable = error => ({
+    detail: { path: entry.path, blobSha, bytes: treeBytes, readable: false },
+    error,
+  });
+  const failure = checkEntryReadable(entry);
+  if (failure) return unreadable(failure);
+  try {
+    const blob = await fetchBlobText({ ...request, sha: entry.sha });
+    return {
+      detail: { path: entry.path, blobSha, bytes: blob.bytes, readable: true },
+      text: blob.text,
+    };
+  } catch (error) {
+    return unreadable(String(error.message ?? error));
+  }
+}
+
+function repositoryLimitError(repository) {
+  return new Error(
+    `${repository.fullName} workflow sources exceed`
+    + ` the ${MAX_REPOSITORY_WORKFLOW_BYTES}-byte repository limit`,
+  );
+}
+
+async function fetchDefaultBranchCommit({ repository, token, cwd, onRetry }) {
+  const response = await ghFetch({
+    url: `${repositoryApiUrl(repository)}/commits/heads/`
+      + encodeURIComponent(repository.defaultBranch),
+    token,
+    cwd,
+    useCache: false,
+    onRetry,
+  });
+  if (response.status === EMPTY_REPOSITORY_STATUS) return null;
+  if (response.status !== 200) {
+    throw new Error(
+      `could not read ${repository.fullName}@${repository.defaultBranch} commit`
+      + ` (HTTP ${response.status})`,
+    );
+  }
+  const commitSha = String(response.body?.sha ?? '');
+  const treeSha = String(response.body?.commit?.tree?.sha ?? '');
+  if (!GIT_SHA_RE.test(commitSha) || !GIT_SHA_RE.test(treeSha)) {
+    throw new Error(`invalid commit response for ${repository.fullName}`);
+  }
+  return { commitSha: commitSha.toLowerCase(), treeSha: treeSha.toLowerCase() };
+}
+
+function selectWorkflowEntries(body, { repository, expectedTreeSha, includePath }) {
+  if (!body || typeof body !== 'object' || !Array.isArray(body.tree)) {
+    throw new Error(`invalid tree response for ${repository.fullName}`);
+  }
+  if (typeof body.truncated !== 'boolean') {
+    throw new Error(`invalid tree truncation state for ${repository.fullName}`);
+  }
+  if (!GIT_SHA_RE.test(String(body.sha ?? ''))) {
+    throw new Error(`invalid tree SHA for ${repository.fullName}`);
+  }
+  if (String(body.sha).toLowerCase() !== expectedTreeSha) {
+    throw new Error(`tree response for ${repository.fullName} did not match the commit`);
+  }
+  if (body.truncated === true) {
+    throw new Error(
+      `tree response for ${repository.fullName} was truncated; refusing an incomplete scan`,
+    );
+  }
+  const entries = body.tree
+    .filter(entry => (
+      entry?.type === 'blob'
+      && github_org_isWorkflowPath(entry.path)
+      && (includePath === undefined || includePath(entry.path))
+    ))
+    .sort((left, right) => left.path.localeCompare(right.path));
+  if (entries.length > MAX_WORKFLOW_FILES) {
+    throw new Error(
+      `${repository.fullName} has more than ${MAX_WORKFLOW_FILES} workflow files;`
+      + ' refusing an unbounded scan',
+    );
+  }
+  const declaredBytes = entries.reduce(
+    (total, entry) => total + (
+      Number.isSafeInteger(entry.size) && entry.size >= 0 ? entry.size : 0
+    ),
+    0,
+  );
+  if (declaredBytes > MAX_REPOSITORY_WORKFLOW_BYTES) {
+    throw repositoryLimitError(repository);
+  }
+  return entries;
+}
+
+function checkEntryReadable(entry) {
+  if (!GIT_SHA_RE.test(String(entry.sha ?? ''))) {
+    return 'workflow tree entry has an invalid blob SHA';
+  }
+  if (entry.size !== undefined && (!Number.isSafeInteger(entry.size) || entry.size < 0)) {
+    return 'workflow tree entry has an invalid size';
+  }
+  if (Number.isFinite(entry.size) && entry.size > MAX_WORKFLOW_BYTES) {
+    return `workflow exceeds the ${MAX_WORKFLOW_BYTES}-byte scan limit`;
+  }
+  return null;
+}
+
+function repositoryApiUrl(repository) {
+  return `${github_org_API}/repos/${encodeURIComponent(repository.owner)}`
+    + `/${encodeURIComponent(repository.name)}`;
+}
+
+function workflowTree(repository, { entries, empty, treeSha, commitSha }) {
   return {
     repository: repository.fullName,
     branch: repository.defaultBranch,
@@ -20119,6 +20227,7 @@ function workflowTree(repository, { entries, empty, treeSha }) {
     })),
     empty,
     treeSha,
+    commitSha,
   };
 }
 
@@ -20131,13 +20240,14 @@ function validateWorkflowTree(tree, repository) {
     || typeof tree.empty !== 'boolean'
     || !Array.isArray(tree.entries)
     || (tree.treeSha !== null && !GIT_SHA_RE.test(String(tree.treeSha)))
+    || (tree.commitSha !== null && !GIT_SHA_RE.test(String(tree.commitSha)))
   ) {
     throw new Error(`invalid workflow tree snapshot for ${repository.fullName}`);
   }
   if (tree.empty && tree.entries.length > 0) {
     throw new Error(`invalid workflow tree snapshot for ${repository.fullName}`);
   }
-  if (!tree.empty && tree.treeSha === null) {
+  if (!tree.empty && (tree.treeSha === null || tree.commitSha === null)) {
     throw new Error(`invalid workflow tree snapshot for ${repository.fullName}`);
   }
   if (tree.entries.length > MAX_WORKFLOW_FILES) {
@@ -20207,10 +20317,51 @@ function validateRef(value) {
   return value;
 }
 
+;// CONCATENATED MODULE: ./src/lib/org-source-links.js
+/**
+ * Links from organization-scan evidence to the GitHub source that produced it.
+ */
+
+/**
+ * Link to a repo-relative path on the default branch. Falls back to the
+ * repository page when no default branch is known.
+ *
+ * @param {{htmlUrl: string, defaultBranch: string|null}} repository
+ * @param {string} path Repo-relative POSIX path.
+ * @param {number} [line]
+ * @returns {string}
+ */
+function sourceUrl(repository, path, line) {
+  if (!repository.defaultBranch) return repository.htmlUrl;
+  return blobUrl(repository, encodeURIComponent(repository.defaultBranch), path, line);
+}
+
+/**
+ * Link to a repo-relative path at an exact commit, so the evidence stays
+ * valid after the branch moves. Uses the default-branch link when the commit
+ * is unknown.
+ *
+ * @param {{htmlUrl: string, defaultBranch: string|null}} repository
+ * @param {string|null} commitSha Lowercase 40-hex commit ID, or null.
+ * @param {string} path Repo-relative POSIX path.
+ * @param {number} [line] Adds an `#L<line>` fragment when positive.
+ * @returns {string}
+ */
+function sourcePermalink(repository, commitSha, path, line) {
+  if (!commitSha) return sourceUrl(repository, path, line);
+  return blobUrl(repository, commitSha, path, line);
+}
+
+function blobUrl(repository, ref, path, line) {
+  const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+  const suffix = Number.isInteger(line) && line > 0 ? `#L${line}` : '';
+  return `${repository.htmlUrl}/blob/${ref}/${encodedPath}${suffix}`;
+}
+
 ;// CONCATENATED MODULE: ./src/version.js
 // Runtime version embedded in the GitHub Action bundle. The version-sync check
 // keeps this value aligned with package.json, the lockfile, and plugin metadata.
-const VERSION = '0.5.0';
+const version_VERSION = '0.5.0';
 
 ;// CONCATENATED MODULE: ./src/lib/org-checkpoint.js
 /**
@@ -20219,6 +20370,7 @@ const VERSION = '0.5.0';
  * Checkpoints contain validated report data and Git tree revisions, never
  * tokens or raw workflow YAML. Every update uses the guarded atomic writer.
  */
+
 
 
 
@@ -20242,7 +20394,7 @@ const TOOL_VERSION_RE = /^\d+\.\d+\.\d+$/;
  * discovery, parsing, finding identity, rule evaluation, or persisted result
  * semantics change; compatible package releases keep the current value.
  */
-const ORGANIZATION_ANALYSIS_GENERATION = 2;
+const ORGANIZATION_ANALYSIS_GENERATION = 3;
 
 /** Maximum accepted or generated checkpoint size, in bytes. */
 const MAX_ORGANIZATION_CHECKPOINT_BYTES = 256 * 1024 * 1024;
@@ -20368,7 +20520,7 @@ async function writeOrganizationCheckpoint({
   const content = `${JSON.stringify(redactDeep({
     schemaVersion: CHECKPOINT_SCHEMA_VERSION,
     kind: CHECKPOINT_KIND,
-    toolVersion: VERSION,
+    toolVersion: version_VERSION,
     identity,
     repositories,
   }), null, 2)}\n`;
@@ -20389,25 +20541,40 @@ function canReuseCheckpointResult(result, repository, treeSha) {
     && !result.findings.some(finding => finding.ruleId === 'parse-error');
 }
 
-/** Rehydrate validated checkpoint data with local paths and live source URLs. */
-function restoreCheckpointResult(result, { repository, cwd, sourceUrl }) {
+/**
+ * Rehydrate validated checkpoint data with local paths and live source links.
+ * The live default-branch commit supplies every permalink and the revision's
+ * commit, so a resumed report matches a freshly scanned one.
+ */
+function restoreCheckpointResult(result, { repository, cwd, commitSha }) {
   const repositoryRoot = (0,external_node_path_namespaceObject.resolve)(cwd, repository.owner, repository.name);
+  const blobShas = new Map(result.fileDetails.map(detail => [detail.path, detail.blobSha]));
+  const link = (path, line) => sourcePermalink(repository, commitSha, path, line);
   const findings = result.findings.map(finding => ({
     ...finding,
     file: (0,external_node_path_namespaceObject.resolve)(repositoryRoot, ...finding.file.split('/')),
     repository: repository.fullName,
     branch: repository.defaultBranch,
     url: sourceUrl(repository, finding.file, finding.line),
+    path: finding.file,
+    blobSha: blobShas.get(finding.file) ?? null,
+    permalink: link(finding.file, finding.line),
   }));
   return {
     repository,
-    revision: { branch: repository.defaultBranch, treeSha: result.treeSha },
+    revision: {
+      branch: repository.defaultBranch,
+      treeSha: result.treeSha,
+      commitSha: commitSha ?? null,
+    },
     files: [...result.files],
+    fileDetails: result.fileDetails.map(detail => ({ ...detail, permalink: link(detail.path) })),
     findings,
     errors: result.errors.map(error => ({
       repository: repository.fullName,
       ...(error.path ? { path: error.path } : {}),
       error: error.error,
+      ...(error.path ? { permalink: link(error.path) } : {}),
     })),
     summary: { ...result.summary },
     status: result.status,
@@ -20421,11 +20588,18 @@ function serializeCheckpointResult(result, cwd) {
     branch: result.revision.branch,
     treeSha: result.revision.treeSha,
     files: [...result.files],
+    fileDetails: result.fileDetails.map(detail => ({
+      path: detail.path,
+      blobSha: detail.blobSha,
+      bytes: detail.bytes,
+      status: detail.status,
+      findings: detail.findings,
+    })),
     findings: result.findings.map(finding => {
       const copy = { ...finding, file: identity_canonicalPath(finding.file, repositoryRoot) };
-      delete copy.repository;
-      delete copy.branch;
-      delete copy.url;
+      for (const derived of ['repository', 'branch', 'url', 'path', 'blobSha', 'permalink']) {
+        delete copy[derived];
+      }
       return copy;
     }),
     errors: result.errors.map(error => ({
@@ -20475,12 +20649,18 @@ function validateCheckpointResult(value, identity) {
     explain: identity.scope.explain,
   });
   const errors = validateErrors(value.errors, repository);
+  const fileDetails = validateFileDetails(value.fileDetails, {
+    repository,
+    files,
+    findings,
+    errors,
+  });
   const summary = validateSummary(value.summary, files, findings, repository);
   const status = findings.length === 0 && errors.length === 0 ? 'OK' : 'FAIL';
   if (value.status !== status) {
     throw new Error(`organization checkpoint status is inconsistent for ${repository}`);
   }
-  return { repository, branch, treeSha, files, findings, errors, summary, status };
+  return { repository, branch, treeSha, files, fileDetails, findings, errors, summary, status };
 }
 
 function validateFullName(value) {
@@ -20520,7 +20700,7 @@ function validateFiles(value, repository) {
   if (new Set(value).size !== value.length) {
     throw new Error(`duplicate checkpoint workflow path for ${repository}`);
   }
-  if (value.some((path, index) => index > 0 && value[index - 1].localeCompare(path) > 0)) {
+  if (value.some((path, index) => index > 0 && comparePaths(value[index - 1], path) > 0)) {
     throw new Error(`checkpoint workflow paths are not ordered for ${repository}`);
   }
   return [...value];
@@ -20574,6 +20754,64 @@ function validateErrors(value, repository) {
       error: error.error,
     };
   });
+}
+
+const FILE_DETAIL_KEYS = ['blobSha', 'bytes', 'findings', 'path', 'status'];
+
+function validateFileDetails(value, { repository, files, findings, errors }) {
+  if (!Array.isArray(value)) throw new Error(`invalid checkpoint fileDetails for ${repository}`);
+  const details = value.map(detail => validateFileDetail(detail, repository));
+  for (let index = 1; index < details.length; index += 1) {
+    const order = comparePaths(details[index - 1].path, details[index].path);
+    if (order === 0) throw new Error(`duplicate checkpoint fileDetails path for ${repository}`);
+    if (order > 0) throw new Error(`checkpoint fileDetails are not ordered for ${repository}`);
+  }
+  assertFileDetailsMatchEvidence(details, { repository, files, findings, errors });
+  return details;
+}
+
+function validateFileDetail(detail, repository) {
+  if (
+    !isRecord(detail)
+    || Object.keys(detail).sort().join() !== FILE_DETAIL_KEYS.join()
+    || !github_org_isWorkflowPath(detail.path)
+    || !FILE_STATUSES.has(detail.status)
+    || (detail.blobSha !== null && !GIT_SHA_RE.test(String(detail.blobSha)))
+    || (detail.bytes !== null && !isCount(detail.bytes))
+    || !isCount(detail.findings)
+  ) throw new Error(`invalid checkpoint fileDetails entry for ${repository}`);
+  return {
+    path: detail.path,
+    blobSha: detail.blobSha === null ? null : detail.blobSha.toLowerCase(),
+    bytes: detail.bytes,
+    status: detail.status,
+    findings: detail.findings,
+  };
+}
+
+function assertFileDetailsMatchEvidence(details, { repository, files, findings, errors }) {
+  const readable = details
+    .filter(detail => detail.status !== 'unreadable')
+    .map(detail => detail.path);
+  const errorPaths = new Set(errors.map(error => error.path));
+  const inconsistent = (
+    readable.length !== files.length
+    || readable.some((path, index) => path !== files[index])
+    || details.some(detail => detail.status === 'unreadable' && !errorPaths.has(detail.path))
+    || details.some(detail => !fileDetailMatchesFindings(detail, findings))
+  );
+  if (inconsistent) throw new Error(`inconsistent checkpoint fileDetails for ${repository}`);
+}
+
+function fileDetailMatchesFindings(detail, findings) {
+  const own = findings.filter(finding => finding.file === detail.path);
+  const parseError = own.some(finding => finding.ruleId === 'parse-error');
+  return own.length === detail.findings
+    && (detail.status === 'parse-error') === parseError;
+}
+
+function isCount(value) {
+  return Number.isSafeInteger(value) && value >= 0;
 }
 
 function validateSummary(value, files, findings, repository) {
@@ -20657,6 +20895,7 @@ function org_report_buildOrganizationReport(result, {
       repository: repositoryResult.repository,
       revision: repositoryResult.revision,
       files: repositoryResult.files,
+      fileDetails: repositoryResult.fileDetails,
       findings: repositoryResult.findings.map(finding => normalizeFinding(finding, cwd)),
       errors: repositoryResult.errors,
       summary: repositoryResult.summary,
@@ -20724,12 +20963,27 @@ function appendRepositoryRecords(records, repositoryResult, format) {
       repo: repositoryResult.repository.fullName,
       visibility: repositoryResult.repository.visibility,
       branch: repositoryResult.revision.branch,
+      commit: repositoryResult.revision.commitSha,
       files: repositoryResult.files.length,
       findings: repositoryResult.findings.length,
       errors: repositoryResult.errors.length,
       status: repositoryResult.status,
     },
   });
+  for (const detail of repositoryResult.fileDetails) {
+    records.push({
+      label: 'FILE',
+      fields: {
+        repo: repositoryResult.repository.fullName,
+        path: detail.path,
+        status: detail.status,
+        findings: detail.findings,
+        blobSha: detail.blobSha,
+        bytes: detail.bytes,
+        permalink: detail.permalink,
+      },
+    });
+  }
   for (const finding of repositoryResult.findings) {
     records.push({
       label: 'FINDING',
@@ -20738,8 +20992,10 @@ function appendRepositoryRecords(records, repositoryResult, format) {
         ...finding.fields,
         repo: finding.repository,
         file: finding.file,
+        path: finding.path,
         line: finding.line,
         url: finding.url,
+        permalink: finding.permalink,
         ...(finding.explain ? { explain: finding.explain } : {}),
         ...(format === 'sarif' && finding.fingerprint
           ? { fingerprint: finding.fingerprint }
@@ -20753,6 +21009,8 @@ function appendRepositoryRecords(records, repositoryResult, format) {
       fields: {
         repo: error.repository,
         file: error.path ? `${error.repository}/${error.path}` : undefined,
+        path: error.path,
+        permalink: error.permalink,
         msg: error.error,
       },
     });
@@ -20773,8 +21031,10 @@ function appendComparisonRecords(records, comparison) {
           sev: finding.severity,
           repo: finding.repository,
           file: finding.file,
+          path: finding.path,
           line: finding.line,
           url: finding.url,
+          permalink: finding.permalink,
           explain: finding.explain,
         },
       });
@@ -20844,6 +21104,7 @@ function comparablePath(path) {
  * Organization scan command - enumerate repositories through the GitHub API,
  * fetch workflow YAML from each default branch, and aggregate audit findings.
  */
+
 
 
 
@@ -21138,7 +21399,7 @@ async function openCheckpoint(settings, environment, loadedCheckpoint, selection
     results.set(repository.fullName.toLowerCase(), restoreCheckpointResult(stored, {
       repository,
       cwd,
-      sourceUrl,
+      commitSha: null,
     }));
   }
   const persist = createCheckpointWriter({
@@ -21252,7 +21513,11 @@ async function readOrReuseRepository(state, repository, emitPhase) {
   await emitPhase('checking resumable evidence');
   if (stored && canReuseCheckpointResult(stored, repository, workflowTree.treeSha)) {
     return {
-      repositoryResult: restoreCheckpointResult(stored, { repository, cwd, sourceUrl }),
+      repositoryResult: restoreCheckpointResult(stored, {
+        repository,
+        cwd,
+        commitSha: workflowTree.commitSha,
+      }),
       wasReused: true,
     };
   }
@@ -21274,6 +21539,7 @@ async function readOrReuseRepository(state, repository, emitPhase) {
 async function auditRepositoryResult(state, repository, fetched) {
   const { cwd, severity, explain } = state.settings;
   const { config, baselineData } = state.environment;
+  const repositoryRoot = (0,external_node_path_namespaceObject.resolve)(cwd, repository.owner, repository.name);
   const sources = fetched.sources.map(item => ({
     file: virtualPath(cwd, repository, item.path),
     source: item.source,
@@ -21286,31 +21552,35 @@ async function auditRepositoryResult(state, repository, fetched) {
     config,
     baselineData,
   });
+  const blobShas = new Map(fetched.entries.map(entry => [entry.path, entry.blobSha]));
+  const link = (path, line) => sourcePermalink(repository, fetched.commitSha, path, line);
   const errors = fetched.errors.map(error => ({
     repository: repository.fullName,
     path: error.path,
     error: error.error,
+    permalink: link(error.path),
   }));
-  const findings = auditResult.findings.map(finding => ({
-    ...finding,
-    repository: repository.fullName,
-    branch: repository.defaultBranch,
-    url: sourceUrl(
-      repository,
-      identity_canonicalPath(finding.file, (0,external_node_path_namespaceObject.resolve)(cwd, repository.owner, repository.name)),
-      finding.line,
-    ),
-  }));
+  const findings = auditResult.findings.map(finding => {
+    const path = identity_canonicalPath(finding.file, repositoryRoot);
+    return {
+      ...finding,
+      repository: repository.fullName,
+      branch: repository.defaultBranch,
+      url: sourceUrl(repository, path, finding.line),
+      path,
+      blobSha: blobShas.get(path) ?? null,
+      permalink: link(path, finding.line),
+    };
+  });
   return {
     repository,
     revision: {
       branch: repository.defaultBranch,
       treeSha: fetched.treeSha,
+      commitSha: fetched.commitSha,
     },
-    files: auditResult.files.map(file => identity_canonicalPath(
-      file,
-      (0,external_node_path_namespaceObject.resolve)(cwd, repository.owner, repository.name),
-    )),
+    files: auditResult.files.map(file => identity_canonicalPath(file, repositoryRoot)),
+    fileDetails: buildFileDetails(fetched.entries, findings, link),
     findings,
     errors,
     summary: auditResult.summary,
@@ -21318,11 +21588,36 @@ async function auditRepositoryResult(state, repository, fetched) {
   };
 }
 
+function buildFileDetails(entries, findings, link) {
+  const counts = new Map();
+  const parseErrors = new Set();
+  for (const finding of findings) {
+    counts.set(finding.path, (counts.get(finding.path) ?? 0) + 1);
+    if (finding.ruleId === 'parse-error') parseErrors.add(finding.path);
+  }
+  return entries
+    .map(entry => ({
+      path: entry.path,
+      blobSha: entry.blobSha,
+      bytes: entry.bytes,
+      status: fileStatus(entry, parseErrors),
+      findings: counts.get(entry.path) ?? 0,
+      permalink: link(entry.path),
+    }))
+    .sort((left, right) => comparePaths(left.path, right.path));
+}
+
+function fileStatus(entry, parseErrors) {
+  if (!entry.readable) return 'unreadable';
+  return parseErrors.has(entry.path) ? 'parse-error' : 'scanned';
+}
+
 function failedRepositoryResult(repository, error) {
   return {
     repository,
-    revision: { branch: repository.defaultBranch, treeSha: null },
+    revision: { branch: repository.defaultBranch, treeSha: null, commitSha: null },
     files: [],
+    fileDetails: [],
     findings: [],
     errors: [{
       repository: repository.fullName,
@@ -21426,14 +21721,6 @@ function selectRepositories(repositories, options) {
     ) return false;
     return true;
   });
-}
-
-function sourceUrl(repository, path, line) {
-  if (!repository.defaultBranch) return repository.htmlUrl;
-  const encodedPath = path.split('/').map(encodeURIComponent).join('/');
-  const encodedBranch = encodeURIComponent(repository.defaultBranch);
-  const suffix = Number.isInteger(line) && line > 0 ? `#L${line}` : '';
-  return `${repository.htmlUrl}/blob/${encodedBranch}/${encodedPath}${suffix}`;
 }
 
 function virtualPath(cwd, repository, path) {
@@ -21899,6 +22186,7 @@ async function validateWriteDestination({ option, label, path, cwd }) {
 
 
 
+
 /** Preferred execution-context environment variable. */
 const EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_CONTEXT';
 
@@ -22011,9 +22299,17 @@ async function createOrganizationScanArtifacts({
 
 /**
  * Render the bounded stdout contract emitted after an organization file report.
+ * Run provenance (tool version and timing) appears only here, never in the
+ * deterministic report, aggregate, or manifest.
+ *
+ * @param {object} options
+ * @param {Date} options.startedAt When the run began.
+ * @param {Date} options.finishedAt When the report was written.
  */
 function renderOrganizationScanReceipt({
   result,
+  startedAt,
+  finishedAt,
   reportPath,
   reportFormat,
   checkpointPath,
@@ -22031,6 +22327,12 @@ function renderOrganizationScanReceipt({
       kind,
       command: 'org-scan',
       organization: result.organization,
+      tool: { name: 'actions-warden', version: VERSION },
+      run: {
+        startedAt: startedAt.toISOString(),
+        finishedAt: finishedAt.toISOString(),
+        durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+      },
       status: result.status,
       summary: result.summary,
       report: {

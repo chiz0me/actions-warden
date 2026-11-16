@@ -70,3 +70,19 @@ export function normalizePatterns(patterns) {
   ) throw new Error('repository filters must be non-empty strings');
   return [...new Set(patterns)];
 }
+
+/** Scan outcomes recorded for each workflow file in a repository result. */
+export const FILE_STATUSES = new Set(['scanned', 'parse-error', 'unreadable']);
+
+/**
+ * Compare repository paths by UTF-16 code unit so ordering does not depend on
+ * the runtime locale.
+ *
+ * @param {string} left
+ * @param {string} right
+ * @returns {number}
+ */
+export function comparePaths(left, right) {
+  if (left < right) return -1;
+  return left > right ? 1 : 0;
+}

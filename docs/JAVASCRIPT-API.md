@@ -292,7 +292,10 @@ Returns:
 ```
 
 `findings` and `errors` are flattened for ingestion. `repositories` retains
-per-repository identity, revision, files, findings, errors, summary, and status.
+per-repository identity, revision (`branch`, `treeSha`, and `commitSha`), `files`,
+`fileDetails` (one entry per selected workflow file, with its blob SHA, size,
+status, finding count, and permalink), findings, errors, summary, and status.
+Each finding also carries `path`, `blobSha`, and `permalink`.
 `analysis` contains a compatibility generation and stable public identity that
 covers scan scope, policy, baseline contents, and the rule catalog.
 `coverage` distinguishes successful coverage of selected repositories from
@@ -309,7 +312,8 @@ that path. The organization, selection and audit options, normalized policy,
 baseline contents, analysis generation, and rule catalog must match.
 Concurrency, token, and compatible package-version changes are allowed. The
 producing package version remains metadata that the next checkpoint write
-refreshes. Only the current checkpoint schema is accepted. Resume performs fresh
+refreshes. Only the current checkpoint schema is accepted; checkpoints hold
+file details but neither commits nor links, which each run rebuilds. Resume performs fresh
 discovery and tree reads; it reuses only error-free results whose repository,
 default branch, and tree SHA remain unchanged. Checkpoints contain redacted
 report data and revision metadata, never tokens or raw YAML.
@@ -456,7 +460,10 @@ import {
 Additional exports include baseline helpers, organization GitHub readers
 (`listOrganizationRepositories`, `fetchRepositoryWorkflowTree`, and
 `fetchRepositoryWorkflows`), redaction, the live rule catalog, and organization
-size limits. A validated workflow-tree snapshot can be supplied to
+size limits. `fetchRepositoryWorkflowTree` resolves the default-branch commit
+first and reads the tree by its tree SHA; the snapshot carries `commitSha`, and
+`fetchRepositoryWorkflows` also returns per-file `entries`. A validated
+workflow-tree snapshot can be supplied to
 `fetchRepositoryWorkflows` to avoid a duplicate tree request. See
 [src/index.js](../src/index.js) for the exact export list in the checked-out
 version.

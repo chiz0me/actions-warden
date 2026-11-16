@@ -339,6 +339,7 @@ program.command('org-scan <organization>')
     });
     const effective = resolveOrganizationScanOptions(opts, command);
     let progressReporter;
+    const startedAt = new Date();
     try {
       const run = await runOrganizationScan({
         ...organizationRunOptions(organization, effective),
@@ -357,6 +358,7 @@ program.command('org-scan <organization>')
         run,
         effective,
         agentMode: executionContext === 'agent',
+        startedAt,
       });
       process.exitCode = run.result.status === 'OK' ? 0 : 1;
       progressReporter?.close();
@@ -558,7 +560,7 @@ function openOrganizationProgress({ organization, effective, command, executionC
   return reporter;
 }
 
-async function writeOrganizationOutput({ run, effective, agentMode }) {
+async function writeOrganizationOutput({ run, effective, agentMode, startedAt }) {
   const { result } = run;
   let reportPath = run.reportPath;
   let reportDirectoryPath;
@@ -582,6 +584,8 @@ async function writeOrganizationOutput({ run, effective, agentMode }) {
   if (effective.output !== 'file') return;
   process.stdout.write(renderOrganizationScanReceipt({
     result,
+    startedAt,
+    finishedAt: new Date(),
     reportPath,
     reportFormat: effective.format,
     checkpointPath: run.checkpointPath,

@@ -3,8 +3,8 @@
   "kind": "actions-warden-org-scan-repository",
   "organization": "octo-org",
   "analysis": {
-    "generation": 2,
-    "identity": "38445dcb5342aa8ca5295c7018fc4de2dc646c9b3a507d7f02767af880206105"
+    "generation": 3,
+    "identity": "1f61fd579a0b4f8533b47382290ee1bb92343cf7c7d0b562c4643642baecf6a0"
   },
   "scope": {
     "repositories": [],
@@ -31,9 +31,11 @@
     },
     "revision": {
       "branch": "main",
-      "treeSha": null
+      "treeSha": null,
+      "commitSha": null
     },
     "files": [],
+    "fileDetails": [],
     "findings": [],
     "errors": [],
     "summary": {

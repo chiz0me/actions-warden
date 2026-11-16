@@ -3,38 +3,38 @@
   "kind": "actions-warden-org-scan-manifest",
   "organization": "octo-org",
   "analysis": {
-    "generation": 2,
-    "identity": "38445dcb5342aa8ca5295c7018fc4de2dc646c9b3a507d7f02767af880206105"
+    "generation": 3,
+    "identity": "1f61fd579a0b4f8533b47382290ee1bb92343cf7c7d0b562c4643642baecf6a0"
   },
   "report": {
     "path": "organization-report.json",
-    "bytes": 5127,
-    "sha256": "b3577bf050f53205b118c4169d75389a8cec04a7661ccb8dd487076deb1fb8ce"
+    "bytes": 5349,
+    "sha256": "5e94edcb42d613828a782a6d9c7159d1107c9812f7dc83148af1bb785b0b90dd"
   },
   "repositories": [
     {
       "repository": "octo-org/app",
       "path": "repositories/app.edfc67b5ab6594e2.json",
-      "bytes": 3326,
-      "sha256": "b52dfa6efdb17d8054cf50192960606f8396d8654bb9c7560ee50bc26998cff3"
+      "bytes": 5248,
+      "sha256": "4e2f0670e54b5871415513e1ce3e74256e697968fbd945c4a5d27500d2aa1663"
     },
     {
       "repository": "octo-org/broken",
       "path": "repositories/broken.85a8c925d0f9bfac.json",
-      "bytes": 1779,
-      "sha256": "54db3322791d198c6549e1a513c89c6a831d6088b3ce8217188fbca3c7996790"
+      "bytes": 2440,
+      "sha256": "105da3dd3816236f45a31bb24d9d3d16c7b07ebe6fdf5967e0a1a2ce91c19406"
     },
     {
       "repository": "octo-org/clean",
       "path": "repositories/clean.dcaa84c6c3fe12e6.json",
-      "bytes": 1229,
-      "sha256": "9e484089c90283df9a0536f7db85a3323fd2c1f5fc782d91a4a539a72d2c13cb"
+      "bytes": 1651,
+      "sha256": "4e5977bfa48d612abcf0001fcf57c2ee68c52985e9b448a3b086edab93383951"
     },
     {
       "repository": "octo-org/empty",
       "path": "repositories/empty.ff4c2ec9f58cae99.json",
-      "bytes": 1150,
-      "sha256": "0b123313e48e91d2d637e00e0698a575f35dfa834cb9ffcf8866c2e5af50fff1"
+      "bytes": 1198,
+      "sha256": "150cd9cf0f9cf66bb29f4afd238ced5b8d77045eb92d00f754a8c77d3afcd465"
     }
   ],
   "status": "FAIL"

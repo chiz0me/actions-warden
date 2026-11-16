@@ -14,6 +14,9 @@ globalThis.fetch = async function mockOrganizationFetch(url) {
       html_url: 'https://github.com/octo-org/app',
     }]);
   }
+  if (value.includes('/repos/octo-org/app/commits/heads/main')) {
+    return jsonResponse({ sha: 'c'.repeat(40), commit: { tree: { sha: 'a'.repeat(40) } } });
+  }
   if (value.includes('/repos/octo-org/app/git/trees/')) {
     return jsonResponse({
       sha: 'a'.repeat(40),

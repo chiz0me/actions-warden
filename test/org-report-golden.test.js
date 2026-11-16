@@ -7,10 +7,12 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { renderOrganizationScan, scanOrganization } from '../src/commands/org-scan.js';
 import { buildOrganizationReport } from '../src/lib/org-report.js';
+import { VERSION } from '../src/version.js';
 import { writeOrganizationReportDirectory } from '../src/lib/org-report-directory.js';
 import { createGoldenFetch, GOLDEN_ORGANIZATION } from './fixtures/org-golden-fixture.js';
 
 const execFileAsync = promisify(execFile);
+const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const repositoryRoot = resolve(import.meta.dirname, '..');
 const GOLDEN_DIRECTORY = './fixtures/org-golden';
 const FORMATS = [
@@ -77,6 +79,23 @@ describe('organization report golden files', () => {
     );
   });
 
+  it('keeps run provenance out of the report and its derived artifacts', async () => {
+    await writeOrganizationReportDirectory({ result, path: 'provenance-dir', cwd });
+    const manifest = await readFile(join(cwd, 'provenance-dir', 'manifest.json'), 'utf8');
+    const aggregate = await readFile(
+      join(cwd, 'provenance-dir', 'organization-report.json'),
+      'utf8',
+    );
+    const documents = [
+      renderOrganizationScan(result, { format: 'json', cwd }),
+      manifest,
+      aggregate,
+    ];
+    for (const document of documents) {
+      expect(document).not.toMatch(/"(?:tool|run|startedAt|finishedAt|durationMs)":/);
+    }
+  });
+
   it('renders identical bytes on a second render', () => {
     for (const [outputFormat] of FORMATS) {
       expect(renderOrganizationScan(result, { format: outputFormat, cwd }))
@@ -135,10 +154,22 @@ describe('organization scan CLI with findings', () => {
         'kind',
         'organization',
         'report',
+        'run',
         'schemaVersion',
         'status',
         'summary',
+        'tool',
       ]);
+      expect(receipt.tool).toEqual({ name: 'actions-warden', version: VERSION });
+      expect(receipt.run).toEqual({
+        startedAt: expect.stringMatching(ISO_UTC),
+        finishedAt: expect.stringMatching(ISO_UTC),
+        durationMs: expect.any(Number),
+      });
+      expect(Number.isInteger(receipt.run.durationMs)).toBe(true);
+      expect(receipt.run.durationMs).toBe(
+        Date.parse(receipt.run.finishedAt) - Date.parse(receipt.run.startedAt),
+      );
       expect(receipt).toMatchObject({
         schemaVersion: '1.0',
         kind: 'actions-warden-org-scan-receipt',

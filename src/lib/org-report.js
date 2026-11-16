@@ -33,6 +33,7 @@ export function buildOrganizationReport(result, {
       repository: repositoryResult.repository,
       revision: repositoryResult.revision,
       files: repositoryResult.files,
+      fileDetails: repositoryResult.fileDetails,
       findings: repositoryResult.findings.map(finding => normalizeFinding(finding, cwd)),
       errors: repositoryResult.errors,
       summary: repositoryResult.summary,
@@ -100,12 +101,27 @@ function appendRepositoryRecords(records, repositoryResult, format) {
       repo: repositoryResult.repository.fullName,
       visibility: repositoryResult.repository.visibility,
       branch: repositoryResult.revision.branch,
+      commit: repositoryResult.revision.commitSha,
       files: repositoryResult.files.length,
       findings: repositoryResult.findings.length,
       errors: repositoryResult.errors.length,
       status: repositoryResult.status,
     },
   });
+  for (const detail of repositoryResult.fileDetails) {
+    records.push({
+      label: 'FILE',
+      fields: {
+        repo: repositoryResult.repository.fullName,
+        path: detail.path,
+        status: detail.status,
+        findings: detail.findings,
+        blobSha: detail.blobSha,
+        bytes: detail.bytes,
+        permalink: detail.permalink,
+      },
+    });
+  }
   for (const finding of repositoryResult.findings) {
     records.push({
       label: 'FINDING',
@@ -114,8 +130,10 @@ function appendRepositoryRecords(records, repositoryResult, format) {
         ...finding.fields,
         repo: finding.repository,
         file: finding.file,
+        path: finding.path,
         line: finding.line,
         url: finding.url,
+        permalink: finding.permalink,
         ...(finding.explain ? { explain: finding.explain } : {}),
         ...(format === 'sarif' && finding.fingerprint
           ? { fingerprint: finding.fingerprint }
@@ -129,6 +147,8 @@ function appendRepositoryRecords(records, repositoryResult, format) {
       fields: {
         repo: error.repository,
         file: error.path ? `${error.repository}/${error.path}` : undefined,
+        path: error.path,
+        permalink: error.permalink,
         msg: error.error,
       },
     });
@@ -149,8 +169,10 @@ function appendComparisonRecords(records, comparison) {
           sev: finding.severity,
           repo: finding.repository,
           file: finding.file,
+          path: finding.path,
           line: finding.line,
           url: finding.url,
+          permalink: finding.permalink,
           explain: finding.explain,
         },
       });

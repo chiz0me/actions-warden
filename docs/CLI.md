@@ -408,7 +408,8 @@ actions-warden org-scan my-org \
 The previous report must be inside `--cwd`, use schema `1.0`, contain a public
 analysis identity, and match the current organization, scope, normalized
 policy, baseline contents, rule catalog, and analysis generation. Reports made
-before analysis identities were added must be regenerated once. Token,
+by an earlier analysis generation, including every report made before commits,
+file inventories, and permalinks were added, must be regenerated once. Token,
 concurrency, progress, and output destination do not affect compatibility.
 
 Comparison uses semantic fingerprints and returns complete `new`, `resolved`,
@@ -601,16 +602,15 @@ actions-warden org-scan my-org \
 
 The token, concurrency, output format, progress mode, and report destination do
 not affect checkpoint compatibility. Neither does a package-version-only
-upgrade: the producing version is retained as checkpoint metadata, and a
-compatible older checkpoint is rewritten atomically on its first successful
-resume. The
+upgrade: the producing version is retained as checkpoint metadata that the next
+checkpoint write refreshes. The
 explicit analysis generation is advanced when discovery, parsing, finding
 identity, rule evaluation, or persisted result behavior changes. An
 incompatible generation fails closed; automatic organization scans select a
-new keyed path. A resumed scan always lists repositories again and
-fetches a fresh
-default-branch tree for each selected repository. An error-free result is
-reused only when repository identity, default branch, and tree SHA still match.
+new keyed path. A checkpoint from an older schema or generation is rejected.
+A resumed scan always lists repositories again and resolves the current
+default-branch commit and its tree for each selected repository. An error-free
+result is reused only when repository identity, default branch, and tree SHA still match.
 Changed repositories and any checkpointed result with an operational error are
 scanned again.
 
@@ -631,7 +631,9 @@ artifacts. When an analysis generation intentionally changes, the older keyed re
 retained rather than deleted automatically because they may be needed as audit
 evidence; remove them according to the consuming repository's retention policy.
 
-The scanner reads the default-branch Git tree and YAML blobs in memory. It
+The scanner resolves the default-branch commit, reads that commit's Git tree,
+and reads YAML blobs in memory, so each repository costs one extra request for
+the commit that permalinks point at. It
 never clones, checks out, or executes remote content. It fails closed on
 truncated trees and enforces these bounds per repository:
 

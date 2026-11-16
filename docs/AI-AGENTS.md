@@ -288,6 +288,12 @@ bounds downstream context reads, not the scanner's in-process memory. Retain a
 normal complete JSON report as well if the run must later be used as
 `--previous-report`.
 
+To cite evidence, use the report's source locations: every finding has a
+`permalink` pinned to the scanned commit, and each repository's `fileDetails`
+lists every workflow file that was inspected, including clean ones, with its
+status. Prefer a `permalink` over the branch `url` when quoting a finding,
+and treat an `unreadable` file as a coverage gap, not a clean file.
+
 The automatic artifact key covers the organization, repository filters,
 inclusion flags, repository limit, severity, explanation setting, normalized
 policy, baseline contents, analysis generation, and rule catalog. A compatible
@@ -364,7 +370,9 @@ Inspect `comparison.summary` from the receipt and saved report first. Report
 new, resolved, unchanged, and unknown counts. A removed, failed, or unparseable
 repository makes prior unmatched findings unknown; never describe them as resolved. A
 scope, policy, baseline, rule, or analysis-generation mismatch is an invocation
-error and must not be bypassed by weakening current controls. CSV and HTML
+error and must not be bypassed by weakening current controls. A report from an
+older analysis generation cannot be reused; regenerate it once with the current
+version. CSV and HTML
 reports are not valid previous-report inputs.
 
 Then read operational errors and relevant findings in bounded batches, grouped

@@ -144,7 +144,14 @@ the rule catalog controls compatibility. A parser, discovery, or rule behavior
 change advances that generation and requires a fresh scan. The next checkpoint
 write records the current package version.
 
-Compare a fresh scan with a compatible previous JSON report:
+Each repository in an organization report lists every workflow file that was
+inspected, including clean ones, with its blob SHA, size, and status. Findings
+and errors carry a `permalink` pinned to the exact commit that was scanned, so
+a reviewer can open the evidence even after the default branch moves.
+
+Compare a fresh scan with a compatible previous JSON report (reports made by
+an earlier release must be regenerated once; they carry no commit or file
+inventory and are refused):
 
 ```sh
 actions-warden org-scan my-org \

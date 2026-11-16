@@ -3,8 +3,8 @@
   "kind": "actions-warden-org-scan-repository",
   "organization": "octo-org",
   "analysis": {
-    "generation": 2,
-    "identity": "38445dcb5342aa8ca5295c7018fc4de2dc646c9b3a507d7f02767af880206105"
+    "generation": 3,
+    "identity": "1f61fd579a0b4f8533b47382290ee1bb92343cf7c7d0b562c4643642baecf6a0"
   },
   "scope": {
     "repositories": [],
@@ -31,10 +31,21 @@
     },
     "revision": {
       "branch": "main",
-      "treeSha": "3333333333333333333333333333333333333333"
+      "treeSha": "3333333333333333333333333333333333333333",
+      "commitSha": "cccccccccccccccccccccccccccccccccccccccc"
     },
     "files": [
       ".github/workflows/build.yml"
+    ],
+    "fileDetails": [
+      {
+        "path": ".github/workflows/build.yml",
+        "blobSha": "29d998a51419a23adf422bc3074762c84d88b2e9",
+        "bytes": 209,
+        "status": "scanned",
+        "findings": 0,
+        "permalink": "https://github.com/octo-org/clean/blob/cccccccccccccccccccccccccccccccccccccccc/.github/workflows/build.yml"
+      }
     ],
     "findings": [],
     "errors": [],

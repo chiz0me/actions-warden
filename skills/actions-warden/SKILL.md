@@ -187,7 +187,8 @@ authorized workflow mutation whenever the needed path information is known.
 9. **Use CSV/HTML as artifacts, not model context.** CSV is useful for flat
    spreadsheet or warehouse export, and self-contained HTML is useful for
    human review. Do not read either complete artifact into the conversation.
-   For change reporting, retain JSON and pass it with `--previous-report`.
+   For change reporting, retain JSON and pass it with `--previous-report`;
+   a report from an older analysis generation must be regenerated once.
    Report new, resolved, unchanged, and unknown counts; unmatched prior
    findings are unknown when current repository coverage failed or disappeared.
 
@@ -267,8 +268,11 @@ Other exports include `listRules`, `discoverWorkflows`, `parseWorkflowFile`,
 - Private organization scans require a token that can list repositories and
   read their contents. Organization scans never clone or execute repository
   code and treat incomplete remote reads as errors.
+- Organization reports list every inspected workflow file in each repository's
+  `fileDetails` and give each finding a `permalink` pinned to the scanned commit;
+  cite the permalink and treat an `unreadable` file as a coverage gap.
 - Organization checkpoints are atomic and contain redacted report data plus
-  tree revisions, not tokens or raw YAML. Resume requires matching scan/policy
+  tree revisions, not tokens, commits, links, or raw YAML. Resume requires matching scan/policy
   identity, rechecks fresh tree SHAs, reuses only unchanged error-free results,
   and retries changed or failed repositories. Repeating the same command or
   explicit `--checkpoint` path resumes automatically; use `--fresh` to replace

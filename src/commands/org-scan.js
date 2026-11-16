@@ -27,7 +27,13 @@ import {
   writeOrganizationCheckpoint,
 } from '../lib/org-checkpoint.js';
 import { buildOrganizationReport, organizationReportRecords } from '../lib/org-report.js';
-import { NAME_RE, VISIBILITIES, normalizePatterns } from '../lib/org-schema.js';
+import {
+  NAME_RE,
+  VISIBILITIES,
+  comparePaths,
+  normalizePatterns,
+} from '../lib/org-schema.js';
+import { sourcePermalink, sourceUrl } from '../lib/org-source-links.js';
 import { resolveToken } from '../lib/resolver.js';
 import { RULES } from '../rules/index.js';
 import { sameFilePath } from '../lib/path-equality.js';
@@ -308,7 +314,7 @@ async function openCheckpoint(settings, environment, loadedCheckpoint, selection
     results.set(repository.fullName.toLowerCase(), restoreCheckpointResult(stored, {
       repository,
       cwd,
-      sourceUrl,
+      commitSha: null,
     }));
   }
   const persist = createCheckpointWriter({
@@ -422,7 +428,11 @@ async function readOrReuseRepository(state, repository, emitPhase) {
   await emitPhase('checking resumable evidence');
   if (stored && canReuseCheckpointResult(stored, repository, workflowTree.treeSha)) {
     return {
-      repositoryResult: restoreCheckpointResult(stored, { repository, cwd, sourceUrl }),
+      repositoryResult: restoreCheckpointResult(stored, {
+        repository,
+        cwd,
+        commitSha: workflowTree.commitSha,
+      }),
       wasReused: true,
     };
   }
@@ -444,6 +454,7 @@ async function readOrReuseRepository(state, repository, emitPhase) {
 async function auditRepositoryResult(state, repository, fetched) {
   const { cwd, severity, explain } = state.settings;
   const { config, baselineData } = state.environment;
+  const repositoryRoot = resolve(cwd, repository.owner, repository.name);
   const sources = fetched.sources.map(item => ({
     file: virtualPath(cwd, repository, item.path),
     source: item.source,
@@ -456,31 +467,35 @@ async function auditRepositoryResult(state, repository, fetched) {
     config,
     baselineData,
   });
+  const blobShas = new Map(fetched.entries.map(entry => [entry.path, entry.blobSha]));
+  const link = (path, line) => sourcePermalink(repository, fetched.commitSha, path, line);
   const errors = fetched.errors.map(error => ({
     repository: repository.fullName,
     path: error.path,
     error: error.error,
+    permalink: link(error.path),
   }));
-  const findings = auditResult.findings.map(finding => ({
-    ...finding,
-    repository: repository.fullName,
-    branch: repository.defaultBranch,
-    url: sourceUrl(
-      repository,
-      canonicalPath(finding.file, resolve(cwd, repository.owner, repository.name)),
-      finding.line,
-    ),
-  }));
+  const findings = auditResult.findings.map(finding => {
+    const path = canonicalPath(finding.file, repositoryRoot);
+    return {
+      ...finding,
+      repository: repository.fullName,
+      branch: repository.defaultBranch,
+      url: sourceUrl(repository, path, finding.line),
+      path,
+      blobSha: blobShas.get(path) ?? null,
+      permalink: link(path, finding.line),
+    };
+  });
   return {
     repository,
     revision: {
       branch: repository.defaultBranch,
       treeSha: fetched.treeSha,
+      commitSha: fetched.commitSha,
     },
-    files: auditResult.files.map(file => canonicalPath(
-      file,
-      resolve(cwd, repository.owner, repository.name),
-    )),
+    files: auditResult.files.map(file => canonicalPath(file, repositoryRoot)),
+    fileDetails: buildFileDetails(fetched.entries, findings, link),
     findings,
     errors,
     summary: auditResult.summary,
@@ -488,11 +503,36 @@ async function auditRepositoryResult(state, repository, fetched) {
   };
 }
 
+function buildFileDetails(entries, findings, link) {
+  const counts = new Map();
+  const parseErrors = new Set();
+  for (const finding of findings) {
+    counts.set(finding.path, (counts.get(finding.path) ?? 0) + 1);
+    if (finding.ruleId === 'parse-error') parseErrors.add(finding.path);
+  }
+  return entries
+    .map(entry => ({
+      path: entry.path,
+      blobSha: entry.blobSha,
+      bytes: entry.bytes,
+      status: fileStatus(entry, parseErrors),
+      findings: counts.get(entry.path) ?? 0,
+      permalink: link(entry.path),
+    }))
+    .sort((left, right) => comparePaths(left.path, right.path));
+}
+
+function fileStatus(entry, parseErrors) {
+  if (!entry.readable) return 'unreadable';
+  return parseErrors.has(entry.path) ? 'parse-error' : 'scanned';
+}
+
 function failedRepositoryResult(repository, error) {
   return {
     repository,
-    revision: { branch: repository.defaultBranch, treeSha: null },
+    revision: { branch: repository.defaultBranch, treeSha: null, commitSha: null },
     files: [],
+    fileDetails: [],
     findings: [],
     errors: [{
       repository: repository.fullName,
@@ -596,14 +636,6 @@ function selectRepositories(repositories, options) {
     ) return false;
     return true;
   });
-}
-
-function sourceUrl(repository, path, line) {
-  if (!repository.defaultBranch) return repository.htmlUrl;
-  const encodedPath = path.split('/').map(encodeURIComponent).join('/');
-  const encodedBranch = encodeURIComponent(repository.defaultBranch);
-  const suffix = Number.isInteger(line) && line > 0 ? `#L${line}` : '';
-  return `${repository.htmlUrl}/blob/${encodedBranch}/${encodedPath}${suffix}`;
 }
 
 function virtualPath(cwd, repository, path) {

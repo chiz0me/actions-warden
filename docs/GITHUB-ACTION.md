@@ -374,7 +374,7 @@ does not itself retain files between ephemeral runners; restore a protected
 artifact or other caller-managed file to the same path before the step when
 cross-run resume is required. Scope, policy, baseline, analysis generation,
 and rule identity must match; a compatible package-version change is allowed
-and atomically refreshes checkpoint metadata on the first successful resume.
+and the next checkpoint write refreshes its metadata.
 Fresh repository discovery and tree checks still occur, and changed or previously
 failed repositories are rescanned. Checkpoints hold redacted report evidence
 about repositories and findings, so protect them like the organization report.
@@ -383,8 +383,9 @@ the resolved report path.
 
 To calculate change, restore a previous JSON report into the working directory
 and set `previous-report` to that path. It must match the current scope, policy,
-baseline, rules, and analysis generation, and it cannot equal `output-path`,
-`checkpoint-path`, or `resume-from`. New, resolved, unchanged, and unknown
+baseline, rules, and analysis generation (reports from versions before commits
+and permalinks were added must be regenerated once), and it cannot equal
+`output-path`, `checkpoint-path`, or `resume-from`. New, resolved, unchanged, and unknown
 counts appear in Action outputs and the job summary. Missing or failed current
 repositories make prior findings unknown rather than resolved. SARIF cannot be
 combined with `previous-report`; use JSON, TOON, text, CSV, or HTML.

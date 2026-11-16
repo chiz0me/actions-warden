@@ -889,7 +889,7 @@ describe('CLI safety contract', () => {
         schemaVersion: '1.1',
         kind: 'actions-warden-org-scan',
         toolVersion: pkg.version,
-        identity: { analysisGeneration: 2 },
+        identity: { analysisGeneration: 3 },
       });
 
       const normalRun = await execFileAsync(process.execPath, [
@@ -957,7 +957,7 @@ describe('CLI safety contract', () => {
       expect(refreshedCheckpoint).toMatchObject({
         schemaVersion: '1.1',
         toolVersion: pkg.version,
-        identity: { analysisGeneration: 2 },
+        identity: { analysisGeneration: 3 },
       });
       expect(refreshedCheckpoint.identity).not.toHaveProperty('toolVersion');
 

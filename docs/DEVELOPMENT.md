@@ -88,6 +88,7 @@ src/
     org-artifacts.js        scope-keyed organization artifacts and receipts
     org-checkpoint.js       validated atomic organization resume state
     org-schema.js           shared name/SHA patterns, severity and visibility sets, guards
+    org-source-links.js     branch links and commit-pinned permalinks for scanned files
     org-run.js              shared CLI/Action organization runner: artifacts, destination checks, scan
     org-report.js           canonical organization report document and record projections
     org-report-comparison.js validated fail-closed report change analysis
@@ -131,8 +132,9 @@ normalized action refs → GitHub resolution and ownership verification
 An organization scan follows:
 
 ```text
-repository listing → default-branch Git tree → bounded YAML blob reads
-                   → in-memory auditSources → repository aggregation
+repository listing → default-branch commit → Git tree by that tree SHA
+                   → bounded YAML blob reads → in-memory auditSources
+                   → repository aggregation (file details, permalinks)
 
 default/explicit checkpoint → identity validation → fresh tree SHA comparison
                             → reuse unchanged error-free result or rescan
@@ -193,14 +195,20 @@ Changes must preserve these boundaries:
 - Organization resume never trusts a stale result without fresh discovery and
   a matching repository identity, default branch, and tree SHA. Results with
   operational failures or parse-error findings are never reused and are always
-  rescanned.
+  rescanned. The commit and every permalink come from the current run, never
+  from a checkpoint.
+- Organization ref resolution is pinned: the default-branch commit is resolved
+  first (`commits/heads/<branch>`), the tree is read by that commit's tree SHA
+  and must match it, and only an HTTP 409 on the commit request means an empty
+  repository.
 - Organization result compatibility is controlled by
   `ORGANIZATION_ANALYSIS_GENERATION`, not by the package version. Producer
   versions remain checkpoint metadata that the next guarded atomic write
   refreshes. Only the current checkpoint schema is accepted; an older schema
   fails closed.
 - Checkpoints use guarded atomic writes, remain inside the working directory,
-  omit tokens and raw YAML, and cannot replace active policy or baseline files.
+  omit tokens, raw YAML, commits, and links, and cannot replace active policy or
+  baseline files.
 - Report directories remain dedicated and inside the working directory, reject
   symbolic links and control-file overlap, preserve unrelated regular files,
   and use a final manifest as the authoritative artifact set.

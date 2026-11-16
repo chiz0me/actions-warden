@@ -142,7 +142,12 @@ deprecating a package. A release request does not authorize those actions.
 - Incomplete organization coverage produces visible errors and status `FAIL`.
 - Organization resume requires fresh discovery and matching default-branch tree
   SHAs; never reuse failed results or parse errors. Checkpoints remain guarded,
-  atomic, and free of tokens or raw YAML.
+  atomic, and free of tokens, raw YAML, commits, and links; each run rebuilds
+  permalinks and `revision.commitSha` from the live default-branch commit.
+- Organization ref resolution is pinned: the default-branch commit is resolved
+  first, the tree is read by that commit's tree SHA and must match it, and
+  permalinks point at that commit. Only an HTTP 409 on the commit request means
+  an empty repository; every other non-200 is a repository error.
 - `ORGANIZATION_ANALYSIS_GENERATION` is the organization-result compatibility
   boundary. Increment it whenever discovery, parser, finding identity, rule
   evaluation, or persisted result semantics can change; do not increment it

@@ -61,7 +61,8 @@ Out of scope:
 - Organization checkpoints are opt-in, guarded atomic writes. They omit tokens
   and raw workflow YAML, validate analysis-generation/rule/scope/policy
   identity, and reuse an error-free result only after a fresh
-  repository/default-branch tree-SHA match. The producing package version is
+  repository/default-branch tree-SHA match. They omit commits and links, which
+  each run rebuilds from the live default-branch commit. The producing package version is
   metadata rather than a compatibility boundary. They still contain redacted
   repository and finding evidence and should be protected like organization
   reports.

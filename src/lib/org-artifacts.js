@@ -17,6 +17,7 @@ import {
 import { NAME_RE, normalizePatterns } from './org-schema.js';
 import { pathExists } from './paths.js';
 import { RULES } from '../rules/index.js';
+import { VERSION } from '../version.js';
 
 /** Preferred execution-context environment variable. */
 export const EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_CONTEXT';
@@ -130,9 +131,17 @@ export async function createOrganizationScanArtifacts({
 
 /**
  * Render the bounded stdout contract emitted after an organization file report.
+ * Run provenance (tool version and timing) appears only here, never in the
+ * deterministic report, aggregate, or manifest.
+ *
+ * @param {object} options
+ * @param {Date} options.startedAt When the run began.
+ * @param {Date} options.finishedAt When the report was written.
  */
 export function renderOrganizationScanReceipt({
   result,
+  startedAt,
+  finishedAt,
   reportPath,
   reportFormat,
   checkpointPath,
@@ -150,6 +159,12 @@ export function renderOrganizationScanReceipt({
       kind,
       command: 'org-scan',
       organization: result.organization,
+      tool: { name: 'actions-warden', version: VERSION },
+      run: {
+        startedAt: startedAt.toISOString(),
+        finishedAt: finishedAt.toISOString(),
+        durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+      },
       status: result.status,
       summary: result.summary,
       report: {

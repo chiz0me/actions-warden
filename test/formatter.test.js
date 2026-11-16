@@ -190,3 +190,74 @@ describe('summarize', () => {
     ])).toEqual({ critical: 1, high: 2, medium: 0, low: 1 });
   });
 });
+
+describe('organization source locations', () => {
+  const permalink = `https://github.com/octo-org/app/blob/${'a'.repeat(40)}`
+    + '/.github/workflows/ci.yml#L9';
+  const records = [
+    { label: 'REPOSITORY', fields: { repo: 'octo-org/app', commit: 'a'.repeat(40) } },
+    {
+      label: 'FILE',
+      fields: {
+        repo: 'octo-org/app',
+        path: '.github/workflows/ci.yml',
+        status: 'scanned',
+        findings: 1,
+        blobSha: 'b'.repeat(40),
+        bytes: 202,
+        permalink,
+      },
+    },
+    {
+      label: 'FINDING',
+      fields: {
+        id: 'aaaaaaaaaaaaaaaa',
+        type: 'unpinned-action',
+        sev: 'high',
+        file: 'octo-org/app/.github/workflows/ci.yml',
+        path: '.github/workflows/ci.yml',
+        line: 9,
+        url: 'https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L9',
+        permalink,
+      },
+    },
+  ];
+
+  it('orders CSV columns with path after file and permalink after url', () => {
+    const header = renderCsv(records, { status: 'FAIL' }).split('\r\n')[0].split(',');
+    expect(header.indexOf('path')).toBe(header.indexOf('file') + 1);
+    expect(header.indexOf('permalink')).toBe(header.indexOf('url') + 1);
+    expect(header[0]).toBe('record_type');
+  });
+
+  it('titles FILE records "Scanned files" and links permalinks like urls', () => {
+    const html = renderHtml(records, { status: 'FAIL' });
+    expect(html).toContain('Scanned files (1)');
+    expect(html).toContain(`<a href="${permalink}" target="_blank" rel="noopener noreferrer">`);
+  });
+
+  it('does not link a permalink that is not HTTPS', () => {
+    const html = renderHtml([{
+      label: 'FILE',
+      fields: { path: 'a.yml', permalink: 'javascript:alert(1)' },
+    }]);
+    expect(html).not.toContain('href="javascript:');
+    expect(html).toContain('javascript:alert(1)');
+  });
+
+  it('renders the commit, file records, and links in TOON', () => {
+    const toon = renderToon(records);
+    expect(toon).toContain(`REPOSITORY: repo=octo-org/app commit=${'a'.repeat(40)}`);
+    expect(toon).toContain('FILE: repo=octo-org/app path=.github/workflows/ci.yml status=scanned');
+    expect(toon).toContain(`permalink=${permalink}`);
+  });
+
+  it('never turns FILE records into SARIF results or message text', () => {
+    const sarif = JSON.parse(format('sarif', records, { status: 'FAIL' }));
+    const { results } = sarif.runs[0];
+    expect(results).toHaveLength(1);
+    expect(results[0].ruleId).toBe('unpinned-action');
+    expect(results[0].message.text).not.toContain('permalink');
+    expect(results[0].message.text).not.toContain('path=');
+  });
+});

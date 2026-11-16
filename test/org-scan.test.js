@@ -12,6 +12,7 @@ import {
 } from '../src/lib/org-checkpoint.js';
 import { compareOrganizationReports } from '../src/lib/org-report-comparison.js';
 import { VERSION } from '../src/version.js';
+import { MOCK_COMMIT_SHA, withCommitResolution } from './fixtures/org-fetch-helpers.js';
 
 describe('organization scan command', () => {
   let cwd;
@@ -45,7 +46,7 @@ describe('organization scan command', () => {
   });
 
   it('filters repositories and builds aggregate JSON and SARIF reports', async () => {
-    vi.stubGlobal('fetch', vi.fn(async (url) => {
+    vi.stubGlobal('fetch', vi.fn(withCommitResolution(async (url) => {
       const value = String(url);
       if (value.includes('/orgs/octo-org/repos?')) {
         return response([
@@ -79,7 +80,7 @@ describe('organization scan command', () => {
         });
       }
       return response({}, 404);
-    }));
+    })));
 
     const result = await scanOrganization({
       organization: 'octo-org',
@@ -176,7 +177,7 @@ describe('organization scan command', () => {
   });
 
   it('reports a repository limit as explicit incomplete eligible coverage', async () => {
-    vi.stubGlobal('fetch', vi.fn(async url => {
+    vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
       const value = String(url);
       if (value.includes('/orgs/octo-org/repos?')) {
         return response([repository('app'), repository('worker')]);
@@ -185,7 +186,7 @@ describe('organization scan command', () => {
         return response({ sha: treeSha, truncated: false, tree: [] });
       }
       return response({}, 404);
-    }));
+    })));
 
     const result = await scanOrganization({
       organization: 'octo-org',
@@ -218,23 +219,23 @@ describe('organization scan command', () => {
 
   it('forwards one resolved token through organization, tree, and blob requests', async () => {
     const token = 'org-scan-test-token';
-    vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    vi.stubGlobal('fetch', vi.fn(withCommitResolution(async (url, options) => {
       expect(options.headers.authorization).toBe(`Bearer ${token}`);
       const value = String(url);
       if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
       if (value.includes('/git/trees/')) return treeResponse(treeSha, workflowSha, workflow);
       if (value.endsWith(`/git/blobs/${workflowSha}`)) return blobResponse(workflowSha, workflow);
       return response({}, 404);
-    }));
+    })));
 
     const result = await scanOrganization({ organization: 'octo-org', cwd, token });
 
     expect(result.repositories).toHaveLength(1);
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(4);
   });
 
   it('continues after an inaccessible repository and reports an operational failure', async () => {
-    vi.stubGlobal('fetch', vi.fn(async url => {
+    vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
       const value = String(url);
       if (value.includes('/orgs/octo-org/repos?')) {
         return response([repository('denied'), repository('empty')]);
@@ -244,7 +245,7 @@ describe('organization scan command', () => {
         return response({ sha: treeSha, truncated: false, tree: [] });
       }
       return response({}, 404);
-    }));
+    })));
 
     const result = await scanOrganization({ organization: 'octo-org', cwd });
     expect(result.repositories).toHaveLength(2);
@@ -261,10 +262,10 @@ describe('organization scan command', () => {
   });
 
   it('rejects explicit repository filters that match no eligible repository', async () => {
-    vi.stubGlobal('fetch', vi.fn(async url => {
+    vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
       if (String(url).includes('/orgs/octo-org/repos?')) return response([repository('app')]);
       return response({}, 404);
-    }));
+    })));
     await expect(scanOrganization({
       organization: 'octo-org',
       cwd,
@@ -279,7 +280,7 @@ describe('organization scan command', () => {
       '  - octo-org/app/**',
       '',
     ].join('\n'));
-    vi.stubGlobal('fetch', vi.fn(async url => {
+    vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
       const value = String(url);
       if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
       if (value.includes('/git/trees/')) {
@@ -295,25 +296,25 @@ describe('organization scan command', () => {
         });
       }
       return response({}, 500);
-    }));
+    })));
 
     const result = await scanOrganization({ organization: 'octo-org', cwd });
     expect(result.status).toBe('OK');
     expect(result.summary.files).toBe(0);
     expect(result.summary.errors).toBe(0);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 
   it('resumes unchanged repositories without downloading blobs and emits live progress', async () => {
     const checkpointPath = 'scan-checkpoint.json';
     const token = `ghp_${'T'.repeat(36)}`;
-    vi.stubGlobal('fetch', vi.fn(async url => {
+    vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
       const value = String(url);
       if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
       if (value.includes('/git/trees/')) return treeResponse(treeSha, workflowSha, workflow);
       if (value.endsWith(`/git/blobs/${workflowSha}`)) return blobResponse(workflowSha, workflow);
       return response({}, 404);
-    }));
+    })));
 
     const initial = await scanOrganization({
       organization: 'octo-org',
@@ -339,12 +340,12 @@ describe('organization scan command', () => {
     expect(checkpointSource).not.toContain(workflow);
 
     const progress = [];
-    vi.stubGlobal('fetch', vi.fn(async url => {
+    vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
       const value = String(url);
       if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
       if (value.includes('/git/trees/')) return treeResponse(treeSha, workflowSha, workflow);
       return response({}, 500);
-    }));
+    })));
     const resumed = await scanOrganization({
       organization: 'octo-org',
       cwd,
@@ -358,7 +359,7 @@ describe('organization scan command', () => {
 
     expect(renderOrganizationScan(resumed, { format: 'json', cwd }))
       .toBe(renderOrganizationScan(initial, { format: 'json', cwd }));
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
     expect(progress).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'checkpoint-loaded', repositories: 1 }),
       expect.objectContaining({
@@ -378,12 +379,12 @@ describe('organization scan command', () => {
     const checkpoint = JSON.parse(await readFile(join(cwd, checkpointPath), 'utf8'));
     checkpoint.toolVersion = '0.3.1';
     await writeFile(join(cwd, checkpointPath), `${JSON.stringify(checkpoint)}\n`);
-    vi.stubGlobal('fetch', vi.fn(async url => {
+    vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
       const value = String(url);
       if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
       if (value.includes('/git/trees/')) return treeResponse(treeSha, workflowSha, workflow);
       return response({}, 500);
-    }));
+    })));
 
     const result = await scanOrganization({
       organization: 'octo-org',
@@ -394,7 +395,7 @@ describe('organization scan command', () => {
 
     expect(result.status).toBe('FAIL');
     expect(result.findings).toHaveLength(1);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
     const migrated = JSON.parse(await readFile(join(cwd, checkpointPath), 'utf8'));
     expect(migrated).toMatchObject({
       schemaVersion: '1.1',
@@ -403,13 +404,13 @@ describe('organization scan command', () => {
     });
   });
 
-  it('rejects generation-1 checkpoints due to analysis-generation mismatch', async () => {
+  it.each([1, 2])('rejects generation-%i checkpoints (generation mismatch)', async generation => {
     const checkpointPath = 'scan-checkpoint.json';
     vi.stubGlobal('fetch', organizationFetch({ treeSha, workflowSha, workflow }));
     await scanOrganization({ organization: 'octo-org', cwd, checkpointPath });
 
     const current = JSON.parse(await readFile(join(cwd, checkpointPath), 'utf8'));
-    current.identity.analysisGeneration = 1;
+    current.identity.analysisGeneration = generation;
     await writeFile(join(cwd, checkpointPath), `${JSON.stringify(current)}\n`);
     vi.stubGlobal('fetch', vi.fn());
 
@@ -422,7 +423,7 @@ describe('organization scan command', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it('produces different automatic artifact keys for generation 1 and generation 2', () => {
+  it('produces different automatic artifact keys for generation 2 and 3', () => {
     const baseIdentity = {
       rulesHash: 'a'.repeat(64),
       organization: 'octo-org',
@@ -439,17 +440,18 @@ describe('organization scan command', () => {
       configHash: null,
       baselineHash: null,
     };
-    const keyGen1 = createOrganizationCheckpointArtifactKey({
-      ...baseIdentity,
-      analysisGeneration: 1,
-    });
     const keyGen2 = createOrganizationCheckpointArtifactKey({
       ...baseIdentity,
       analysisGeneration: 2,
     });
-    expect(keyGen1).not.toBe(keyGen2);
-    expect(keyGen1).toMatch(/^[0-9a-f]{32}$/);
+    const keyCurrent = createOrganizationCheckpointArtifactKey({
+      ...baseIdentity,
+      analysisGeneration: ORGANIZATION_ANALYSIS_GENERATION,
+    });
+    expect(ORGANIZATION_ANALYSIS_GENERATION).toBe(3);
+    expect(keyGen2).not.toBe(keyCurrent);
     expect(keyGen2).toMatch(/^[0-9a-f]{32}$/);
+    expect(keyCurrent).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it('rejects a schema 1.0 checkpoint with an actionable error', async () => {
@@ -513,7 +515,7 @@ describe('organization scan command', () => {
     });
 
     expect(result.repositories[0].revision.treeSha).toBe(changedTreeSha);
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(4);
     expect(progress).toContainEqual(expect.objectContaining({
       type: 'repository-completed',
       reused: false,
@@ -524,7 +526,7 @@ describe('organization scan command', () => {
     const checkpointPath = 'scan-checkpoint.json';
     const appTreeSha = 'b'.repeat(40);
     const workerTreeSha = 'c'.repeat(40);
-    vi.stubGlobal('fetch', vi.fn(async url => {
+    vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
       const value = String(url);
       if (value.includes('/orgs/octo-org/repos?')) {
         return response([repository('app'), repository('worker')]);
@@ -534,7 +536,7 @@ describe('organization scan command', () => {
       }
       if (value.endsWith(`/git/blobs/${workflowSha}`)) return blobResponse(workflowSha, workflow);
       return response({}, 500);
-    }));
+    })));
 
     await expect(scanOrganization({
       organization: 'octo-org',
@@ -549,7 +551,7 @@ describe('organization scan command', () => {
     expect(interrupted.repositories.map(result => result.repository)).toEqual(['octo-org/app']);
 
     const progress = [];
-    vi.stubGlobal('fetch', vi.fn(async url => {
+    vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
       const value = String(url);
       if (value.includes('/orgs/octo-org/repos?')) {
         return response([repository('app'), repository('worker')]);
@@ -562,7 +564,7 @@ describe('organization scan command', () => {
       }
       if (value.endsWith(`/git/blobs/${workflowSha}`)) return blobResponse(workflowSha, workflow);
       return response({}, 404);
-    }));
+    })));
     const result = await scanOrganization({
       organization: 'octo-org',
       cwd,
@@ -573,7 +575,7 @@ describe('organization scan command', () => {
     });
 
     expect(result.repositories).toHaveLength(2);
-    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(fetch).toHaveBeenCalledTimes(6);
     expect(progress.filter(event => event.type === 'repository-completed'))
       .toEqual([
         expect.objectContaining({ repository: 'octo-org/app', reused: true }),
@@ -598,24 +600,24 @@ describe('organization scan command', () => {
 
   it('retries checkpointed repository failures instead of reusing them', async () => {
     const checkpointPath = 'scan-checkpoint.json';
-    vi.stubGlobal('fetch', vi.fn(async url => {
+    vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
       const value = String(url);
       if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
       if (value.includes('/git/trees/')) return response({}, 403);
       return response({}, 404);
-    }));
+    })));
     const failed = await scanOrganization({ organization: 'octo-org', cwd, checkpointPath });
     expect(failed.summary.repositoriesFailed).toBe(1);
 
     const progress = [];
-    vi.stubGlobal('fetch', vi.fn(async url => {
+    vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
       const value = String(url);
       if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
       if (value.includes('/git/trees/')) {
         return response({ sha: treeSha, truncated: false, tree: [] });
       }
       return response({}, 404);
-    }));
+    })));
     const resumed = await scanOrganization({
       organization: 'octo-org',
       cwd,
@@ -634,7 +636,7 @@ describe('organization scan command', () => {
     const checkpointPath = 'scan-checkpoint.json';
     const brokenWorkflow = 'name: [invalid yaml\n';
     const brokenWorkflowSha = 'e'.repeat(40);
-    vi.stubGlobal('fetch', vi.fn(async url => {
+    vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
       const value = String(url);
       if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
       if (value.includes('/repos/octo-org/app/git/trees/')) {
@@ -644,12 +646,12 @@ describe('organization scan command', () => {
         return blobResponse(brokenWorkflowSha, brokenWorkflow);
       }
       return response({}, 404);
-    }));
+    })));
     const initial = await scanOrganization({ organization: 'octo-org', cwd, checkpointPath });
     expect(initial.findings.some(f => f.ruleId === 'parse-error')).toBe(true);
 
     const progress = [];
-    vi.stubGlobal('fetch', vi.fn(async url => {
+    vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
       const value = String(url);
       if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
       if (value.includes('/repos/octo-org/app/git/trees/')) {
@@ -659,7 +661,7 @@ describe('organization scan command', () => {
         return blobResponse(workflowSha, workflow);
       }
       return response({}, 404);
-    }));
+    })));
     const resumed = await scanOrganization({
       organization: 'octo-org',
       cwd,
@@ -762,6 +764,261 @@ describe('organization scan command', () => {
     })).rejects.toThrow(/cannot replace the active config/);
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  describe('commit, file details, and permalinks', () => {
+    const permalinkBase = `https://github.com/octo-org/app/blob/${MOCK_COMMIT_SHA}`;
+
+    async function checkpointDocument(checkpointPath) {
+      vi.stubGlobal('fetch', organizationFetch({ treeSha, workflowSha, workflow }));
+      await scanOrganization({ organization: 'octo-org', cwd, checkpointPath });
+      return JSON.parse(await readFile(join(cwd, checkpointPath), 'utf8'));
+    }
+
+    async function expectResumeRejected(checkpointPath, message) {
+      vi.stubGlobal('fetch', vi.fn());
+      await expect(scanOrganization({
+        organization: 'octo-org',
+        cwd,
+        checkpointPath,
+        resume: true,
+      })).rejects.toThrow(message);
+      expect(fetch).not.toHaveBeenCalled();
+    }
+
+    it('records the commit, per-file details, and permalinks beside unchanged URLs', async () => {
+      vi.stubGlobal('fetch', organizationFetch({ treeSha, workflowSha, workflow }));
+      const result = await scanOrganization({ organization: 'octo-org', cwd });
+      const [repositoryResult] = result.repositories;
+
+      expect(repositoryResult.revision).toEqual({
+        branch: 'main',
+        treeSha,
+        commitSha: MOCK_COMMIT_SHA,
+      });
+      expect(repositoryResult.files).toEqual(['.github/workflows/ci.yml']);
+      expect(repositoryResult.fileDetails).toEqual([{
+        path: '.github/workflows/ci.yml',
+        blobSha: workflowSha,
+        bytes: Buffer.byteLength(workflow),
+        status: 'scanned',
+        findings: 1,
+        permalink: `${permalinkBase}/.github/workflows/ci.yml`,
+      }]);
+      expect(result.findings[0]).toMatchObject({
+        path: '.github/workflows/ci.yml',
+        blobSha: workflowSha,
+        url: 'https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L9',
+        permalink: `${permalinkBase}/.github/workflows/ci.yml#L9`,
+      });
+      expect(repositoryResult.findings[0]).toEqual(result.findings[0]);
+    });
+
+    it('encodes link paths and omits the line fragment when there is no line', async () => {
+      const brokenName = '.github/workflows/my flow#1.yml';
+      const broken = 'name: [unclosed\n';
+      vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
+        const value = String(url);
+        if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
+        if (value.includes('/git/trees/')) {
+          return response({
+            sha: treeSha,
+            truncated: false,
+            tree: [{
+              path: brokenName,
+              type: 'blob',
+              sha: workflowSha,
+              size: Buffer.byteLength(broken),
+            }],
+          });
+        }
+        if (value.endsWith(`/git/blobs/${workflowSha}`)) return blobResponse(workflowSha, broken);
+        return response({}, 404);
+      })));
+
+      const result = await scanOrganization({ organization: 'octo-org', cwd });
+      const encoded = `${permalinkBase}/.github/workflows/my%20flow%231.yml`;
+      expect(result.repositories[0].fileDetails[0]).toMatchObject({
+        status: 'parse-error',
+        findings: 1,
+        permalink: encoded,
+      });
+      expect(result.findings[0])
+        .toMatchObject({ ruleId: 'parse-error', line: 0, permalink: encoded });
+    });
+
+    it('lists unreadable workflow files with their tree size and a permalink', async () => {
+      vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
+        const value = String(url);
+        if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
+        if (value.includes('/git/trees/')) return treeResponse(treeSha, workflowSha, workflow);
+        return response({}, 404);
+      })));
+
+      const result = await scanOrganization({ organization: 'octo-org', cwd });
+      const [repositoryResult] = result.repositories;
+      expect(repositoryResult.files).toEqual([]);
+      expect(repositoryResult.fileDetails).toEqual([{
+        path: '.github/workflows/ci.yml',
+        blobSha: workflowSha,
+        bytes: Buffer.byteLength(workflow),
+        status: 'unreadable',
+        findings: 0,
+        permalink: `${permalinkBase}/.github/workflows/ci.yml`,
+      }]);
+      expect(repositoryResult.errors[0]).toMatchObject({
+        path: '.github/workflows/ci.yml',
+        permalink: `${permalinkBase}/.github/workflows/ci.yml`,
+      });
+      expect(result.status).toBe('FAIL');
+    });
+
+    it('reports a resumed repository against the live commit, like a fresh scan', async () => {
+      const checkpointPath = 'scan-checkpoint.json';
+      await checkpointDocument(checkpointPath);
+      const liveCommit = 'e'.repeat(40);
+      const treeOnly = async url => {
+        const value = String(url);
+        if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
+        if (value.includes('/git/trees/')) return treeResponse(treeSha, workflowSha, workflow);
+        return response({}, 500);
+      };
+
+      vi.stubGlobal('fetch', vi.fn(withCommitResolution(treeOnly, liveCommit)));
+      const resumed = await scanOrganization({
+        organization: 'octo-org',
+        cwd,
+        checkpointPath,
+        resume: true,
+      });
+      expect(fetch).toHaveBeenCalledTimes(3);
+
+      vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
+        const value = String(url);
+        if (value.endsWith(`/git/blobs/${workflowSha}`)) return blobResponse(workflowSha, workflow);
+        return treeOnly(url);
+      }, liveCommit)));
+      const fresh = await scanOrganization({ organization: 'octo-org', cwd });
+
+      expect(resumed.repositories[0].revision.commitSha).toBe(liveCommit);
+      expect(resumed.findings[0].permalink).toBe(
+        `https://github.com/octo-org/app/blob/${liveCommit}/.github/workflows/ci.yml#L9`,
+      );
+      expect(renderOrganizationScan(resumed, { format: 'json', cwd }))
+        .toBe(renderOrganizationScan(fresh, { format: 'json', cwd }));
+    });
+
+    it('stores file details without links or commits and no derived finding fields', async () => {
+      const checkpoint = await checkpointDocument('scan-checkpoint.json');
+      const source = JSON.stringify(checkpoint);
+      expect(source).not.toContain(MOCK_COMMIT_SHA);
+      expect(source).not.toContain('commitSha');
+      expect(source).not.toContain('permalink');
+
+      const [stored] = checkpoint.repositories;
+      expect(stored.fileDetails).toEqual([{
+        path: '.github/workflows/ci.yml',
+        blobSha: workflowSha,
+        bytes: Buffer.byteLength(workflow),
+        status: 'scanned',
+        findings: 1,
+      }]);
+      for (const derived of ['repository', 'branch', 'url', 'path', 'blobSha', 'permalink']) {
+        expect(stored.findings[0]).not.toHaveProperty(derived);
+      }
+    });
+
+    it.each([
+      ['are missing', checkpoint => { delete checkpoint.repositories[0].fileDetails; },
+        /invalid checkpoint fileDetails for octo-org\/app/],
+      ['repeat a path', checkpoint => {
+        const [detail] = checkpoint.repositories[0].fileDetails;
+        checkpoint.repositories[0].fileDetails.push({ ...detail });
+      }, /duplicate checkpoint fileDetails path/],
+      ['are out of order', checkpoint => {
+        const [detail] = checkpoint.repositories[0].fileDetails;
+        checkpoint.repositories[0].fileDetails.unshift({
+          ...detail,
+          path: '.github/workflows/z.yml',
+        });
+      }, /checkpoint fileDetails are not ordered/],
+      ['carry an unknown key', checkpoint => {
+        checkpoint.repositories[0].fileDetails[0].permalink = 'https://example.com/';
+      }, /invalid checkpoint fileDetails entry/],
+      ['use an unknown status', checkpoint => {
+        checkpoint.repositories[0].fileDetails[0].status = 'skipped';
+      }, /invalid checkpoint fileDetails entry/],
+      ['have a negative size', checkpoint => {
+        checkpoint.repositories[0].fileDetails[0].bytes = -1;
+      }, /invalid checkpoint fileDetails entry/],
+      ['have a malformed blob SHA', checkpoint => {
+        checkpoint.repositories[0].fileDetails[0].blobSha = 'xyz';
+      }, /invalid checkpoint fileDetails entry/],
+      ['name a non-workflow path', checkpoint => {
+        checkpoint.repositories[0].fileDetails[0].path = 'README.md';
+      }, /invalid checkpoint fileDetails entry/],
+      ['miscount findings', checkpoint => {
+        checkpoint.repositories[0].fileDetails[0].findings = 0;
+      }, /inconsistent checkpoint fileDetails/],
+      ['omit a scanned file', checkpoint => {
+        checkpoint.repositories[0].fileDetails = [];
+      }, /inconsistent checkpoint fileDetails/],
+      ['mark a scanned file unreadable', checkpoint => {
+        checkpoint.repositories[0].fileDetails[0].status = 'unreadable';
+      }, /inconsistent checkpoint fileDetails/],
+      ['claim a parse error without a finding', checkpoint => {
+        checkpoint.repositories[0].fileDetails[0].status = 'parse-error';
+      }, /inconsistent checkpoint fileDetails/],
+    ])('rejects a checkpoint whose file details %s', async (_name, tamper, message) => {
+      const checkpointPath = 'scan-checkpoint.json';
+      const checkpoint = await checkpointDocument(checkpointPath);
+      tamper(checkpoint);
+      await writeFile(join(cwd, checkpointPath), `${JSON.stringify(checkpoint)}\n`);
+      await expectResumeRejected(checkpointPath, message);
+    });
+
+    it('rejects a generation 2 checkpoint that predates file details', async () => {
+      const checkpointPath = 'scan-checkpoint.json';
+      const checkpoint = await checkpointDocument(checkpointPath);
+      checkpoint.identity.analysisGeneration = 2;
+      for (const stored of checkpoint.repositories) delete stored.fileDetails;
+      await writeFile(join(cwd, checkpointPath), `${JSON.stringify(checkpoint)}\n`);
+      await expectResumeRejected(checkpointPath, /does not match current analysisGeneration/);
+    });
+
+    it('accepts workflow names ordered by code unit, not locale', async () => {
+      const names = ['.github/workflows/B.yml', '.github/workflows/a.yml'];
+      vi.stubGlobal('fetch', vi.fn(withCommitResolution(async url => {
+        const value = String(url);
+        if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
+        if (value.includes('/git/trees/')) {
+          return response({
+            sha: treeSha,
+            truncated: false,
+            tree: names.map((path, index) => ({
+              path,
+              type: 'blob',
+              sha: String(index + 1).repeat(40),
+              size: Buffer.byteLength(workflow),
+            })),
+          });
+        }
+        return blobResponse(value.split('/git/blobs/')[1], workflow);
+      })));
+      const checkpointPath = 'mixed-case.json';
+      const first = await scanOrganization({ organization: 'octo-org', cwd, checkpointPath });
+      expect(first.repositories[0].files).toEqual(names);
+      expect(first.repositories[0].fileDetails.map(detail => detail.path)).toEqual(names);
+
+      const resumed = await scanOrganization({
+        organization: 'octo-org',
+        cwd,
+        checkpointPath,
+        resume: true,
+      });
+      expect(renderOrganizationScan(resumed, { format: 'json', cwd }))
+        .toBe(renderOrganizationScan(first, { format: 'json', cwd }));
+    });
+  });
 });
 
 function repository(name, overrides = {}) {
@@ -807,13 +1064,13 @@ function blobResponse(sha, source) {
 }
 
 function organizationFetch({ treeSha: revision, workflowSha: blobSha, workflow: source }) {
-  return vi.fn(async url => {
+  return vi.fn(withCommitResolution(async url => {
     const value = String(url);
     if (value.includes('/orgs/octo-org/repos?')) return response([repository('app')]);
     if (value.includes('/git/trees/')) return treeResponse(revision, blobSha, source);
     if (value.endsWith(`/git/blobs/${blobSha}`)) return blobResponse(blobSha, source);
     return response({}, 404);
-  });
+  }));
 }
 
 function asSchema10Checkpoint(checkpoint) {

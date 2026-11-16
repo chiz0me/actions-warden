@@ -19,6 +19,7 @@ const CSV_PREFERRED_COLUMNS = Object.freeze([
   'repo',
   'repository',
   'file',
+  'path',
   'line',
   'id',
   'type',
@@ -36,6 +37,7 @@ const CSV_PREFERRED_COLUMNS = Object.freeze([
   'msg',
   'explain',
   'url',
+  'permalink',
 ]);
 
 /**
@@ -482,6 +484,7 @@ function renderHtmlGroup(label, records) {
 function recordGroupTitle(label) {
   const names = new Map([
     ['REPOSITORY', 'Repository breakdown'],
+    ['FILE', 'Scanned files'],
     ['FINDING', 'Findings'],
     ['ERROR', 'Operational errors'],
     ['WARNING', 'Warnings'],
@@ -497,7 +500,7 @@ function recordGroupTitle(label) {
 function renderHtmlCell(key, value) {
   if (value === undefined) return '';
   if (['severity', 'sev', 'status', 'change'].includes(key)) return renderBadge(value);
-  if (key === 'url' && safeHttpsUrl(value)) {
+  if ((key === 'url' || key === 'permalink') && safeHttpsUrl(value)) {
     return `<a href="${escapeHtml(value)}" target="_blank" rel="noopener noreferrer">${escapeHtml(value)}</a>`;
   }
   return `<code>${escapeHtml(value)}</code>`;
@@ -668,7 +671,9 @@ function sarifLevel(severity) {
 
 function summarizeFields(label, fields) {
   const details = Object.entries(fields)
-    .filter(([key, value]) => !['id', 'file', 'line'].includes(key) && value != null && value !== '')
+    .filter(([key, value]) => (
+      !['id', 'file', 'line', 'path', 'permalink'].includes(key) && value != null && value !== ''
+    ))
     .map(([key, value]) => `${key}=${String(value)}`)
     .join(' ');
   return `${label}: ${details}`;

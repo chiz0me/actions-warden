@@ -45,6 +45,7 @@ const REPOSITORIES = [
   {
     name: 'app',
     treeSha: '1'.repeat(40),
+    commitSha: 'a'.repeat(40),
     files: [
       { path: '.github/workflows/ci.yml', content: CI_WORKFLOW },
       { path: '.github/workflows/lint.yml', content: CLEAN_WORKFLOW },
@@ -55,14 +56,16 @@ const REPOSITORIES = [
   {
     name: 'broken',
     treeSha: '2'.repeat(40),
+    commitSha: 'b'.repeat(40),
     files: [{ path: '.github/workflows/bad.yml', content: INVALID_WORKFLOW }],
   },
   {
     name: 'clean',
     treeSha: '3'.repeat(40),
+    commitSha: 'c'.repeat(40),
     files: [{ path: '.github/workflows/build.yml', content: CLEAN_WORKFLOW }],
   },
-  { name: 'empty', treeSha: null, files: [] },
+  { name: 'empty', treeSha: null, commitSha: null, files: [] },
 ];
 
 /**
@@ -77,11 +80,12 @@ export function createGoldenFetch() {
       return jsonResponse(REPOSITORIES.map(repositoryRecord));
     }
     const match = new RegExp(
-      `/repos/${GOLDEN_ORGANIZATION}/([^/]+)/git/(trees|blobs)/([^?]+)`,
+      `/repos/${GOLDEN_ORGANIZATION}/([^/]+)/(commits/heads|git/trees|git/blobs)/([^?]+)`,
     ).exec(value);
     const repository = REPOSITORIES.find(candidate => candidate.name === match?.[1]);
     if (!repository) return jsonResponse({}, 404);
-    if (match[2] === 'trees') return treeResponse(repository);
+    if (match[2] === 'commits/heads') return commitResponse(repository);
+    if (match[2] === 'git/trees') return treeResponse(repository, match[3]);
     return blobResponse(repository, match[3]);
   };
 }
@@ -101,10 +105,18 @@ function repositoryRecord({ name }) {
   };
 }
 
-function treeResponse(repository) {
-  if (repository.treeSha === null) {
+function commitResponse(repository) {
+  if (repository.commitSha === null) {
     return jsonResponse({ message: 'Git Repository is empty.' }, 409);
   }
+  return jsonResponse({
+    sha: repository.commitSha,
+    commit: { tree: { sha: repository.treeSha } },
+  });
+}
+
+function treeResponse(repository, requestedTreeSha) {
+  if (requestedTreeSha !== repository.treeSha) return jsonResponse({ message: 'Not Found' }, 404);
   return jsonResponse({
     sha: repository.treeSha,
     truncated: false,
