@@ -20705,7 +20705,7 @@ function blobUrl(repository, ref, path, line) {
 ;// CONCATENATED MODULE: ./src/version.js
 // Runtime version embedded in the GitHub Action bundle. The version-sync check
 // keeps this value aligned with package.json, the lockfile, and plugin metadata.
-const version_VERSION = '0.6.0';
+const version_VERSION = '0.6.1';
 
 ;// CONCATENATED MODULE: ./src/lib/org-checkpoint.js
 /**
