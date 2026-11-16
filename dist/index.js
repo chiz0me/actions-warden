@@ -20615,6 +20615,192 @@ function org_checkpoint_isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+;// CONCATENATED MODULE: ./src/lib/org-report.js
+/**
+ * Canonical organization report document.
+ *
+ * The public JSON document is assembled once here. Every serialization,
+ * comparison, and report-directory artifact is derived from it so the formats
+ * cannot drift apart.
+ */
+
+
+
+
+
+/**
+ * Build the plain, credential-redacted public document for an organization
+ * scan result. Paths are repository-relative to `cwd` and the value is safe to
+ * serialize with `JSON.stringify`.
+ *
+ * @param {object} result Value returned by `scanOrganization`.
+ * @param {{cwd?: string, comparison?: object}} [options]
+ * @returns {object}
+ */
+function buildOrganizationReport(result, {
+  cwd = process.cwd(),
+  comparison = result.comparison,
+} = {}) {
+  const report = {
+    schemaVersion: '1.0',
+    organization: result.organization,
+    analysis: result.analysis,
+    scope: result.scope,
+    coverage: result.coverage,
+    repositories: result.repositories.map(repositoryResult => ({
+      repository: repositoryResult.repository,
+      revision: repositoryResult.revision,
+      files: repositoryResult.files,
+      findings: repositoryResult.findings.map(finding => normalizeFinding(finding, cwd)),
+      errors: repositoryResult.errors,
+      summary: repositoryResult.summary,
+      status: repositoryResult.status,
+    })),
+    findings: result.findings.map(finding => normalizeFinding(finding, cwd)),
+    errors: result.errors,
+    summary: result.summary,
+    baseline: {
+      ...result.baseline,
+      path: result.baseline.path ? identity_canonicalPath(result.baseline.path, cwd) : null,
+    },
+    configPath: result.configPath ? identity_canonicalPath(result.configPath, cwd) : null,
+    ...(comparison ? { comparison } : {}),
+    status: result.status,
+  };
+  return JSON.parse(JSON.stringify(redactDeep(report)));
+}
+
+/**
+ * Project a report document into the labeled records shared by the TOON, text,
+ * CSV, SARIF, and HTML renderers, together with the HTML title and metadata.
+ *
+ * @param {ReturnType<typeof buildOrganizationReport>} report
+ * @param {{format: 'toon'|'text'|'csv'|'sarif'|'html'}} options
+ * @returns {{records: Array<{label: string, fields: Record<string, unknown>}>,
+ *   title: string, metadata: Record<string, unknown>}}
+ */
+function organizationReportRecords(report, { format }) {
+  const records = [];
+  if (format === 'sarif') {
+    for (const rule of listRules()) records.push({ label: 'RULE', fields: rule });
+  }
+  for (const repositoryResult of report.repositories) {
+    appendRepositoryRecords(records, repositoryResult, format);
+  }
+  records.push({
+    label: 'COVERAGE',
+    fields: {
+      complete: report.coverage.complete,
+      enumerationComplete: report.coverage.enumerationComplete,
+      selectedRepositoriesComplete: report.coverage.selectedRepositoriesComplete,
+      eligibleRepositoriesComplete: report.coverage.eligibleRepositoriesComplete,
+      limitedByMaxRepositories: report.coverage.limitedByMaxRepositories,
+      repositoriesOmittedByLimit: report.coverage.repositoriesOmittedByLimit,
+      incompleteRepositories: report.coverage.incompleteRepositories.length,
+    },
+  });
+  if (report.comparison) appendComparisonRecords(records, report.comparison);
+  records.push({
+    label: 'SUMMARY',
+    fields: { organization: report.organization, ...report.summary },
+  });
+  return {
+    records,
+    title: `Organization scan: ${report.organization}`,
+    metadata: reportMetadata(report),
+  };
+}
+
+function appendRepositoryRecords(records, repositoryResult, format) {
+  records.push({
+    label: 'REPOSITORY',
+    fields: {
+      repo: repositoryResult.repository.fullName,
+      visibility: repositoryResult.repository.visibility,
+      branch: repositoryResult.revision.branch,
+      files: repositoryResult.files.length,
+      findings: repositoryResult.findings.length,
+      errors: repositoryResult.errors.length,
+      status: repositoryResult.status,
+    },
+  });
+  for (const finding of repositoryResult.findings) {
+    records.push({
+      label: 'FINDING',
+      fields: {
+        id: finding.id,
+        ...finding.fields,
+        repo: finding.repository,
+        file: finding.file,
+        line: finding.line,
+        url: finding.url,
+        ...(finding.explain ? { explain: finding.explain } : {}),
+        ...(format === 'sarif' && finding.fingerprint
+          ? { fingerprint: finding.fingerprint }
+          : {}),
+      },
+    });
+  }
+  for (const error of repositoryResult.errors) {
+    records.push({
+      label: 'ERROR',
+      fields: {
+        repo: error.repository,
+        file: error.path ? `${error.repository}/${error.path}` : undefined,
+        msg: error.error,
+      },
+    });
+  }
+}
+
+function appendComparisonRecords(records, comparison) {
+  records.push({ label: 'COMPARISON', fields: comparison.summary });
+  for (const [change, findings] of Object.entries(comparison.findings)) {
+    for (const finding of findings) {
+      records.push({
+        label: `${change.toUpperCase()}_FINDING`,
+        fields: {
+          ...finding.fields,
+          id: finding.id,
+          change,
+          type: finding.ruleId,
+          sev: finding.severity,
+          repo: finding.repository,
+          file: finding.file,
+          line: finding.line,
+          url: finding.url,
+          explain: finding.explain,
+        },
+      });
+    }
+  }
+}
+
+function reportMetadata(report) {
+  return {
+    organization: report.organization,
+    analysisGeneration: report.analysis.generation,
+    visibility: report.scope.visibility,
+    repositoryFilters: report.scope.repositories.length > 0
+      ? report.scope.repositories.join(', ')
+      : 'all eligible repositories',
+    includeArchived: report.scope.includeArchived,
+    includeDisabled: report.scope.includeDisabled,
+    includeForks: report.scope.includeForks,
+    maxRepositories: report.scope.maxRepositories ?? 'none',
+    severity: report.scope.severity ?? 'all levels',
+    baseline: report.baseline.path ?? 'none',
+    coverageComplete: report.coverage.complete,
+  };
+}
+
+function normalizeFinding(finding, cwd) {
+  return {
+    ...finding,
+    file: identity_canonicalPath(finding.file, cwd),
+  };
+}
+
 ;// CONCATENATED MODULE: ./src/lib/path-equality.js
 
 
@@ -20652,6 +20838,7 @@ function comparablePath(path) {
  * Organization scan command - enumerate repositories through the GitHub API,
  * fetch workflow YAML from each default branch, and aggregate audit findings.
  */
+
 
 
 
@@ -20710,29 +20897,149 @@ async function scanOrganization({
   resume = false,
   onProgress,
 } = {}) {
+  const settings = validateScanOptions({
+    organization,
+    cwd,
+    token,
+    repositories,
+    visibility,
+    includeArchived,
+    includeDisabled,
+    includeForks,
+    maxRepositories,
+    concurrency,
+    severity,
+    explain,
+    configPath,
+    baseline,
+    checkpointPath,
+    resume,
+    onProgress,
+  });
+  const startedAt = Date.now();
+  await emitProgress(onProgress, { type: 'scan-started', organization });
+  const environment = await prepareScanEnvironment(settings);
+  const loadedCheckpoint = await loadResumeState(settings, environment);
+  const selection = await selectScanRepositories(settings, environment);
+  const checkpoint = await openCheckpoint(settings, environment, loadedCheckpoint, selection);
+  const state = { settings, environment, loadedCheckpoint, selection, checkpoint };
+  const counters = await scanSelectedRepositories(state);
+
+  const result = assembleOrganizationResult(state, counters.repositoryResults);
+  await emitProgress(onProgress, {
+    type: 'scan-completed',
+    organization,
+    status: result.status,
+    total: selection.selected.length,
+    completed: counters.completed,
+    reused: counters.reused,
+    findings: result.summary.findings,
+    errors: result.summary.errors,
+    elapsedMs: Date.now() - startedAt,
+  });
+  return result;
+}
+
+/**
+ * Render an organization scan result with repository-relative paths and the
+ * selected public serialization contract.
+ *
+ * @param {Awaited<ReturnType<typeof scanOrganization>>} result
+ * @param {{format: 'toon'|'json'|'text'|'csv'|'sarif'|'html', cwd?: string,
+ *   comparison?: object}} options
+ * @returns {string}
+ */
+function renderOrganizationScan(result, {
+  format: outputFormat,
+  cwd = process.cwd(),
+  comparison = result.comparison,
+}) {
+  const report = buildOrganizationReport(result, { cwd, comparison });
+  if (outputFormat === 'json') {
+    return formatter_format('json', [], { status: report.status, json: report });
+  }
+  const { records, title, metadata } = organizationReportRecords(report, {
+    format: outputFormat,
+  });
+  return formatter_format(outputFormat, records, { status: report.status, title, metadata });
+}
+
+function validateScanOptions(settings) {
+  assertOrganizationName(settings.organization);
+  if (!VISIBILITIES.has(settings.visibility)) {
+    throw new Error(`invalid visibility: ${settings.visibility}`);
+  }
+  assertConcurrency(settings.concurrency);
+  assertMaxRepositories(settings.maxRepositories);
+  assertCheckpointOptions(settings.checkpointPath, settings.resume);
+  if (settings.onProgress !== undefined && typeof settings.onProgress !== 'function') {
+    throw new Error('onProgress must be a function');
+  }
+  return settings;
+}
+
+function assertOrganizationName(organization) {
   if (
     typeof organization !== 'string'
     || !ORGANIZATION_RE.test(organization)
     || organization === '.'
     || organization === '..'
   ) throw new Error('invalid organization');
-  if (!VISIBILITIES.has(visibility)) throw new Error(`invalid visibility: ${visibility}`);
+}
+
+function assertConcurrency(concurrency) {
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16) {
     throw new Error('concurrency must be an integer from 1 to 16');
   }
-  if (maxRepositories !== undefined && (!Number.isInteger(maxRepositories) || maxRepositories < 1)) {
-    throw new Error('max repositories must be a positive integer');
-  }
+}
+
+function assertMaxRepositories(maxRepositories) {
+  if (
+    maxRepositories !== undefined
+    && (!Number.isInteger(maxRepositories) || maxRepositories < 1)
+  ) throw new Error('max repositories must be a positive integer');
+}
+
+function assertCheckpointOptions(checkpointPath, resume) {
   if (checkpointPath !== undefined && (typeof checkpointPath !== 'string' || !checkpointPath)) {
     throw new Error('checkpoint path must be a non-empty string');
   }
   if (typeof resume !== 'boolean') throw new Error('resume must be a boolean');
   if (resume && !checkpointPath) throw new Error('resume requires a checkpoint path');
-  if (onProgress !== undefined && typeof onProgress !== 'function') {
-    throw new Error('onProgress must be a function');
-  }
-  const startedAt = Date.now();
-  await emitProgress(onProgress, { type: 'scan-started', organization });
+}
+
+async function loadResumeState(settings, environment) {
+  const { cwd, checkpointPath, resume, onProgress } = settings;
+  if (!resume) return { results: new Map(), migrationRequired: false };
+  const loadedCheckpoint = await loadOrganizationCheckpoint({
+    path: checkpointPath,
+    cwd,
+    identity: environment.checkpointIdentity,
+  });
+  await emitProgress(onProgress, {
+    type: 'checkpoint-loaded',
+    repositories: loadedCheckpoint.results.size,
+  });
+  return loadedCheckpoint;
+}
+
+async function prepareScanEnvironment(settings) {
+  const {
+    organization,
+    cwd,
+    token,
+    repositories,
+    visibility,
+    includeArchived,
+    includeDisabled,
+    includeForks,
+    maxRepositories,
+    severity,
+    explain,
+    configPath,
+    baseline,
+    checkpointPath,
+  } = settings;
   const patterns = normalizePatterns(repositories);
   const resolvedToken = resolveToken(token);
   const config = await loadConfig({
@@ -20764,15 +21071,21 @@ async function scanOrganization({
     config,
     baselineData,
   });
-  const loadedCheckpoint = resume
-    ? await loadOrganizationCheckpoint({ path: checkpointPath, cwd, identity: checkpointIdentity })
-    : { results: new Map(), migrationRequired: false };
-  if (resume) {
-    await emitProgress(onProgress, {
-      type: 'checkpoint-loaded',
-      repositories: loadedCheckpoint.results.size,
-    });
-  }
+  return { patterns, resolvedToken, config, baselineData, checkpointIdentity };
+}
+
+async function selectScanRepositories(settings, environment) {
+  const {
+    organization,
+    cwd,
+    includeArchived,
+    includeDisabled,
+    includeForks,
+    maxRepositories,
+    visibility,
+    onProgress,
+  } = settings;
+  const { patterns, resolvedToken } = environment;
   await emitProgress(onProgress, { type: 'discovery-started', organization });
   const discovered = await listOrganizationRepositories({
     organization,
@@ -20809,174 +21122,254 @@ async function scanOrganization({
     eligible: eligible.length,
     selected: selected.length,
   });
+  return { discovered, eligible, selected };
+}
 
-  const checkpointResults = new Map();
-  for (const repository of selected) {
+async function openCheckpoint(settings, environment, loadedCheckpoint, selection) {
+  const { cwd, checkpointPath, resume, onProgress } = settings;
+  const results = new Map();
+  for (const repository of selection.selected) {
     const stored = loadedCheckpoint.results.get(repository.fullName.toLowerCase());
     if (!stored) continue;
-    checkpointResults.set(repository.fullName.toLowerCase(), restoreCheckpointResult(stored, {
+    results.set(repository.fullName.toLowerCase(), restoreCheckpointResult(stored, {
       repository,
       cwd,
       sourceUrl,
     }));
   }
-  const persistCheckpoint = createCheckpointWriter({
+  const persist = createCheckpointWriter({
     path: checkpointPath,
     cwd,
-    identity: checkpointIdentity,
-    results: checkpointResults,
+    identity: environment.checkpointIdentity,
+    results,
   });
   if (checkpointPath && (!resume || loadedCheckpoint.migrationRequired)) {
-    await persistCheckpoint();
+    await persist();
     if (!resume) await emitProgress(onProgress, { type: 'checkpoint-created' });
   }
+  return { results, persist };
+}
 
-  let completed = 0;
-  let reused = 0;
-  let active = 0;
-  const repositoryResults = await mapLimit(selected, concurrency, async (repository, index) => {
-    active += 1;
-    await emitProgress(onProgress, {
-      type: 'repository-started',
-      repository: repository.fullName,
-      position: index + 1,
-      total: selected.length,
-      completed,
-      active,
-      concurrency,
-    });
-    const emitPhase = phase => emitProgress(onProgress, {
-      type: 'repository-phase',
-      repository: repository.fullName,
-      position: index + 1,
-      total: selected.length,
-      completed,
-      active,
-      concurrency,
-      phase,
-    });
-    let repositoryResult;
-    let wasReused = false;
-    try {
-      await emitPhase('reading default-branch tree');
-      const workflowTree = await fetchRepositoryWorkflowTree({
-        repository,
-        token: resolvedToken,
-        cwd,
-        includePath: path => filterIgnoredPaths([
-          virtualPath(cwd, repository, path),
-        ], config, cwd).length > 0,
-        onRetry: retry => emitRetryProgress(onProgress, retry, repository.fullName),
-      });
-      const stored = loadedCheckpoint.results.get(repository.fullName.toLowerCase());
-      await emitPhase('checking resumable evidence');
-      if (stored && canReuseCheckpointResult(stored, repository, workflowTree.treeSha)) {
-        repositoryResult = restoreCheckpointResult(stored, { repository, cwd, sourceUrl });
-        wasReused = true;
-      } else {
-        await emitPhase('downloading workflow YAML');
-        const fetched = await fetchRepositoryWorkflows({
-          repository,
-          token: resolvedToken,
-          cwd,
-          workflowTree,
-          onRetry: retry => emitRetryProgress(onProgress, retry, repository.fullName),
-        });
-        const sources = fetched.sources.map(item => ({
-          file: virtualPath(cwd, repository, item.path),
-          source: item.source,
-        }));
-        await emitPhase('auditing workflows');
-        const auditResult = await auditSources({
-          cwd,
-          sources,
-          severity,
-          explain,
-          config,
-          baselineData,
-        });
-        const errors = fetched.errors.map(error => ({
-          repository: repository.fullName,
-          path: error.path,
-          error: error.error,
-        }));
-        const findings = auditResult.findings.map(finding => ({
-          ...finding,
-          repository: repository.fullName,
-          branch: repository.defaultBranch,
-          url: sourceUrl(
-            repository,
-            identity_canonicalPath(finding.file, (0,external_node_path_namespaceObject.resolve)(cwd, repository.owner, repository.name)),
-            finding.line,
-          ),
-        }));
-        repositoryResult = {
-          repository,
-          revision: {
-            branch: repository.defaultBranch,
-            treeSha: fetched.treeSha,
-          },
-          files: auditResult.files.map(file => identity_canonicalPath(
-            file,
-            (0,external_node_path_namespaceObject.resolve)(cwd, repository.owner, repository.name),
-          )),
-          findings,
-          errors,
-          summary: auditResult.summary,
-          status: auditResult.status === 'FAIL' || errors.length > 0 ? 'FAIL' : 'OK',
-        };
-      }
-    } catch (error) {
-      if (error instanceof ProgressCallbackError) throw error;
-      repositoryResult = {
-        repository,
-        revision: { branch: repository.defaultBranch, treeSha: null },
-        files: [],
-        findings: [],
-        errors: [{
-          repository: repository.fullName,
-          error: String(error.message ?? error),
-        }],
-        summary: emptySummary(),
-        status: 'FAIL',
-      };
-    }
-    if (checkpointPath) {
-      await emitPhase('writing checkpoint');
-      checkpointResults.set(repository.fullName.toLowerCase(), repositoryResult);
-      const durableRepositories = await persistCheckpoint();
-      await emitProgress(onProgress, {
-        type: 'checkpoint-written',
-        repository: repository.fullName,
-        position: index + 1,
-        total: selected.length,
-        repositories: durableRepositories,
-      });
-    }
-    completed += 1;
-    if (wasReused) reused += 1;
-    active -= 1;
-    await emitProgress(onProgress, {
-      type: 'repository-completed',
-      repository: repository.fullName,
-      position: index + 1,
-      total: selected.length,
-      completed,
-      reused: wasReused,
-      status: repositoryResult.status,
-      files: repositoryResult.files.length,
-      findings: repositoryResult.findings.length,
-      errors: repositoryResult.errors.length,
-      active,
-      concurrency,
-    });
-    return repositoryResult;
+async function scanSelectedRepositories(state) {
+  const { settings, selection } = state;
+  const counters = { completed: 0, reused: 0, active: 0 };
+  const repositoryResults = await mapLimit(
+    selection.selected,
+    settings.concurrency,
+    (repository, index) => processRepository(state, counters, repository, index),
+  );
+  return { ...counters, repositoryResults };
+}
+
+async function processRepository(state, counters, repository, index) {
+  const { settings, selection, checkpoint } = state;
+  const { onProgress, checkpointPath, concurrency } = settings;
+  const total = selection.selected.length;
+  counters.active += 1;
+  await emitProgress(onProgress, {
+    type: 'repository-started',
+    repository: repository.fullName,
+    position: index + 1,
+    total,
+    completed: counters.completed,
+    active: counters.active,
+    concurrency,
   });
+  const emitPhase = phase => emitProgress(onProgress, {
+    type: 'repository-phase',
+    repository: repository.fullName,
+    position: index + 1,
+    total,
+    completed: counters.completed,
+    active: counters.active,
+    concurrency,
+    phase,
+  });
+  const { repositoryResult, wasReused } = await scanRepository(state, repository, emitPhase);
+  if (checkpointPath) {
+    await emitPhase('writing checkpoint');
+    checkpoint.results.set(repository.fullName.toLowerCase(), repositoryResult);
+    const durableRepositories = await checkpoint.persist();
+    await emitProgress(onProgress, {
+      type: 'checkpoint-written',
+      repository: repository.fullName,
+      position: index + 1,
+      total,
+      repositories: durableRepositories,
+    });
+  }
+  counters.completed += 1;
+  if (wasReused) counters.reused += 1;
+  counters.active -= 1;
+  await emitProgress(onProgress, {
+    type: 'repository-completed',
+    repository: repository.fullName,
+    position: index + 1,
+    total,
+    completed: counters.completed,
+    reused: wasReused,
+    status: repositoryResult.status,
+    files: repositoryResult.files.length,
+    findings: repositoryResult.findings.length,
+    errors: repositoryResult.errors.length,
+    active: counters.active,
+    concurrency,
+  });
+  return repositoryResult;
+}
 
+async function scanRepository(state, repository, emitPhase) {
+  try {
+    return await readOrReuseRepository(state, repository, emitPhase);
+  } catch (error) {
+    if (error instanceof ProgressCallbackError) throw error;
+    return {
+      repositoryResult: failedRepositoryResult(repository, error),
+      wasReused: false,
+    };
+  }
+}
+
+async function readOrReuseRepository(state, repository, emitPhase) {
+  const { settings, environment, loadedCheckpoint } = state;
+  const { cwd, onProgress } = settings;
+  const { config, resolvedToken } = environment;
+  await emitPhase('reading default-branch tree');
+  const workflowTree = await fetchRepositoryWorkflowTree({
+    repository,
+    token: resolvedToken,
+    cwd,
+    includePath: path => filterIgnoredPaths([
+      virtualPath(cwd, repository, path),
+    ], config, cwd).length > 0,
+    onRetry: retry => emitRetryProgress(onProgress, retry, repository.fullName),
+  });
+  const stored = loadedCheckpoint.results.get(repository.fullName.toLowerCase());
+  await emitPhase('checking resumable evidence');
+  if (stored && canReuseCheckpointResult(stored, repository, workflowTree.treeSha)) {
+    return {
+      repositoryResult: restoreCheckpointResult(stored, { repository, cwd, sourceUrl }),
+      wasReused: true,
+    };
+  }
+  await emitPhase('downloading workflow YAML');
+  const fetched = await fetchRepositoryWorkflows({
+    repository,
+    token: resolvedToken,
+    cwd,
+    workflowTree,
+    onRetry: retry => emitRetryProgress(onProgress, retry, repository.fullName),
+  });
+  await emitPhase('auditing workflows');
+  return {
+    repositoryResult: await auditRepositoryResult(state, repository, fetched),
+    wasReused: false,
+  };
+}
+
+async function auditRepositoryResult(state, repository, fetched) {
+  const { cwd, severity, explain } = state.settings;
+  const { config, baselineData } = state.environment;
+  const sources = fetched.sources.map(item => ({
+    file: virtualPath(cwd, repository, item.path),
+    source: item.source,
+  }));
+  const auditResult = await auditSources({
+    cwd,
+    sources,
+    severity,
+    explain,
+    config,
+    baselineData,
+  });
+  const errors = fetched.errors.map(error => ({
+    repository: repository.fullName,
+    path: error.path,
+    error: error.error,
+  }));
+  const findings = auditResult.findings.map(finding => ({
+    ...finding,
+    repository: repository.fullName,
+    branch: repository.defaultBranch,
+    url: sourceUrl(
+      repository,
+      identity_canonicalPath(finding.file, (0,external_node_path_namespaceObject.resolve)(cwd, repository.owner, repository.name)),
+      finding.line,
+    ),
+  }));
+  return {
+    repository,
+    revision: {
+      branch: repository.defaultBranch,
+      treeSha: fetched.treeSha,
+    },
+    files: auditResult.files.map(file => identity_canonicalPath(
+      file,
+      (0,external_node_path_namespaceObject.resolve)(cwd, repository.owner, repository.name),
+    )),
+    findings,
+    errors,
+    summary: auditResult.summary,
+    status: auditResult.status === 'FAIL' || errors.length > 0 ? 'FAIL' : 'OK',
+  };
+}
+
+function failedRepositoryResult(repository, error) {
+  return {
+    repository,
+    revision: { branch: repository.defaultBranch, treeSha: null },
+    files: [],
+    findings: [],
+    errors: [{
+      repository: repository.fullName,
+      error: String(error.message ?? error),
+    }],
+    summary: emptySummary(),
+    status: 'FAIL',
+  };
+}
+
+function assembleOrganizationResult(state, repositoryResults) {
+  const { settings, environment, selection } = state;
+  const { checkpointIdentity, patterns, baselineData, config } = environment;
   const findings = repositoryResults.flatMap(result => result.findings);
   const errors = repositoryResults.flatMap(result => result.errors);
-  const counts = summarize(findings);
-  const summary = {
+  const summary = summarizeRepositoryResults(selection, repositoryResults, findings, errors);
+  return {
+    organization: settings.organization,
+    analysis: {
+      generation: checkpointIdentity.analysisGeneration,
+      identity: (0,external_node_crypto_namespaceObject.createHash)('sha256')
+        .update(createOrganizationCheckpointArtifactKey(checkpointIdentity))
+        .digest('hex'),
+    },
+    scope: {
+      repositories: patterns,
+      visibility: settings.visibility,
+      includeArchived: settings.includeArchived,
+      includeDisabled: settings.includeDisabled,
+      includeForks: settings.includeForks,
+      maxRepositories: settings.maxRepositories ?? null,
+      concurrency: settings.concurrency,
+      severity: settings.severity ?? null,
+    },
+    coverage: describeCoverage(selection, repositoryResults),
+    repositories: repositoryResults,
+    findings,
+    errors,
+    summary,
+    baseline: {
+      path: baselineData.path,
+      suppressed: summary.suppressed,
+    },
+    configPath: config.path,
+    status: findings.length === 0 && errors.length === 0 ? 'OK' : 'FAIL',
+  };
+}
+
+function summarizeRepositoryResults(selection, repositoryResults, findings, errors) {
+  const { discovered, eligible, selected } = selection;
+  return {
     repositoriesDiscovered: discovered.length,
     repositoriesEligible: eligible.length,
     repositoriesSelected: selected.length,
@@ -20993,15 +21386,19 @@ async function scanOrganization({
     ),
     suppressed: repositoryResults.reduce((total, result) => total + result.summary.suppressed, 0),
     errors: errors.length,
-    ...counts,
+    ...summarize(findings),
   };
+}
+
+function describeCoverage(selection, repositoryResults) {
+  const { eligible, selected } = selection;
   const incompleteRepositories = repositoryResults
     .filter(repositoryResult => !repositoryCoverageComplete(repositoryResult))
     .map(repositoryResult => repositoryResult.repository.fullName)
     .sort((left, right) => left.localeCompare(right));
   const selectedRepositoriesComplete = incompleteRepositories.length === 0;
   const limitedByMaxRepositories = selected.length < eligible.length;
-  const coverage = {
+  return {
     complete: selectedRepositoriesComplete && !limitedByMaxRepositories,
     enumerationComplete: true,
     selectedRepositoriesComplete,
@@ -21010,200 +21407,6 @@ async function scanOrganization({
     repositoriesOmittedByLimit: eligible.length - selected.length,
     incompleteRepositories,
   };
-  const result = {
-    organization,
-    analysis: {
-      generation: checkpointIdentity.analysisGeneration,
-      identity: (0,external_node_crypto_namespaceObject.createHash)('sha256')
-        .update(createOrganizationCheckpointArtifactKey(checkpointIdentity))
-        .digest('hex'),
-    },
-    scope: {
-      repositories: patterns,
-      visibility,
-      includeArchived,
-      includeDisabled,
-      includeForks,
-      maxRepositories: maxRepositories ?? null,
-      concurrency,
-      severity: severity ?? null,
-    },
-    coverage,
-    repositories: repositoryResults,
-    findings,
-    errors,
-    summary,
-    baseline: {
-      path: baselineData.path,
-      suppressed: summary.suppressed,
-    },
-    configPath: config.path,
-    status: findings.length === 0 && errors.length === 0 ? 'OK' : 'FAIL',
-  };
-  await emitProgress(onProgress, {
-    type: 'scan-completed',
-    organization,
-    status: result.status,
-    total: selected.length,
-    completed,
-    reused,
-    findings: summary.findings,
-    errors: summary.errors,
-    elapsedMs: Date.now() - startedAt,
-  });
-  return result;
-}
-
-/**
- * Render an organization scan result with repository-relative paths and the
- * selected public serialization contract.
- *
- * @param {Awaited<ReturnType<typeof scanOrganization>>} result
- * @param {{format: 'toon'|'json'|'text'|'csv'|'sarif'|'html', cwd?: string,
- *   comparison?: object}} options
- * @returns {string}
- */
-function renderOrganizationScan(result, {
-  format: outputFormat,
-  cwd = process.cwd(),
-  comparison = result.comparison,
-}) {
-  if (outputFormat === 'json') {
-    return formatter_format('json', [], {
-      status: result.status,
-      json: {
-        schemaVersion: '1.0',
-        organization: result.organization,
-        analysis: result.analysis,
-        scope: result.scope,
-        coverage: result.coverage,
-        repositories: result.repositories.map(repositoryResult => ({
-          repository: repositoryResult.repository,
-          revision: repositoryResult.revision,
-          files: repositoryResult.files,
-          findings: repositoryResult.findings.map(finding => normalizeFinding(finding, cwd)),
-          errors: repositoryResult.errors,
-          summary: repositoryResult.summary,
-          status: repositoryResult.status,
-        })),
-        findings: result.findings.map(finding => normalizeFinding(finding, cwd)),
-        errors: result.errors,
-        summary: result.summary,
-        baseline: {
-          ...result.baseline,
-          path: result.baseline.path ? identity_canonicalPath(result.baseline.path, cwd) : null,
-        },
-        configPath: result.configPath ? identity_canonicalPath(result.configPath, cwd) : null,
-        ...(comparison ? { comparison } : {}),
-        status: result.status,
-      },
-    });
-  }
-
-  const records = [];
-  if (outputFormat === 'sarif') {
-    for (const rule of listRules()) records.push({ label: 'RULE', fields: rule });
-  }
-  for (const repositoryResult of result.repositories) {
-    records.push({
-      label: 'REPOSITORY',
-      fields: {
-        repo: repositoryResult.repository.fullName,
-        visibility: repositoryResult.repository.visibility,
-        branch: repositoryResult.revision.branch,
-        files: repositoryResult.files.length,
-        findings: repositoryResult.findings.length,
-        errors: repositoryResult.errors.length,
-        status: repositoryResult.status,
-      },
-    });
-    for (const finding of repositoryResult.findings) {
-      records.push({
-        label: 'FINDING',
-        fields: {
-          id: finding.id,
-          ...finding.fields,
-          repo: finding.repository,
-          file: identity_canonicalPath(finding.file, cwd),
-          line: finding.line,
-          url: finding.url,
-          ...(finding.explain ? { explain: finding.explain } : {}),
-          ...(outputFormat === 'sarif' && finding.fingerprint
-            ? { fingerprint: finding.fingerprint }
-            : {}),
-        },
-      });
-    }
-    for (const error of repositoryResult.errors) {
-      records.push({
-        label: 'ERROR',
-        fields: {
-          repo: error.repository,
-          file: error.path ? `${error.repository}/${error.path}` : undefined,
-          msg: error.error,
-        },
-      });
-    }
-  }
-  records.push({
-    label: 'COVERAGE',
-    fields: {
-      complete: result.coverage.complete,
-      enumerationComplete: result.coverage.enumerationComplete,
-      selectedRepositoriesComplete: result.coverage.selectedRepositoriesComplete,
-      eligibleRepositoriesComplete: result.coverage.eligibleRepositoriesComplete,
-      limitedByMaxRepositories: result.coverage.limitedByMaxRepositories,
-      repositoriesOmittedByLimit: result.coverage.repositoriesOmittedByLimit,
-      incompleteRepositories: result.coverage.incompleteRepositories.length,
-    },
-  });
-  if (comparison) appendComparisonRecords(records, comparison);
-  records.push({
-    label: 'SUMMARY',
-    fields: { organization: result.organization, ...result.summary },
-  });
-  return formatter_format(outputFormat, records, {
-    status: result.status,
-    title: `Organization scan: ${result.organization}`,
-    metadata: {
-      organization: result.organization,
-      analysisGeneration: result.analysis.generation,
-      visibility: result.scope.visibility,
-      repositoryFilters: result.scope.repositories.length > 0
-        ? result.scope.repositories.join(', ')
-        : 'all eligible repositories',
-      includeArchived: result.scope.includeArchived,
-      includeDisabled: result.scope.includeDisabled,
-      includeForks: result.scope.includeForks,
-      maxRepositories: result.scope.maxRepositories ?? 'none',
-      severity: result.scope.severity ?? 'all levels',
-      baseline: result.baseline.path ? identity_canonicalPath(result.baseline.path, cwd) : 'none',
-      coverageComplete: result.coverage.complete,
-    },
-  });
-}
-
-function appendComparisonRecords(records, comparison) {
-  records.push({ label: 'COMPARISON', fields: comparison.summary });
-  for (const [change, findings] of Object.entries(comparison.findings)) {
-    for (const finding of findings) {
-      records.push({
-        label: `${change.toUpperCase()}_FINDING`,
-        fields: {
-          ...finding.fields,
-          id: finding.id,
-          change,
-          type: finding.ruleId,
-          sev: finding.severity,
-          repo: finding.repository,
-          file: finding.file,
-          line: finding.line,
-          url: finding.url,
-          explain: finding.explain,
-        },
-      });
-    }
-  }
 }
 
 function selectRepositories(repositories, options) {
@@ -21223,17 +21426,11 @@ function selectRepositories(repositories, options) {
 
 function normalizePatterns(patterns) {
   if (patterns === undefined) return [];
-  if (!Array.isArray(patterns) || patterns.some(pattern => typeof pattern !== 'string' || !pattern)) {
-    throw new Error('repository filters must be non-empty strings');
-  }
+  if (
+    !Array.isArray(patterns)
+    || patterns.some(pattern => typeof pattern !== 'string' || !pattern)
+  ) throw new Error('repository filters must be non-empty strings');
   return [...new Set(patterns)];
-}
-
-function normalizeFinding(finding, cwd) {
-  return {
-    ...finding,
-    file: identity_canonicalPath(finding.file, cwd),
-  };
 }
 
 function sourceUrl(repository, path, line) {
@@ -23375,6 +23572,7 @@ function annotations_truncate(value, maxLength) {
 
 
 
+
 const FORMATS = new Set(['toon', 'json', 'text', 'csv', 'sarif', 'html']);
 const MODES = new Set(['major', 'minor', 'patch']);
 const action_SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
@@ -23632,10 +23830,7 @@ async function main() {
         progressReporter.close();
       }
       if (previousReport) {
-        const currentReport = JSON.parse(renderOrganizationScan(result, {
-          format: 'json',
-          cwd,
-        }));
+        const currentReport = buildOrganizationReport(result, { cwd });
         result.comparison = compareOrganizationReports({
           previous: previousReport,
           current: currentReport,

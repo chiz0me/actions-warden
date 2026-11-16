@@ -21,6 +21,7 @@ import {
   loadOrganizationReport,
 } from './lib/org-report-comparison.js';
 import { createOrganizationScanArtifacts } from './lib/agent-mode.js';
+import { buildOrganizationReport } from './lib/org-report.js';
 import { loadConfig } from './lib/config.js';
 import { loadBaseline } from './lib/baseline.js';
 import {
@@ -299,10 +300,7 @@ async function main() {
         progressReporter.close();
       }
       if (previousReport) {
-        const currentReport = JSON.parse(renderOrganizationScan(result, {
-          format: 'json',
-          cwd,
-        }));
+        const currentReport = buildOrganizationReport(result, { cwd });
         result.comparison = compareOrganizationReports({
           previous: previousReport,
           current: currentReport,

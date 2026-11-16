@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { renderOrganizationScan, scanOrganization } from '../src/commands/org-scan.js';
+import { buildOrganizationReport } from '../src/lib/org-report.js';
 import { writeOrganizationReportDirectory } from '../src/lib/org-report-directory.js';
 import { createGoldenFetch, GOLDEN_ORGANIZATION } from './fixtures/org-golden-fixture.js';
 
@@ -48,6 +49,32 @@ describe('organization report golden files', () => {
   it.each(FORMATS)('renders the %s report byte-for-byte', async (outputFormat, filename) => {
     const rendered = renderOrganizationScan(result, { format: outputFormat, cwd });
     await expect(rendered).toMatchFileSnapshot(`${GOLDEN_DIRECTORY}/${filename}`);
+  });
+
+  it('builds a document equal to the parsed JSON rendering', async () => {
+    const report = buildOrganizationReport(result, { cwd });
+    expect(report).toStrictEqual(
+      JSON.parse(renderOrganizationScan(result, { format: 'json', cwd })),
+    );
+    const golden = await readFile(
+      resolve(import.meta.dirname, 'fixtures/org-golden/report.json'),
+      'utf8',
+    );
+    expect(report).toStrictEqual(JSON.parse(golden));
+  });
+
+  it('redacts credentials in the document exactly as the JSON rendering does', () => {
+    const secret = `ghp_${'A1b2C3d4E5'.repeat(4)}`;
+    const tainted = structuredClone(result);
+    tainted.findings[0].fields.action = `actions/checkout@${secret}`;
+    tainted.repositories[0].findings[0].fields.action = `actions/checkout@${secret}`;
+
+    const report = buildOrganizationReport(tainted, { cwd });
+    expect(JSON.stringify(report)).not.toContain(secret);
+    expect(report.findings[0].fields.action).toBe('actions/checkout@<redacted>');
+    expect(report).toStrictEqual(
+      JSON.parse(renderOrganizationScan(tainted, { format: 'json', cwd })),
+    );
   });
 
   it('renders identical bytes on a second render', () => {

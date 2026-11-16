@@ -87,6 +87,7 @@ src/
     github-org.js           read-only organization/tree/blob access
     agent-mode.js           scope-keyed organization artifacts and receipts
     org-checkpoint.js       validated atomic organization resume state
+    org-report.js           canonical organization report document and record projections
     org-report-comparison.js validated fail-closed report change analysis
     org-report-directory.js guarded compact/per-repository report layout
     org-progress.js         plain and JSONL structured scan progress

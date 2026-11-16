@@ -44,6 +44,7 @@ import {
   resolveExecutionContext,
 } from './lib/agent-mode.js';
 import { loadOrganizationCheckpoint } from './lib/org-checkpoint.js';
+import { buildOrganizationReport } from './lib/org-report.js';
 import {
   validateOrganizationReportDirectory,
   writeOrganizationReportDirectory,
@@ -563,10 +564,7 @@ program.command('org-scan <organization>')
         ],
       );
       if (previousReport) {
-        const currentReport = JSON.parse(renderOrganizationScan(result, {
-          format: 'json',
-          cwd: effective.cwd,
-        }));
+        const currentReport = buildOrganizationReport(result, { cwd: effective.cwd });
         result.comparison = compareOrganizationReports({
           previous: previousReport,
           current: currentReport,
