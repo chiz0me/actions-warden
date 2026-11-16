@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { resolve } from 'node:path';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import {
   checkDocumentationCoverage,
   exportedDeclarationComment,
+  findExportedDeclaration,
   parsePublicReexports,
   tableEntries,
 } from '../scripts/doc-coverage.js';
@@ -49,6 +52,31 @@ describe('documentation coverage', () => {
     )).toBe('missing-comment');
     expect(exportedDeclarationComment('export const other = 1;\n', 'missing'))
       .toBe('missing-declaration');
+  });
+
+  it('follows re-exports to the module that declares the export', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aw-doc-reexport-'));
+    try {
+      await writeFile(join(directory, 'barrel.js'), "export { alias as renamed, plain } from './impl.js';\n");
+      await writeFile(join(directory, 'impl.js'), [
+        '/** Documented. */',
+        'export function alias() {}',
+        'export function plain() {}',
+        '',
+      ].join('\n'));
+      const renamed = await findExportedDeclaration(join(directory, 'barrel.js'), 'renamed');
+      expect(renamed.sourcePath).toBe(join(directory, 'impl.js'));
+      expect(exportedDeclarationComment(renamed.source, 'alias')).toBe('documented');
+
+      const plain = await findExportedDeclaration(join(directory, 'barrel.js'), 'plain');
+      expect(exportedDeclarationComment(plain.source, 'plain')).toBe('missing-comment');
+
+      const absent = await findExportedDeclaration(join(directory, 'barrel.js'), 'nothing');
+      expect(absent.sourcePath).toBe(join(directory, 'barrel.js'));
+      expect(exportedDeclarationComment(absent.source, 'nothing')).toBe('missing-declaration');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('parses aliased root exports and non-empty Markdown table entries', () => {

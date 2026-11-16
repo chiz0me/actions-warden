@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Canonical organization report document.
  *
@@ -15,9 +16,10 @@ import { listRules } from '../rules/index.js';
  * scan result. Paths are repository-relative to `cwd` and the value is safe to
  * serialize with `JSON.stringify`.
  *
- * @param {object} result Value returned by `scanOrganization`.
- * @param {{cwd?: string, comparison?: object}} [options]
- * @returns {object}
+ * @param {import('./types.js').OrganizationScanResult & {comparison?: Record<string, any>}} result
+ *   Value returned by `scanOrganization`.
+ * @param {{cwd?: string, comparison?: Record<string, any>}} [options]
+ * @returns {import('./types.js').OrganizationReport}
  */
 export function buildOrganizationReport(result, {
   cwd = process.cwd(),
@@ -94,6 +96,11 @@ export function organizationReportRecords(report, { format }) {
   };
 }
 
+/**
+ * @param {import('./types.js').ReportRecord[]} records
+ * @param {import('./types.js').RepositoryResult} repositoryResult
+ * @param {string} format
+ */
 function appendRepositoryRecords(records, repositoryResult, format) {
   records.push({
     label: 'REPOSITORY',
@@ -155,6 +162,10 @@ function appendRepositoryRecords(records, repositoryResult, format) {
   }
 }
 
+/**
+ * @param {import('./types.js').ReportRecord[]} records
+ * @param {Record<string, any>} comparison
+ */
 function appendComparisonRecords(records, comparison) {
   records.push({ label: 'COMPARISON', fields: comparison.summary });
   for (const [change, findings] of Object.entries(comparison.findings)) {
@@ -180,6 +191,7 @@ function appendComparisonRecords(records, comparison) {
   }
 }
 
+/** @param {import('./types.js').OrganizationReport} report */
 function reportMetadata(report) {
   return {
     organization: report.organization,
@@ -198,6 +210,10 @@ function reportMetadata(report) {
   };
 }
 
+/**
+ * @param {import('./types.js').OrganizationFinding} finding
+ * @param {string} cwd
+ */
 function normalizeFinding(finding, cwd) {
   return {
     ...finding,

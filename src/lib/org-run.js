@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Organization scan runner shared by the CLI and the GitHub Action.
  *
@@ -23,11 +24,23 @@ import { pathExists } from './paths.js';
 import { sameFilePath } from './path-equality.js';
 
 /**
+ * @typedef {Awaited<ReturnType<typeof createOrganizationScanArtifacts>>} ScanArtifacts
+ * @typedef {{option?: string, label?: string, path: string}} Destination
+ * @typedef {{directory: string|null, outputPath: string|undefined,
+ *   destination: Destination|null}} ReportDestination
+ * @typedef {{path: string|undefined, resume: boolean,
+ *   destination: Destination|null}} CheckpointSelection
+ * @typedef {{emit: (event: import('./types.js').ScanProgressEvent) => unknown,
+ *   failScan: (organization: string, error: unknown) => void}} ProgressChannel
+ */
+
+/**
  * @typedef {object} OrganizationRunOptions
- * @property {object} scan Options for `scanOrganization` except `checkpointPath`,
- *   `resume`, and `onProgress`, which the runner supplies. Must include
- *   `organization`, `cwd`, and `visibility`.
- * @property {(options: object) => Promise<object>} scanOrganization The scan
+ * @property {Omit<import('./types.js').OrganizationScanOptions,
+ *   'checkpointPath'|'resume'|'onProgress'>} scan Options for `scanOrganization`; the
+ *   runner supplies the checkpoint, resume flag, and progress callback.
+ * @property {(options: import('./types.js').OrganizationScanOptions) =>
+ *   Promise<import('./types.js').OrganizationScanResult>} scanOrganization The scan
  *   implementation. Callers inject it so this library module does not depend on
  *   `src/commands/`.
  * @property {'toon'|'json'|'text'|'csv'|'sarif'|'html'} format Report format.
@@ -41,8 +54,8 @@ import { sameFilePath } from './path-equality.js';
  * @property {string} [previousReportPath] Prior organization JSON report to compare against.
  * @property {{output: string, checkpoint: string, resume: string}} labels Option names
  *   used in destination error messages, such as `--checkpoint` or `checkpoint-path`.
- * @property {() => {emit: Function, failScan: Function}} openProgress Called once, after
- *   preflight and before the scan, to obtain the progress reporter.
+ * @property {() => ProgressChannel} openProgress Called once, after preflight and
+ *   before the scan, to obtain the progress reporter.
  */
 
 /**
@@ -96,6 +109,11 @@ export async function runOrganizationScan(options) {
   };
 }
 
+/**
+ * @param {OrganizationRunOptions} options
+ * @param {ScanArtifacts} artifacts
+ * @returns {Promise<ReportDestination>}
+ */
 async function selectReportDestination(options, artifacts) {
   const { cwd } = options.scan;
   if (options.reportDirectory) {
@@ -119,6 +137,11 @@ async function selectReportDestination(options, artifacts) {
   return { directory: null, outputPath, destination };
 }
 
+/**
+ * @param {OrganizationRunOptions} options
+ * @param {ScanArtifacts} artifacts
+ * @returns {Promise<CheckpointSelection>}
+ */
 async function selectCheckpoint(options, artifacts) {
   const { cwd } = options.scan;
   const selection = await chooseCheckpoint(options, artifacts);
@@ -132,6 +155,11 @@ async function selectCheckpoint(options, artifacts) {
   return { ...selection, destination };
 }
 
+/**
+ * @param {OrganizationRunOptions} options
+ * @param {ScanArtifacts} artifacts
+ * @returns {Promise<{path: string, resume: boolean, label: string}|null>}
+ */
 async function chooseCheckpoint(options, artifacts) {
   const { labels, fresh, resumePath, checkpointPath, autoCheckpoint = true } = options;
   if (resumePath) return { path: resumePath, resume: true, label: labels.resume };
@@ -147,6 +175,11 @@ async function chooseCheckpoint(options, artifacts) {
   };
 }
 
+/**
+ * @param {{artifacts: ScanArtifacts, report: ReportDestination,
+ *   checkpoint: CheckpointSelection, previousPath: string|null,
+ *   scan: OrganizationRunOptions['scan']}} state
+ */
 async function assertNoDestinationCollisions({
   artifacts,
   report,
@@ -175,7 +208,10 @@ async function assertNoDestinationCollisions({
     { label: 'active config', path: artifacts.configPath },
     { label: 'active baseline', path: artifacts.baselinePath },
   ];
-  await assertDestinationsDoNotReplaceControls([output, saved].filter(Boolean), controls);
+  const destinations = [];
+  if (output) destinations.push(output);
+  if (saved) destinations.push(saved);
+  await assertDestinationsDoNotReplaceControls(destinations, controls);
   if (report.directory) {
     assertDirectoryDoesNotOverlapControls(report.directory, [
       { label: 'checkpoint', path: saved?.path },
@@ -189,10 +225,22 @@ async function assertNoDestinationCollisions({
   }
 }
 
+/**
+ * @param {string|null|undefined} left
+ * @param {string|null|undefined} right
+ * @param {string} message
+ */
 async function assertDifferentPaths(left, right, message) {
   if (left && right && await sameFilePath(left, right)) throw new Error(message);
 }
 
+/**
+ * @param {OrganizationRunOptions} options
+ * @param {CheckpointSelection} checkpoint
+ * @param {ProgressChannel} progress
+ * @returns {Promise<{result: import('./types.js').OrganizationScanResult,
+ *   repositoriesReused: number}>}
+ */
 async function scanWithProgress(options, checkpoint, progress) {
   let repositoriesReused = 0;
   try {
@@ -212,6 +260,10 @@ async function scanWithProgress(options, checkpoint, progress) {
   }
 }
 
+/**
+ * @param {string} path
+ * @param {string} cwd
+ */
 function assertSafeReportDirectoryName(path, cwd) {
   const localPath = relative(resolve(cwd), path).split(sep).join('/');
   if (
@@ -225,6 +277,10 @@ function assertSafeReportDirectoryName(path, cwd) {
   }
 }
 
+/**
+ * @param {string} directory
+ * @param {Array<{label: string, path: string|null|undefined}>} controls
+ */
 function assertDirectoryDoesNotOverlapControls(directory, controls) {
   for (const control of controls) {
     if (!control.path) continue;
@@ -238,10 +294,12 @@ function assertDirectoryDoesNotOverlapControls(directory, controls) {
   }
 }
 
+/** @param {string} path */
 function isInsideOrSame(path) {
   return path === '' || (!isOutsidePath(path) && !isAbsolute(path));
 }
 
+/** @param {string} path */
 function isOutsidePath(path) {
   return path === '..' || path.startsWith(`..${sep}`);
 }

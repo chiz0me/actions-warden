@@ -20,16 +20,7 @@ import { assignBaselineFingerprints, emptyBaseline, loadBaseline } from '../lib/
 import { DEFAULT_CONFIG, filterIgnoredPaths, loadConfig } from '../lib/config.js';
 import { RULES } from '../rules/index.js';
 
-/**
- * @typedef {object} Finding
- * @property {string} id           - unique id (sha1 short)
- * @property {string} ruleId
- * @property {string} severity
- * @property {string} file
- * @property {number} line
- * @property {Record<string, unknown>} fields
- * @property {string} explain
- */
+/** @typedef {import('../lib/types.js').Finding} Finding */
 
 /**
  * @param {object} opts

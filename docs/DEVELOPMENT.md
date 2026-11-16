@@ -38,6 +38,7 @@ pre-commit install --hook-type pre-push
 | `npm test` | Run the complete Vitest suite once |
 | `npm run test:watch` | Run Vitest in watch mode |
 | `npm run lint` | Lint source, scripts, and tests |
+| `npm run typecheck` | Type-check the modules that opt in with `// @ts-check` (`tsc --noEmit`) |
 | `npm run check:yaml` | Parse repository YAML files |
 | `npm run check:docs` | Validate links and require 100% public-surface documentation/JSDoc coverage |
 | `npm run check:package` | Inspect the exact npm tarball manifest, required files, executable mode, and size bounds |
@@ -58,6 +59,7 @@ npm run check:yaml
 npm run check:docs
 npm run check:package
 npm run lint
+npm run typecheck
 npm test
 npm run audit
 ```
@@ -96,7 +98,10 @@ src/
     org-progress.js         plain and JSONL structured scan progress
     identity.js             stable IDs and semantic fingerprints
     patcher.js, writer.js   source-range rewrites and guarded atomic writes
-    formatter.js, redact.js structured/CSV/HTML output and credential redaction
+    formatter.js            format dispatch, severity summary, and renderer re-exports
+    formats/                one serializer each: toon, text, csv, sarif, html, json
+    redact.js               credential redaction
+    types.js                shared JSDoc typedefs (findings, reports, records)
     annotations.js          GitHub workflow annotations
     action-summary.js       bounded Action metrics and job summaries
     concurrency.js          bounded async work

@@ -224,7 +224,7 @@ validate -> release-draft -> publish-npm -> release
 
 | Job | Responsibility |
 |---|---|
-| `validate` | Stable tag, package match, `main` ancestry, npm monotonicity/retry integrity, tests, lint, YAML/docs, exact dependencies, version sync, audit, tarball inspection, and bundle reproduction |
+| `validate` | Stable tag, package match, `main` ancestry, npm monotonicity/retry integrity, tests, lint, type check, YAML/docs, exact dependencies, version sync, audit, tarball inspection, and bundle reproduction |
 | `release-draft` | Create or reuse a draft GitHub release for the immutable tag |
 | `publish-npm` | Publish with npm OIDC and provenance, or safely skip an already-published retry |
 | `release` | Make the GitHub release final only after npm succeeds |

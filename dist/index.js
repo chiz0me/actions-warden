@@ -14597,6 +14597,7 @@ function collectImages(workflow) {
 }
 
 ;// CONCATENATED MODULE: ./src/lib/org-schema.js
+// @ts-check
 /**
  * Shared definitions for organization scans, reports, checkpoints, and
  * comparisons: identifier patterns, closed value sets, and small structural
@@ -16274,22 +16275,14 @@ function safeLogger(fn) {
   return (...args) => fn(...args.map(a => redactDeep(a)));
 }
 
-;// CONCATENATED MODULE: ./src/lib/formatter.js
+;// CONCATENATED MODULE: ./src/lib/formats/csv.js
+// @ts-check
 /**
- * Output formatter supporting TOON (Token-Oriented Object Notation), JSON,
- * plain text, CSV, SARIF, and self-contained HTML.
- *
- * TOON output rules:
- *   - One record per line: `LABEL: key=value key=value`
- *   - Values containing spaces or `=` are quoted: `msg="hello world"`
- *   - Empty/null values are omitted
- *   - Trailing `STATUS: OK` or `STATUS: FAIL` signal for machine consumers
+ * Deterministic RFC 4180-compatible CSV with an explicit status row.
  */
 
 
 
-
-const MAX_HTML_REPORT_BYTES = 32 * 1024 * 1024;
 const CSV_PREFERRED_COLUMNS = Object.freeze([
   'status',
   'organization',
@@ -16316,65 +16309,6 @@ const CSV_PREFERRED_COLUMNS = Object.freeze([
   'url',
   'permalink',
 ]);
-
-/**
- * Severity ordering, lowest-to-highest.
- */
-const SEVERITY_ORDER = [...SEVERITY_LEVELS];
-
-/**
- * @param {string} value
- * @returns {string}
- */
-function quoteIfNeeded(value) {
-  if (value === '') return '""';
-  if (/[\s="\\]/.test(value) || [...value].some(char => char.charCodeAt(0) < 32)) {
-    return JSON.stringify(value);
-  }
-  return value;
-}
-
-/**
- * Serialize a record to a single TOON line.
- *
- * @param {string} label
- * @param {Record<string, unknown>} fields
- * @returns {string}
- */
-function toonLine(label, fields) {
-  const parts = [];
-  for (const [k, v] of Object.entries(fields)) {
-    if (v === null || v === undefined || v === '') continue;
-    const value = typeof v === 'string' ? v : String(v);
-    const key = redact(String(k)).replace(/[^a-zA-Z0-9_.-]/g, '_');
-    parts.push(`${key}=${quoteIfNeeded(redact(value))}`);
-  }
-  return parts.length === 0 ? `${label}:` : `${label}: ${parts.join(' ')}`;
-}
-
-/**
- * Render a TOON document.
- *
- * @param {Array<{label: string, fields: Record<string, unknown>}>} records
- * @param {{status?: 'OK'|'FAIL'}} [options]
- * @returns {string}
- */
-function renderToon(records, options = {}) {
-  const lines = records.map(r => toonLine(r.label, r.fields));
-  if (options.status) lines.push(`STATUS: ${options.status}`);
-  return lines.join('\n') + '\n';
-}
-
-/**
- * Render recursively redacted JSON with 2-space indentation. Object key order
- * follows the caller-provided value.
- *
- * @param {unknown} payload
- * @returns {string}
- */
-function formatter_renderJson(payload) {
-  return JSON.stringify(redactDeep(payload), null, 2) + '\n';
-}
 
 /**
  * Render records as deterministic RFC 4180-compatible CSV. The first column
@@ -16409,55 +16343,9 @@ function renderCsv(records, options = {}) {
 }
 
 /**
- * Render plain text (human-readable summary).
- *
- * @param {Array<{label: string, fields: Record<string, unknown>}>} records
- * @param {{status?: 'OK'|'FAIL'}} [options]
- * @returns {string}
+ * @param {unknown} records
+ * @returns {Array<{label: string, fields: Map<string, unknown>}>}
  */
-function renderText(records, options = {}) {
-  const lines = records.map(r => {
-    const kv = Object.entries(r.fields)
-      .filter(([, v]) => v !== null && v !== undefined && v !== '')
-      .map(([k, v]) => `${k}=${escapeText(redact(String(v)))}`)
-      .join(' ');
-    return `[${r.label}] ${kv}`;
-  });
-  if (options.status) lines.push(`==> ${options.status}`);
-  return lines.join('\n') + '\n';
-}
-
-function escapeText(value) {
-  return JSON.stringify(value).slice(1, -1);
-}
-
-/**
- * Format records into the requested output mode.
- *
- * @param {'toon'|'json'|'text'|'csv'|'sarif'|'html'} format
- * @param {Array<{label: string, fields: Record<string, unknown>}>} records
- * @param {{status?: 'OK'|'FAIL', json?: unknown, title?: string,
- *   metadata?: Record<string, unknown>}} [options]
- * @returns {string}
- */
-function formatter_format(format_, records, options = {}) {
-  switch (format_) {
-    case 'json':
-      return formatter_renderJson(options.json ?? recordsToJson(records, options));
-    case 'text':
-      return renderText(records, options);
-    case 'csv':
-      return renderCsv(records, options);
-    case 'sarif':
-      return renderSarif(records, options);
-    case 'html':
-      return renderHtml(records, options);
-    case 'toon':
-    default:
-      return renderToon(records, options);
-  }
-}
-
 function normalizeCsvRecords(records) {
   if (!Array.isArray(records)) return [];
   return records.map(record => {
@@ -16475,6 +16363,7 @@ function normalizeCsvRecords(records) {
   });
 }
 
+/** @param {unknown} value */
 function csvCell(value) {
   if (value === null || value === undefined) return '';
   const formulaSensitive = typeof value === 'string';
@@ -16494,6 +16383,7 @@ function csvCell(value) {
     : serialized;
 }
 
+/** @param {string} value */
 function escapeCsvControls(value) {
   let escaped = '';
   for (const character of value) {
@@ -16511,6 +16401,97 @@ function escapeCsvControls(value) {
   }
   return escaped;
 }
+
+;// CONCATENATED MODULE: ./src/lib/formats/html.js
+// @ts-check
+/**
+ * Self-contained, deterministic HTML report with client-side search and filters.
+ */
+
+
+
+/**
+ * @typedef {{label: string, fields: Record<string, string>}} HtmlRecord
+ * @typedef {{rule: string, severity: string, count: number}} RuleCount
+ */
+
+const MAX_HTML_REPORT_BYTES = 32 * 1024 * 1024;
+
+const HTML_STYLES = `    :root { color-scheme: light dark; --bg: #f6f8fa; --panel: #fff; --text: #1f2328; --muted: #59636e; --border: #d0d7de; --accent: #0969da; --ok: #1a7f37; --fail: #cf222e; --critical: #82071e; --high: #cf222e; --medium: #9a6700; --low: #0969da; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --panel: #161b22; --text: #e6edf3; --muted: #8d96a0; --border: #30363d; --accent: #58a6ff; --ok: #3fb950; --fail: #f85149; --critical: #ff7b72; --high: #f85149; --medium: #d29922; --low: #58a6ff; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { width: min(1600px, 100%); margin: 0 auto; padding: 24px; }
+    h1, h2, h3 { line-height: 1.25; }
+    h1 { margin: 0; font-size: clamp(24px, 4vw, 36px); }
+    h2 { margin: 0 0 16px; font-size: 20px; }
+    h3 { margin: 0 0 12px; font-size: 16px; }
+    .header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+    .eyebrow, .muted { color: var(--muted); }
+    .eyebrow { margin: 0 0 4px; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .panel { margin: 16px 0; padding: 18px; overflow: hidden; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 1px 0 rgb(31 35 40 / 4%); }
+    .status, .badge { display: inline-flex; align-items: center; border-radius: 999px; font-weight: 700; white-space: nowrap; }
+    .status { padding: 7px 12px; font-size: 13px; }
+    .badge { padding: 2px 8px; font-size: 12px; background: color-mix(in srgb, var(--muted) 14%, transparent); }
+    .status-ok, .badge-ok, .badge-resolved { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+    .status-fail, .badge-fail, .badge-new, .badge-unknown { color: var(--fail); background: color-mix(in srgb, var(--fail) 14%, transparent); }
+    .badge-critical { color: var(--critical); background: color-mix(in srgb, var(--critical) 14%, transparent); }
+    .badge-high { color: var(--high); background: color-mix(in srgb, var(--high) 14%, transparent); }
+    .badge-medium { color: var(--medium); background: color-mix(in srgb, var(--medium) 14%, transparent); }
+    .badge-low, .badge-unchanged { color: var(--low); background: color-mix(in srgb, var(--low) 14%, transparent); }
+    .callout { border-left: 4px solid var(--fail); }
+    .callout strong { display: block; margin-bottom: 4px; }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 10px; }
+    .metric { min-width: 0; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+    .metric-name { display: block; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; }
+    .metric-value { display: block; margin-top: 3px; overflow-wrap: anywhere; font-size: 20px; font-weight: 700; }
+    .filters { display: grid; grid-template-columns: minmax(220px, 2fr) repeat(3, minmax(140px, 1fr)); gap: 10px; }
+    label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; font-weight: 600; }
+    input, select { width: 100%; min-height: 38px; padding: 7px 9px; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; font: inherit; }
+    input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .filter-count { margin: 10px 0 0; color: var(--muted); }
+    .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 9px 11px; vertical-align: top; text-align: left; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+    th { position: sticky; top: 0; z-index: 1; color: var(--muted); background: var(--panel); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+    code { font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; white-space: pre-wrap; }
+    a { color: var(--accent); text-decoration-thickness: .08em; text-underline-offset: .15em; }
+    [hidden] { display: none !important; }
+    footer { margin: 24px 0 8px; color: var(--muted); font-size: 12px; text-align: center; }
+    @media (max-width: 800px) { main { padding: 14px; } .header { align-items: stretch; flex-direction: column; } .filters { grid-template-columns: 1fr; } }
+    @media print { :root { color-scheme: light; } body { background: #fff; color: #000; } main { width: 100%; padding: 0; } .filters-panel { display: none; } .panel { break-inside: avoid; box-shadow: none; } th { position: static; } }`;
+
+const HTML_SCRIPT = `    (() => {
+      const rows = [...document.querySelectorAll('[data-record]')];
+      const search = document.querySelector('#filter-search');
+      const label = document.querySelector('#filter-label');
+      const severity = document.querySelector('#filter-severity');
+      const repository = document.querySelector('#filter-repository');
+      const count = document.querySelector('#filter-count');
+      if (!search || !label || !severity || !repository || !count) return;
+      const apply = () => {
+        const query = search.value.trim().toLocaleLowerCase();
+        let visible = 0;
+        for (const row of rows) {
+          const matches = (!query || row.dataset.search.includes(query))
+            && (!label.value || row.dataset.label === label.value)
+            && (!severity.value || row.dataset.severity === severity.value)
+            && (!repository.value || row.dataset.repository === repository.value);
+          row.hidden = !matches;
+          if (matches) visible += 1;
+        }
+        for (const section of document.querySelectorAll('[data-record-section]')) {
+          section.hidden = !section.querySelector('[data-record]:not([hidden])');
+        }
+        count.textContent = String(visible) + ' of ' + String(rows.length) + ' records shown';
+      };
+      for (const control of [search, label, severity, repository]) {
+        control.addEventListener(control === search ? 'input' : 'change', apply);
+      }
+      apply();
+    })();`;
 
 /**
  * Render a deterministic, self-contained HTML report with client-side search
@@ -16560,51 +16541,7 @@ function renderHtml(records, options = {}) {
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
   <title>${escapeHtml(title)}</title>
   <style>
-    :root { color-scheme: light dark; --bg: #f6f8fa; --panel: #fff; --text: #1f2328; --muted: #59636e; --border: #d0d7de; --accent: #0969da; --ok: #1a7f37; --fail: #cf222e; --critical: #82071e; --high: #cf222e; --medium: #9a6700; --low: #0969da; }
-    @media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --panel: #161b22; --text: #e6edf3; --muted: #8d96a0; --border: #30363d; --accent: #58a6ff; --ok: #3fb950; --fail: #f85149; --critical: #ff7b72; --high: #f85149; --medium: #d29922; --low: #58a6ff; } }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    main { width: min(1600px, 100%); margin: 0 auto; padding: 24px; }
-    h1, h2, h3 { line-height: 1.25; }
-    h1 { margin: 0; font-size: clamp(24px, 4vw, 36px); }
-    h2 { margin: 0 0 16px; font-size: 20px; }
-    h3 { margin: 0 0 12px; font-size: 16px; }
-    .header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
-    .eyebrow, .muted { color: var(--muted); }
-    .eyebrow { margin: 0 0 4px; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
-    .panel { margin: 16px 0; padding: 18px; overflow: hidden; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 1px 0 rgb(31 35 40 / 4%); }
-    .status, .badge { display: inline-flex; align-items: center; border-radius: 999px; font-weight: 700; white-space: nowrap; }
-    .status { padding: 7px 12px; font-size: 13px; }
-    .badge { padding: 2px 8px; font-size: 12px; background: color-mix(in srgb, var(--muted) 14%, transparent); }
-    .status-ok, .badge-ok, .badge-resolved { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
-    .status-fail, .badge-fail, .badge-new, .badge-unknown { color: var(--fail); background: color-mix(in srgb, var(--fail) 14%, transparent); }
-    .badge-critical { color: var(--critical); background: color-mix(in srgb, var(--critical) 14%, transparent); }
-    .badge-high { color: var(--high); background: color-mix(in srgb, var(--high) 14%, transparent); }
-    .badge-medium { color: var(--medium); background: color-mix(in srgb, var(--medium) 14%, transparent); }
-    .badge-low, .badge-unchanged { color: var(--low); background: color-mix(in srgb, var(--low) 14%, transparent); }
-    .callout { border-left: 4px solid var(--fail); }
-    .callout strong { display: block; margin-bottom: 4px; }
-    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 10px; }
-    .metric { min-width: 0; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
-    .metric-name { display: block; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; }
-    .metric-value { display: block; margin-top: 3px; overflow-wrap: anywhere; font-size: 20px; font-weight: 700; }
-    .filters { display: grid; grid-template-columns: minmax(220px, 2fr) repeat(3, minmax(140px, 1fr)); gap: 10px; }
-    label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; font-weight: 600; }
-    input, select { width: 100%; min-height: 38px; padding: 7px 9px; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; font: inherit; }
-    input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-    .filter-count { margin: 10px 0 0; color: var(--muted); }
-    .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { padding: 9px 11px; vertical-align: top; text-align: left; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
-    th { position: sticky; top: 0; z-index: 1; color: var(--muted); background: var(--panel); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
-    tbody tr:last-child td { border-bottom: 0; }
-    tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
-    code { font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; white-space: pre-wrap; }
-    a { color: var(--accent); text-decoration-thickness: .08em; text-underline-offset: .15em; }
-    [hidden] { display: none !important; }
-    footer { margin: 24px 0 8px; color: var(--muted); font-size: 12px; text-align: center; }
-    @media (max-width: 800px) { main { padding: 14px; } .header { align-items: stretch; flex-direction: column; } .filters { grid-template-columns: 1fr; } }
-    @media print { :root { color-scheme: light; } body { background: #fff; color: #000; } main { width: 100%; padding: 0; } .filters-panel { display: none; } .panel { break-inside: avoid; box-shadow: none; } th { position: static; } }
+${HTML_STYLES}
   </style>
 </head>
 <body>
@@ -16622,35 +16559,7 @@ function renderHtml(records, options = {}) {
     <footer>Generated deterministically by actions-warden. The saved report may contain sensitive repository names, paths, and findings.</footer>
   </main>
   <script>
-    (() => {
-      const rows = [...document.querySelectorAll('[data-record]')];
-      const search = document.querySelector('#filter-search');
-      const label = document.querySelector('#filter-label');
-      const severity = document.querySelector('#filter-severity');
-      const repository = document.querySelector('#filter-repository');
-      const count = document.querySelector('#filter-count');
-      if (!search || !label || !severity || !repository || !count) return;
-      const apply = () => {
-        const query = search.value.trim().toLocaleLowerCase();
-        let visible = 0;
-        for (const row of rows) {
-          const matches = (!query || row.dataset.search.includes(query))
-            && (!label.value || row.dataset.label === label.value)
-            && (!severity.value || row.dataset.severity === severity.value)
-            && (!repository.value || row.dataset.repository === repository.value);
-          row.hidden = !matches;
-          if (matches) visible += 1;
-        }
-        for (const section of document.querySelectorAll('[data-record-section]')) {
-          section.hidden = !section.querySelector('[data-record]:not([hidden])');
-        }
-        count.textContent = String(visible) + ' of ' + String(rows.length) + ' records shown';
-      };
-      for (const control of [search, label, severity, repository]) {
-        control.addEventListener(control === search ? 'input' : 'change', apply);
-      }
-      apply();
-    })();
+${HTML_SCRIPT}
   </script>
 </body>
 </html>
@@ -16664,6 +16573,10 @@ function renderHtml(records, options = {}) {
   return document;
 }
 
+/**
+ * @param {unknown} records
+ * @returns {HtmlRecord[]}
+ */
 function normalizeHtmlRecords(records) {
   if (!Array.isArray(records)) return [];
   return records.map(record => ({
@@ -16672,6 +16585,10 @@ function normalizeHtmlRecords(records) {
   }));
 }
 
+/**
+ * @param {unknown} fields
+ * @returns {Record<string, string>}
+ */
 function normalizeFields(fields) {
   if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return {};
   return Object.fromEntries(Object.entries(fields)
@@ -16679,12 +16596,20 @@ function normalizeFields(fields) {
     .map(([key, value]) => [redact(String(key)), htmlValue(value)]));
 }
 
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
 function htmlValue(value) {
   if (typeof value === 'string') return redact(value);
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return redact(JSON.stringify(value));
 }
 
+/**
+ * @param {HtmlRecord[]} records
+ * @returns {Map<string, HtmlRecord[]>}
+ */
 function groupRecords(records) {
   const groups = new Map();
   for (const record of records) {
@@ -16694,6 +16619,10 @@ function groupRecords(records) {
   return groups;
 }
 
+/**
+ * @param {HtmlRecord[]} findings
+ * @returns {RuleCount[]}
+ */
 function summarizeHtmlRules(findings) {
   const counts = new Map();
   for (const finding of findings) {
@@ -16711,6 +16640,7 @@ function summarizeHtmlRules(findings) {
   ));
 }
 
+/** @param {Record<string, string>} metadata */
 function renderHtmlMetadata(metadata) {
   const entries = Object.entries(metadata);
   if (entries.length === 0) return '';
@@ -16719,6 +16649,7 @@ function renderHtmlMetadata(metadata) {
   )).join('')}</div></section>`;
 }
 
+/** @param {Record<string, string>|undefined} fields */
 function renderHtmlSummary(fields) {
   if (!fields || Object.keys(fields).length === 0) return '';
   return `<section class="panel"><h2>Summary</h2><div class="metrics">${Object.entries(fields)
@@ -16727,6 +16658,7 @@ function renderHtmlSummary(fields) {
     )).join('')}</div></section>`;
 }
 
+/** @param {RuleCount[]} rows */
 function renderHtmlRuleBreakdown(rows) {
   if (rows.length === 0) return '';
   return `<section class="panel"><h2>Rule breakdown</h2><div class="table-wrap"><table><thead><tr><th>Severity</th><th>Rule</th><th>Findings</th></tr></thead><tbody>${rows.map(row => (
@@ -16734,16 +16666,25 @@ function renderHtmlRuleBreakdown(rows) {
   )).join('')}</tbody></table></div></section>`;
 }
 
+/**
+ * @param {{labels: string[], severities: string[], repositories: string[],
+ *   total: number}} filters
+ */
 function renderHtmlFilters({ labels, severities, repositories, total }) {
   return `<section class="panel filters-panel"><h2>Filter records</h2><div class="filters"><label>Search<input id="filter-search" type="search" placeholder="Repository, rule, file, action, or message"></label><label>Record type<select id="filter-label"><option value="">All types</option>${optionMarkup(labels)}</select></label><label>Severity<select id="filter-severity"><option value="">All severities</option>${optionMarkup(severities)}</select></label><label>Repository<select id="filter-repository"><option value="">All repositories</option>${optionMarkup(repositories)}</select></label></div><p class="filter-count" id="filter-count">${total} of ${total} records shown</p></section>`;
 }
 
+/** @param {string[]} values */
 function optionMarkup(values) {
   return values.map(value => (
     `<option value="${escapeHtml(String(value).toLocaleLowerCase())}">${escapeHtml(value)}</option>`
   )).join('');
 }
 
+/**
+ * @param {string} label
+ * @param {HtmlRecord[]} records
+ */
 function renderHtmlGroup(label, records) {
   const columns = [...new Set(records.flatMap(record => Object.keys(record.fields)))];
   const rows = records.map(record => {
@@ -16758,6 +16699,7 @@ function renderHtmlGroup(label, records) {
   return `<section class="panel" data-record-section><h2>${escapeHtml(heading)}</h2><div class="table-wrap"><table><thead><tr>${columns.map(column => `<th>${escapeHtml(humanize(column))}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div></section>`;
 }
 
+/** @param {string} label */
 function recordGroupTitle(label) {
   const names = new Map([
     ['REPOSITORY', 'Repository breakdown'],
@@ -16774,6 +16716,10 @@ function recordGroupTitle(label) {
   return names.get(label) ?? humanize(label);
 }
 
+/**
+ * @param {string} key
+ * @param {string|undefined} value
+ */
 function renderHtmlCell(key, value) {
   if (value === undefined) return '';
   if (['severity', 'sev', 'status', 'change'].includes(key)) return renderBadge(value);
@@ -16783,6 +16729,7 @@ function renderHtmlCell(key, value) {
   return `<code>${escapeHtml(value)}</code>`;
 }
 
+/** @param {unknown} value */
 function renderBadge(value) {
   const text = String(value);
   const normalized = text.toLocaleLowerCase();
@@ -16794,11 +16741,13 @@ function renderBadge(value) {
   return `<span class="badge${className}">${escapeHtml(text)}</span>`;
 }
 
+/** @param {HtmlRecord} record */
 function recordRepository(record) {
   const explicit = record.fields.repo ?? record.fields.repository;
   return explicit ? String(explicit) : '';
 }
 
+/** @param {unknown} value */
 function safeHttpsUrl(value) {
   try {
     return new URL(String(value)).protocol === 'https:';
@@ -16807,12 +16756,17 @@ function safeHttpsUrl(value) {
   }
 }
 
+/** @param {string} status */
 function statusClass(status) {
   if (status.toLocaleLowerCase() === 'ok') return 'status-ok';
   if (status.toLocaleLowerCase() === 'fail') return 'status-fail';
   return '';
 }
 
+/**
+ * @param {unknown} left
+ * @param {unknown} right
+ */
 function severitySort(left, right) {
   const order = new Map([
     ['critical', 0],
@@ -16824,6 +16778,7 @@ function severitySort(left, right) {
     - (order.get(String(right).toLocaleLowerCase()) ?? 4);
 }
 
+/** @param {unknown} value */
 function humanize(value) {
   const source = String(value);
   return (/^[A-Z0-9_-]+$/.test(source) ? source.toLocaleLowerCase() : source)
@@ -16833,6 +16788,7 @@ function humanize(value) {
     .replace(/^./, first => first.toLocaleUpperCase());
 }
 
+/** @param {unknown} value */
 function escapeHtml(value) {
   return String(value)
     .replaceAll('&', '&amp;')
@@ -16841,6 +16797,33 @@ function escapeHtml(value) {
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 }
+
+;// CONCATENATED MODULE: ./src/lib/formats/json.js
+// @ts-check
+/**
+ * Recursively redacted, 2-space-indented JSON serialization.
+ */
+
+
+
+/**
+ * Render recursively redacted JSON with 2-space indentation. Object key order
+ * follows the caller-provided value.
+ *
+ * @param {unknown} payload
+ * @returns {string}
+ */
+function json_renderJson(payload) {
+  return JSON.stringify(redactDeep(payload), null, 2) + '\n';
+}
+
+;// CONCATENATED MODULE: ./src/lib/formats/sarif.js
+// @ts-check
+/**
+ * SARIF 2.1.0 serialization for GitHub code scanning.
+ */
+
+
 
 /**
  * Render records as SARIF 2.1.0 for GitHub code scanning.
@@ -16921,7 +16904,7 @@ function renderSarif(records, options = {}) {
     };
   });
 
-  return formatter_renderJson({
+  return json_renderJson({
     $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
     version: '2.1.0',
     runs: [{
@@ -16940,12 +16923,17 @@ function renderSarif(records, options = {}) {
   });
 }
 
+/** @param {string} severity */
 function sarifLevel(severity) {
   if (severity === 'critical' || severity === 'high' || severity === 'error') return 'error';
   if (severity === 'medium' || severity === 'warning') return 'warning';
   return 'note';
 }
 
+/**
+ * @param {string} label
+ * @param {Record<string, unknown>} fields
+ */
 function summarizeFields(label, fields) {
   const details = Object.entries(fields)
     .filter(([key, value]) => (
@@ -16954,6 +16942,151 @@ function summarizeFields(label, fields) {
     .map(([key, value]) => `${key}=${String(value)}`)
     .join(' ');
   return `${label}: ${details}`;
+}
+
+;// CONCATENATED MODULE: ./src/lib/formats/text.js
+// @ts-check
+/**
+ * Plain-text, one-record-per-line serialization for human-readable logs.
+ */
+
+
+
+/**
+ * Render plain text (human-readable summary).
+ *
+ * @param {Array<{label: string, fields: Record<string, unknown>}>} records
+ * @param {{status?: 'OK'|'FAIL'}} [options]
+ * @returns {string}
+ */
+function renderText(records, options = {}) {
+  const lines = records.map(r => {
+    const kv = Object.entries(r.fields)
+      .filter(([, v]) => v !== null && v !== undefined && v !== '')
+      .map(([k, v]) => `${k}=${escapeText(redact(String(v)))}`)
+      .join(' ');
+    return `[${r.label}] ${kv}`;
+  });
+  if (options.status) lines.push(`==> ${options.status}`);
+  return lines.join('\n') + '\n';
+}
+
+/** @param {string} value */
+function escapeText(value) {
+  return JSON.stringify(value).slice(1, -1);
+}
+
+;// CONCATENATED MODULE: ./src/lib/formats/toon.js
+// @ts-check
+/**
+ * Token-Oriented Object Notation: one labeled record per line,
+ * `LABEL: key=value key=value`, empty values omitted, trailing `STATUS:` line.
+ */
+
+
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function quoteIfNeeded(value) {
+  if (value === '') return '""';
+  if (/[\s="\\]/.test(value) || [...value].some(char => char.charCodeAt(0) < 32)) {
+    return JSON.stringify(value);
+  }
+  return value;
+}
+
+/**
+ * Serialize a record to a single TOON line.
+ *
+ * @param {string} label
+ * @param {Record<string, unknown>} fields
+ * @returns {string}
+ */
+function toonLine(label, fields) {
+  const parts = [];
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === null || v === undefined || v === '') continue;
+    const value = typeof v === 'string' ? v : String(v);
+    const key = redact(String(k)).replace(/[^a-zA-Z0-9_.-]/g, '_');
+    parts.push(`${key}=${quoteIfNeeded(redact(value))}`);
+  }
+  return parts.length === 0 ? `${label}:` : `${label}: ${parts.join(' ')}`;
+}
+
+/**
+ * Render a TOON document.
+ *
+ * @param {Array<{label: string, fields: Record<string, unknown>}>} records
+ * @param {{status?: 'OK'|'FAIL'}} [options]
+ * @returns {string}
+ */
+function renderToon(records, options = {}) {
+  const lines = records.map(r => toonLine(r.label, r.fields));
+  if (options.status) lines.push(`STATUS: ${options.status}`);
+  return lines.join('\n') + '\n';
+}
+
+;// CONCATENATED MODULE: ./src/lib/formatter.js
+/**
+ * Output formatter supporting TOON (Token-Oriented Object Notation), JSON,
+ * plain text, CSV, SARIF, and self-contained HTML. Each serializer lives under
+ * `src/lib/formats/`; this module dispatches by format name and re-exports the
+ * public renderers.
+ *
+ * TOON output rules:
+ *   - One record per line: `LABEL: key=value key=value`
+ *   - Values containing spaces or `=` are quoted: `msg="hello world"`
+ *   - Empty/null values are omitted
+ *   - Trailing `STATUS: OK` or `STATUS: FAIL` signal for machine consumers
+ */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/**
+ * Severity ordering, lowest-to-highest.
+ */
+const SEVERITY_ORDER = [...SEVERITY_LEVELS];
+
+/**
+ * Format records into the requested output mode.
+ *
+ * @param {'toon'|'json'|'text'|'csv'|'sarif'|'html'} format
+ * @param {Array<{label: string, fields: Record<string, unknown>}>} records
+ * @param {{status?: 'OK'|'FAIL', json?: unknown, title?: string,
+ *   metadata?: Record<string, unknown>}} [options]
+ * @returns {string}
+ */
+function formatter_format(format_, records, options = {}) {
+  switch (format_) {
+    case 'json':
+      return json_renderJson(options.json ?? recordsToJson(records, options));
+    case 'text':
+      return renderText(records, options);
+    case 'csv':
+      return renderCsv(records, options);
+    case 'sarif':
+      return renderSarif(records, options);
+    case 'html':
+      return renderHtml(records, options);
+    case 'toon':
+    default:
+      return renderToon(records, options);
+  }
 }
 
 /**
@@ -17691,16 +17824,7 @@ function stableValue(value) {
 
 
 
-/**
- * @typedef {object} Finding
- * @property {string} id           - unique id (sha1 short)
- * @property {string} ruleId
- * @property {string} severity
- * @property {string} file
- * @property {number} line
- * @property {Record<string, unknown>} fields
- * @property {string} explain
- */
+/** @typedef {import('../lib/types.js').Finding} Finding */
 
 /**
  * @param {object} opts
@@ -20860,6 +20984,7 @@ function org_checkpoint_stableValue(value) {
 }
 
 ;// CONCATENATED MODULE: ./src/lib/org-report.js
+// @ts-check
 /**
  * Canonical organization report document.
  *
@@ -20877,9 +21002,10 @@ function org_checkpoint_stableValue(value) {
  * scan result. Paths are repository-relative to `cwd` and the value is safe to
  * serialize with `JSON.stringify`.
  *
- * @param {object} result Value returned by `scanOrganization`.
- * @param {{cwd?: string, comparison?: object}} [options]
- * @returns {object}
+ * @param {import('./types.js').OrganizationScanResult & {comparison?: Record<string, any>}} result
+ *   Value returned by `scanOrganization`.
+ * @param {{cwd?: string, comparison?: Record<string, any>}} [options]
+ * @returns {import('./types.js').OrganizationReport}
  */
 function org_report_buildOrganizationReport(result, {
   cwd = process.cwd(),
@@ -20956,6 +21082,11 @@ function organizationReportRecords(report, { format }) {
   };
 }
 
+/**
+ * @param {import('./types.js').ReportRecord[]} records
+ * @param {import('./types.js').RepositoryResult} repositoryResult
+ * @param {string} format
+ */
 function appendRepositoryRecords(records, repositoryResult, format) {
   records.push({
     label: 'REPOSITORY',
@@ -21017,6 +21148,10 @@ function appendRepositoryRecords(records, repositoryResult, format) {
   }
 }
 
+/**
+ * @param {import('./types.js').ReportRecord[]} records
+ * @param {Record<string, any>} comparison
+ */
 function appendComparisonRecords(records, comparison) {
   records.push({ label: 'COMPARISON', fields: comparison.summary });
   for (const [change, findings] of Object.entries(comparison.findings)) {
@@ -21042,6 +21177,7 @@ function appendComparisonRecords(records, comparison) {
   }
 }
 
+/** @param {import('./types.js').OrganizationReport} report */
 function reportMetadata(report) {
   return {
     organization: report.organization,
@@ -21060,6 +21196,10 @@ function reportMetadata(report) {
   };
 }
 
+/**
+ * @param {import('./types.js').OrganizationFinding} finding
+ * @param {string} cwd
+ */
 function normalizeFinding(finding, cwd) {
   return {
     ...finding,
@@ -23133,6 +23273,7 @@ function org_report_directory_isOutside(value) {
 }
 
 ;// CONCATENATED MODULE: ./src/lib/org-run.js
+// @ts-check
 /**
  * Organization scan runner shared by the CLI and the GitHub Action.
  *
@@ -23153,11 +23294,23 @@ function org_report_directory_isOutside(value) {
 
 
 /**
+ * @typedef {Awaited<ReturnType<typeof createOrganizationScanArtifacts>>} ScanArtifacts
+ * @typedef {{option?: string, label?: string, path: string}} Destination
+ * @typedef {{directory: string|null, outputPath: string|undefined,
+ *   destination: Destination|null}} ReportDestination
+ * @typedef {{path: string|undefined, resume: boolean,
+ *   destination: Destination|null}} CheckpointSelection
+ * @typedef {{emit: (event: import('./types.js').ScanProgressEvent) => unknown,
+ *   failScan: (organization: string, error: unknown) => void}} ProgressChannel
+ */
+
+/**
  * @typedef {object} OrganizationRunOptions
- * @property {object} scan Options for `scanOrganization` except `checkpointPath`,
- *   `resume`, and `onProgress`, which the runner supplies. Must include
- *   `organization`, `cwd`, and `visibility`.
- * @property {(options: object) => Promise<object>} scanOrganization The scan
+ * @property {Omit<import('./types.js').OrganizationScanOptions,
+ *   'checkpointPath'|'resume'|'onProgress'>} scan Options for `scanOrganization`; the
+ *   runner supplies the checkpoint, resume flag, and progress callback.
+ * @property {(options: import('./types.js').OrganizationScanOptions) =>
+ *   Promise<import('./types.js').OrganizationScanResult>} scanOrganization The scan
  *   implementation. Callers inject it so this library module does not depend on
  *   `src/commands/`.
  * @property {'toon'|'json'|'text'|'csv'|'sarif'|'html'} format Report format.
@@ -23171,8 +23324,8 @@ function org_report_directory_isOutside(value) {
  * @property {string} [previousReportPath] Prior organization JSON report to compare against.
  * @property {{output: string, checkpoint: string, resume: string}} labels Option names
  *   used in destination error messages, such as `--checkpoint` or `checkpoint-path`.
- * @property {() => {emit: Function, failScan: Function}} openProgress Called once, after
- *   preflight and before the scan, to obtain the progress reporter.
+ * @property {() => ProgressChannel} openProgress Called once, after preflight and
+ *   before the scan, to obtain the progress reporter.
  */
 
 /**
@@ -23226,6 +23379,11 @@ async function runOrganizationScan(options) {
   };
 }
 
+/**
+ * @param {OrganizationRunOptions} options
+ * @param {ScanArtifacts} artifacts
+ * @returns {Promise<ReportDestination>}
+ */
 async function selectReportDestination(options, artifacts) {
   const { cwd } = options.scan;
   if (options.reportDirectory) {
@@ -23249,6 +23407,11 @@ async function selectReportDestination(options, artifacts) {
   return { directory: null, outputPath, destination };
 }
 
+/**
+ * @param {OrganizationRunOptions} options
+ * @param {ScanArtifacts} artifacts
+ * @returns {Promise<CheckpointSelection>}
+ */
 async function selectCheckpoint(options, artifacts) {
   const { cwd } = options.scan;
   const selection = await chooseCheckpoint(options, artifacts);
@@ -23262,6 +23425,11 @@ async function selectCheckpoint(options, artifacts) {
   return { ...selection, destination };
 }
 
+/**
+ * @param {OrganizationRunOptions} options
+ * @param {ScanArtifacts} artifacts
+ * @returns {Promise<{path: string, resume: boolean, label: string}|null>}
+ */
 async function chooseCheckpoint(options, artifacts) {
   const { labels, fresh, resumePath, checkpointPath, autoCheckpoint = true } = options;
   if (resumePath) return { path: resumePath, resume: true, label: labels.resume };
@@ -23277,6 +23445,11 @@ async function chooseCheckpoint(options, artifacts) {
   };
 }
 
+/**
+ * @param {{artifacts: ScanArtifacts, report: ReportDestination,
+ *   checkpoint: CheckpointSelection, previousPath: string|null,
+ *   scan: OrganizationRunOptions['scan']}} state
+ */
 async function assertNoDestinationCollisions({
   artifacts,
   report,
@@ -23305,7 +23478,10 @@ async function assertNoDestinationCollisions({
     { label: 'active config', path: artifacts.configPath },
     { label: 'active baseline', path: artifacts.baselinePath },
   ];
-  await assertDestinationsDoNotReplaceControls([output, saved].filter(Boolean), controls);
+  const destinations = [];
+  if (output) destinations.push(output);
+  if (saved) destinations.push(saved);
+  await assertDestinationsDoNotReplaceControls(destinations, controls);
   if (report.directory) {
     assertDirectoryDoesNotOverlapControls(report.directory, [
       { label: 'checkpoint', path: saved?.path },
@@ -23319,10 +23495,22 @@ async function assertNoDestinationCollisions({
   }
 }
 
+/**
+ * @param {string|null|undefined} left
+ * @param {string|null|undefined} right
+ * @param {string} message
+ */
 async function assertDifferentPaths(left, right, message) {
   if (left && right && await path_equality_sameFilePath(left, right)) throw new Error(message);
 }
 
+/**
+ * @param {OrganizationRunOptions} options
+ * @param {CheckpointSelection} checkpoint
+ * @param {ProgressChannel} progress
+ * @returns {Promise<{result: import('./types.js').OrganizationScanResult,
+ *   repositoriesReused: number}>}
+ */
 async function scanWithProgress(options, checkpoint, progress) {
   let repositoriesReused = 0;
   try {
@@ -23342,6 +23530,10 @@ async function scanWithProgress(options, checkpoint, progress) {
   }
 }
 
+/**
+ * @param {string} path
+ * @param {string} cwd
+ */
 function assertSafeReportDirectoryName(path, cwd) {
   const localPath = (0,external_node_path_namespaceObject.relative)((0,external_node_path_namespaceObject.resolve)(cwd), path).split(external_node_path_namespaceObject.sep).join('/');
   if (
@@ -23355,6 +23547,10 @@ function assertSafeReportDirectoryName(path, cwd) {
   }
 }
 
+/**
+ * @param {string} directory
+ * @param {Array<{label: string, path: string|null|undefined}>} controls
+ */
 function assertDirectoryDoesNotOverlapControls(directory, controls) {
   for (const control of controls) {
     if (!control.path) continue;
@@ -23368,10 +23564,12 @@ function assertDirectoryDoesNotOverlapControls(directory, controls) {
   }
 }
 
+/** @param {string} path */
 function isInsideOrSame(path) {
   return path === '' || (!isOutsidePath(path) && !(0,external_node_path_namespaceObject.isAbsolute)(path));
 }
 
+/** @param {string} path */
 function isOutsidePath(path) {
   return path === '..' || path.startsWith(`..${external_node_path_namespaceObject.sep}`);
 }

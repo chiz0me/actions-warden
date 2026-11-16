@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Shared definitions for organization scans, reports, checkpoints, and
  * comparisons: identifier patterns, closed value sets, and small structural
