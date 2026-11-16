@@ -1,0 +1,71 @@
+{
+  "schemaVersion": "1.0",
+  "kind": "actions-warden-org-scan-repository",
+  "organization": "octo-org",
+  "analysis": {
+    "generation": 2,
+    "identity": "38445dcb5342aa8ca5295c7018fc4de2dc646c9b3a507d7f02767af880206105"
+  },
+  "scope": {
+    "repositories": [],
+    "visibility": "all",
+    "includeArchived": false,
+    "includeDisabled": false,
+    "includeForks": false,
+    "maxRepositories": null,
+    "concurrency": 4,
+    "severity": null
+  },
+  "repository": {
+    "repository": {
+      "owner": "octo-org",
+      "name": "broken",
+      "fullName": "octo-org/broken",
+      "defaultBranch": "main",
+      "visibility": "public",
+      "private": false,
+      "fork": false,
+      "archived": false,
+      "disabled": false,
+      "htmlUrl": "https://github.com/octo-org/broken"
+    },
+    "revision": {
+      "branch": "main",
+      "treeSha": "2222222222222222222222222222222222222222"
+    },
+    "files": [
+      ".github/workflows/bad.yml"
+    ],
+    "findings": [
+      {
+        "id": "a8c70afc9626b51a",
+        "ruleId": "parse-error",
+        "severity": "high",
+        "file": "octo-org/broken/.github/workflows/bad.yml",
+        "line": 0,
+        "fields": {
+          "type": "parse-error",
+          "sev": "high",
+          "file": "octo-org/broken/.github/workflows/bad.yml"
+        },
+        "fingerprint": "c234e541bd2d9e8d",
+        "repository": "octo-org/broken",
+        "branch": "main",
+        "url": "https://github.com/octo-org/broken/blob/main/.github/workflows/bad.yml"
+      }
+    ],
+    "errors": [],
+    "summary": {
+      "files": 1,
+      "findings": 1,
+      "totalFindings": 1,
+      "suppressed": 0,
+      "critical": 0,
+      "high": 1,
+      "medium": 0,
+      "low": 0
+    },
+    "status": "FAIL"
+  },
+  "status": "FAIL"
+}

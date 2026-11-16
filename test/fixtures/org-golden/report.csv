@@ -1,0 +1,13 @@
+record_type,status,organization,repo,file,line,id,type,sev,action,msg,url,branch,complete,critical,eligibleRepositoriesComplete,enumerationComplete,errors,expr,files,findings,high,incompleteRepositories,job,limitedByMaxRepositories,low,medium,ref,repositoriesDiscovered,repositoriesEligible,repositoriesFailed,repositoriesOmittedByLimit,repositoriesScanned,repositoriesSelected,repositoriesSkipped,repositoriesWithFindings,repositoriesWithWorkflows,scope,selectedRepositoriesComplete,sink,suppressed,totalFindings,visibility
+REPOSITORY,FAIL,,octo-org/app,,,,,,,,,main,,,,,1,,2,3,,,,,,,,,,,,,,,,,,,,,,public
+FINDING,,,octo-org/app,octo-org/app/.github/workflows/ci.yml,9,7b287551b34a7901,unpinned-action,high,actions/checkout@v4,,https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L9,,,,,,,,,,,,,,,,v4,,,,,,,,,,,,,,,
+FINDING,,,octo-org/app,octo-org/app/.github/workflows/ci.yml,1,7e4fadc623fcc5dc,excessive-permissions,low,,,https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L1,,,,,,,,,,,,,,,,,,,,,,,,,,workflow-default-unspecified,,,,,
+FINDING,,,octo-org/app,octo-org/app/.github/workflows/ci.yml,11,aa41850a4cc3ce6b,script-injection,critical,,,https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L11,,,,,,,${{ github.event.issue.title }},,,,,build,,,,,,,,,,,,,,,,run,,,
+ERROR,,,octo-org/app,octo-org/app/.github/workflows/release.yml,,,,,,could not read workflow blob 348350c8a3b122eaeb4845542c3550a5f18db462 (HTTP 404),,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+REPOSITORY,FAIL,,octo-org/broken,,,,,,,,,main,,,,,0,,1,1,,,,,,,,,,,,,,,,,,,,,,public
+FINDING,,,octo-org/broken,octo-org/broken/.github/workflows/bad.yml,0,a8c70afc9626b51a,parse-error,high,,,https://github.com/octo-org/broken/blob/main/.github/workflows/bad.yml,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+REPOSITORY,OK,,octo-org/clean,,,,,,,,,main,,,,,0,,1,0,,,,,,,,,,,,,,,,,,,,,,public
+REPOSITORY,OK,,octo-org/empty,,,,,,,,,main,,,,,0,,0,0,,,,,,,,,,,,,,,,,,,,,,public
+COVERAGE,,,,,,,,,,,,,false,,false,true,,,,,,2,,false,,,,,,,0,,,,,,,false,,,,
+SUMMARY,,octo-org,,,,,,,,,,,,1,,,1,,4,4,2,,,,1,0,,4,4,1,,4,4,0,2,3,,,,0,4,
+STATUS,FAIL,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,

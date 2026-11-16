@@ -1,0 +1,12 @@
+[REPOSITORY] repo=octo-org/app visibility=public branch=main files=2 findings=3 errors=1 status=FAIL
+[FINDING] id=7b287551b34a7901 type=unpinned-action sev=high action=actions/checkout@v4 ref=v4 file=octo-org/app/.github/workflows/ci.yml repo=octo-org/app line=9 url=https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L9
+[FINDING] id=7e4fadc623fcc5dc type=excessive-permissions sev=low scope=workflow-default-unspecified file=octo-org/app/.github/workflows/ci.yml repo=octo-org/app line=1 url=https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L1
+[FINDING] id=aa41850a4cc3ce6b type=script-injection sev=critical job=build sink=run expr=${{ github.event.issue.title }} file=octo-org/app/.github/workflows/ci.yml repo=octo-org/app line=11 url=https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L11
+[ERROR] repo=octo-org/app file=octo-org/app/.github/workflows/release.yml msg=could not read workflow blob 348350c8a3b122eaeb4845542c3550a5f18db462 (HTTP 404)
+[REPOSITORY] repo=octo-org/broken visibility=public branch=main files=1 findings=1 errors=0 status=FAIL
+[FINDING] id=a8c70afc9626b51a type=parse-error sev=high file=octo-org/broken/.github/workflows/bad.yml repo=octo-org/broken line=0 url=https://github.com/octo-org/broken/blob/main/.github/workflows/bad.yml
+[REPOSITORY] repo=octo-org/clean visibility=public branch=main files=1 findings=0 errors=0 status=OK
+[REPOSITORY] repo=octo-org/empty visibility=public branch=main files=0 findings=0 errors=0 status=OK
+[COVERAGE] complete=false enumerationComplete=true selectedRepositoriesComplete=false eligibleRepositoriesComplete=false limitedByMaxRepositories=false repositoriesOmittedByLimit=0 incompleteRepositories=2
+[SUMMARY] organization=octo-org repositoriesDiscovered=4 repositoriesEligible=4 repositoriesSelected=4 repositoriesScanned=4 repositoriesWithWorkflows=3 repositoriesWithFindings=2 repositoriesFailed=1 repositoriesSkipped=0 files=4 findings=4 totalFindings=4 suppressed=0 errors=1 critical=1 high=2 medium=0 low=1
+==> FAIL

@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "actions-warden",
+          "informationUri": "https://github.com/chiz0me/actions-warden",
+          "rules": [
+            {
+              "id": "unpinned-action",
+              "shortDescription": {
+                "text": "External action or reusable workflow is not pinned to a full commit SHA."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              }
+            },
+            {
+              "id": "unpinned-docker-action",
+              "shortDescription": {
+                "text": "Docker action image is not pinned to a SHA-256 digest."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              }
+            },
+            {
+              "id": "unpinned-container-image",
+              "shortDescription": {
+                "text": "Job, service, or Docker action image is not pinned to a SHA-256 digest."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              }
+            },
+            {
+              "id": "excessive-permissions",
+              "shortDescription": {
+                "text": "Workflow or job grants broadly writable GITHUB_TOKEN permissions."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              }
+            },
+            {
+              "id": "secrets-in-env",
+              "shortDescription": {
+                "text": "Workflow- or job-level env exposes secrets to unrelated steps."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              }
+            },
+            {
+              "id": "script-injection",
+              "shortDescription": {
+                "text": "Untrusted GitHub context is interpolated into run or github-script code."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              }
+            },
+            {
+              "id": "pull-request-target-checkout",
+              "shortDescription": {
+                "text": "pull_request_target can fetch attacker-controlled code without an active checkout guard."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              }
+            },
+            {
+              "id": "reusable-workflow-secrets-inherit",
+              "shortDescription": {
+                "text": "Cross-repository reusable workflow inherits every caller secret."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              }
+            },
+            {
+              "id": "untrusted-self-hosted-runner",
+              "shortDescription": {
+                "text": "Untrusted pull-request code can reach a self-hosted runner."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              }
+            },
+            {
+              "id": "workflow-run-artifact-execution",
+              "shortDescription": {
+                "text": "Privileged workflow_run job executes files from a cross-run artifact."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              }
+            },
+            {
+              "id": "workflow-structure",
+              "shortDescription": {
+                "text": "Workflow or composite action contains invalid or ambiguous GitHub Actions syntax."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              }
+            },
+            {
+              "id": "actions-warden/error",
+              "shortDescription": {
+                "text": "actions-warden/error"
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              }
+            },
+            {
+              "id": "parse-error",
+              "shortDescription": {
+                "text": "parse-error"
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              }
+            }
+          ]
+        }
+      },
+      "invocations": [
+        {
+          "executionSuccessful": true
+        }
+      ],
+      "results": [
+        {
+          "ruleId": "unpinned-action",
+          "level": "error",
+          "message": {
+            "text": "FINDING: type=unpinned-action sev=high action=actions/checkout@v4 ref=v4 repo=octo-org/app url=https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L9 fingerprint=04f2aa0f03981937"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "octo-org/app/.github/workflows/ci.yml"
+                },
+                "region": {
+                  "startLine": 9
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "04f2aa0f03981937:1",
+            "actions-warden/id": "7b287551b34a7901",
+            "actions-warden/semantic": "04f2aa0f03981937"
+          }
+        },
+        {
+          "ruleId": "excessive-permissions",
+          "level": "note",
+          "message": {
+            "text": "FINDING: type=excessive-permissions sev=low scope=workflow-default-unspecified repo=octo-org/app url=https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L1 fingerprint=8932eed11ca8a74a"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "octo-org/app/.github/workflows/ci.yml"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "8932eed11ca8a74a:1",
+            "actions-warden/id": "7e4fadc623fcc5dc",
+            "actions-warden/semantic": "8932eed11ca8a74a"
+          }
+        },
+        {
+          "ruleId": "script-injection",
+          "level": "error",
+          "message": {
+            "text": "FINDING: type=script-injection sev=critical job=build sink=run expr=${{ github.event.issue.title }} repo=octo-org/app url=https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L11 fingerprint=08be962bbf8f1e80"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "octo-org/app/.github/workflows/ci.yml"
+                },
+                "region": {
+                  "startLine": 11
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "08be962bbf8f1e80:1",
+            "actions-warden/id": "aa41850a4cc3ce6b",
+            "actions-warden/semantic": "08be962bbf8f1e80"
+          }
+        },
+        {
+          "ruleId": "actions-warden/error",
+          "level": "error",
+          "message": {
+            "text": "could not read workflow blob 348350c8a3b122eaeb4845542c3550a5f18db462 (HTTP 404)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "octo-org/app/.github/workflows/release.yml"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "parse-error",
+          "level": "error",
+          "message": {
+            "text": "FINDING: type=parse-error sev=high repo=octo-org/broken url=https://github.com/octo-org/broken/blob/main/.github/workflows/bad.yml fingerprint=c234e541bd2d9e8d"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "octo-org/broken/.github/workflows/bad.yml"
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "c234e541bd2d9e8d:1",
+            "actions-warden/id": "a8c70afc9626b51a",
+            "actions-warden/semantic": "c234e541bd2d9e8d"
+          }
+        }
+      ]
+    }
+  ]
+}
