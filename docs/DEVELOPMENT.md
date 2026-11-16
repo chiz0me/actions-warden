@@ -85,9 +85,10 @@ src/
     config.js, baseline.js  policy and accepted-finding controls
     resolver.js, cache.js   GitHub API, caching, ref and ownership checks
     github-org.js           read-only organization/tree/blob access
-    agent-mode.js           scope-keyed organization artifacts and receipts
+    org-artifacts.js        scope-keyed organization artifacts and receipts
     org-checkpoint.js       validated atomic organization resume state
     org-schema.js           shared name/SHA patterns, severity and visibility sets, guards
+    org-run.js              shared CLI/Action organization runner: artifacts, destination checks, scan
     org-report.js           canonical organization report document and record projections
     org-report-comparison.js validated fail-closed report change analysis
     org-report-directory.js guarded compact/per-repository report layout

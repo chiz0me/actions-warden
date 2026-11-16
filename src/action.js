@@ -15,19 +15,11 @@ import { redact } from './lib/redact.js';
 import { writeFileGuarded } from './lib/writer.js';
 import { shouldFailAction } from './lib/action-status.js';
 import { createOrganizationProgressReporter } from './lib/org-progress.js';
-import { sameFilePath } from './lib/path-equality.js';
-import {
-  compareOrganizationReports,
-  loadOrganizationReport,
-} from './lib/org-report-comparison.js';
-import { createOrganizationScanArtifacts } from './lib/agent-mode.js';
-import { buildOrganizationReport } from './lib/org-report.js';
+import { runOrganizationScan } from './lib/org-run.js';
 import { SEVERITIES, VISIBILITIES } from './lib/org-schema.js';
-import { pathExists } from './lib/paths.js';
 import { loadConfig } from './lib/config.js';
 import { loadBaseline } from './lib/baseline.js';
 import {
-  assertDestinationsAreDistinct,
   assertDestinationsDoNotReplaceControls,
   assertDestinationsUseSafeNames,
   validateWriteDestination,
@@ -49,42 +41,67 @@ const FORMATS = new Set(['toon', 'json', 'text', 'csv', 'sarif', 'html']);
 const MODES = new Set(['major', 'minor', 'patch']);
 
 async function main() {
+  const inputs = readInputs();
+  assertInputCombinations(inputs);
+  const outcome = await runCommand(inputs);
+  await publishOutcome(inputs, outcome);
+}
+
+function readInputs() {
   const command = input('command') || 'audit';
   const requestedFormat = input('format') || 'auto';
   const format = requestedFormat === 'auto'
     ? (command === 'org-scan' ? 'json' : 'toon')
     : requestedFormat;
-  const cwd = resolve(input('working-directory') || process.env.GITHUB_WORKSPACE || process.cwd());
-  const workflows = parseStringList(input('workflow'), 'workflow');
-  const token = input('token') || undefined;
-  const severity = optionalChoice(input('severity'), SEVERITIES, 'severity');
-  const mode = choice(input('mode') || 'minor', MODES, 'mode');
-  const minAgeDays = nonNegativeInteger(input('min-age') || '7', 'min-age');
-  const explain = booleanInput('explain', false);
-  const offline = booleanInput('offline', false);
-  const write = booleanInput('write', false);
-  const failOnFindings = booleanInput('fail-on-findings', true);
-  const annotationsEnabled = booleanInput('annotations', true);
-  const fix = input('fix') || undefined;
-  const configPath = input('config') || undefined;
-  const ignoreConfig = booleanInput('ignore-config', false);
-  const baseline = input('baseline') || undefined;
-  const organization = input('organization') || undefined;
-  const repositories = parseStringList(input('repository'), 'repository');
-  const visibility = choice(input('visibility') || 'all', VISIBILITIES, 'visibility');
-  const includeArchived = booleanInput('include-archived', false);
-  const includeDisabled = booleanInput('include-disabled', false);
-  const includeForks = booleanInput('include-forks', false);
-  const maxRepositories = optionalPositiveInteger(input('max-repos'), 'max-repos');
-  const concurrency = positiveInteger(input('concurrency') || '4', 'concurrency');
-  const configuredCheckpointPath = input('checkpoint-path') || undefined;
-  const resumeFrom = input('resume-from') || undefined;
-  const previousReportPath = input('previous-report') || undefined;
-  const progress = booleanInput('progress', true);
-  const fresh = booleanInput('fresh', false);
-  const autoCheckpoint = booleanInput('auto-checkpoint', true);
-  let requestedOutput = input('output-path') || undefined;
+  return {
+    command,
+    format,
+    ...readRepositoryInputs(),
+    ...readOrganizationInputs(),
+    requestedOutput: input('output-path') || undefined,
+  };
+}
 
+function readRepositoryInputs() {
+  return {
+    cwd: resolve(input('working-directory') || process.env.GITHUB_WORKSPACE || process.cwd()),
+    workflows: parseStringList(input('workflow'), 'workflow'),
+    token: input('token') || undefined,
+    severity: optionalChoice(input('severity'), SEVERITIES, 'severity'),
+    mode: choice(input('mode') || 'minor', MODES, 'mode'),
+    minAgeDays: nonNegativeInteger(input('min-age') || '7', 'min-age'),
+    explain: booleanInput('explain', false),
+    offline: booleanInput('offline', false),
+    write: booleanInput('write', false),
+    failOnFindings: booleanInput('fail-on-findings', true),
+    annotationsEnabled: booleanInput('annotations', true),
+    fix: input('fix') || undefined,
+    configPath: input('config') || undefined,
+    ignoreConfig: booleanInput('ignore-config', false),
+    baseline: input('baseline') || undefined,
+  };
+}
+
+function readOrganizationInputs() {
+  return {
+    organization: input('organization') || undefined,
+    repositories: parseStringList(input('repository'), 'repository'),
+    visibility: choice(input('visibility') || 'all', VISIBILITIES, 'visibility'),
+    includeArchived: booleanInput('include-archived', false),
+    includeDisabled: booleanInput('include-disabled', false),
+    includeForks: booleanInput('include-forks', false),
+    maxRepositories: optionalPositiveInteger(input('max-repos'), 'max-repos'),
+    concurrency: positiveInteger(input('concurrency') || '4', 'concurrency'),
+    checkpointPath: input('checkpoint-path') || undefined,
+    resumeFrom: input('resume-from') || undefined,
+    previousReportPath: input('previous-report') || undefined,
+    progress: booleanInput('progress', true),
+    fresh: booleanInput('fresh', false),
+    autoCheckpoint: booleanInput('auto-checkpoint', true),
+  };
+}
+
+function assertInputCombinations({ command, format, requestedOutput, previousReportPath }) {
   if (!FORMATS.has(format)) throw new Error(`invalid format: ${format}`);
   if (command !== 'org-scan' && ['csv', 'html'].includes(format) && !requestedOutput) {
     throw new Error(`output-path is required when format is ${format}`);
@@ -95,273 +112,236 @@ async function main() {
   if (previousReportPath && format === 'sarif') {
     throw new Error('previous-report cannot be used with format sarif');
   }
+}
 
-  let result;
-  let payload;
-  let reportPath = '';
-  let activeCheckpointPath = '';
-  let checkpointResumed = false;
-  let repositoriesReused = 0;
+const COMMAND_RUNNERS = new Map([
+  ['audit', runAuditCommand],
+  ['pin', runPinCommand],
+  ['upgrade', runUpgradeCommand],
+  ['report', runReportCommand],
+  ['verify', runVerifyCommand],
+  ['org-scan', runOrganizationCommand],
+  ['rules', runRulesCommand],
+]);
 
-  if (requestedOutput && command !== 'org-scan') {
-    const outputDestination = await validateWriteDestination({
-      label: 'output-path',
-      path: requestedOutput,
-      cwd,
-    });
-    reportPath = outputDestination.path;
-    await assertDestinationsUseSafeNames([outputDestination], cwd);
-    const config = await loadConfig({
-      cwd,
-      path: ignoreConfig ? false : configPath,
-      ruleIds: listRules().map(rule => rule.id),
-    });
-    const baselinePath = baseline ?? config.baseline;
-    const baselineData = baselinePath
-      ? await loadBaseline({ path: baselinePath, cwd })
-      : { path: null };
-    await assertDestinationsDoNotReplaceControls(
-      [outputDestination],
-      [
-        { label: 'active config', path: config.path },
-        { label: 'active baseline', path: baselineData.path },
-        ...workflows.map(wf => ({ label: 'workflow file', path: resolve(cwd, wf) })),
-      ],
-    );
+async function runCommand(inputs) {
+  const reportPath = inputs.command === 'org-scan' ? '' : await guardRepositoryOutput(inputs);
+  const runner = COMMAND_RUNNERS.get(inputs.command);
+  if (!runner) throw new Error(`unknown command: ${inputs.command}`);
+  return {
+    reportPath,
+    requestedOutput: inputs.requestedOutput,
+    checkpointPath: '',
+    checkpointResumed: false,
+    repositoriesReused: 0,
+    ...await runner(inputs),
+  };
+}
+
+async function guardRepositoryOutput({
+  requestedOutput,
+  cwd,
+  ignoreConfig,
+  configPath,
+  baseline,
+  workflows,
+}) {
+  if (!requestedOutput) return '';
+  const outputDestination = await validateWriteDestination({
+    label: 'output-path',
+    path: requestedOutput,
+    cwd,
+  });
+  await assertDestinationsUseSafeNames([outputDestination], cwd);
+  const config = await loadConfig({
+    cwd,
+    path: ignoreConfig ? false : configPath,
+    ruleIds: listRules().map(rule => rule.id),
+  });
+  const baselinePath = baseline ?? config.baseline;
+  const baselineData = baselinePath
+    ? await loadBaseline({ path: baselinePath, cwd })
+    : { path: null };
+  await assertDestinationsDoNotReplaceControls(
+    [outputDestination],
+    [
+      { label: 'active config', path: config.path },
+      { label: 'active baseline', path: baselineData.path },
+      ...workflows.map(wf => ({ label: 'workflow file', path: resolve(cwd, wf) })),
+    ],
+  );
+  return outputDestination.path;
+}
+
+async function runAuditCommand(inputs) {
+  const { cwd, workflows, severity, explain, baseline, format } = inputs;
+  const result = await audit({
+    cwd,
+    workflows,
+    severity,
+    explain,
+    configPath: inputs.ignoreConfig ? false : inputs.configPath,
+    baseline,
+  });
+  return { result, payload: renderAudit(result, { format, explain, cwd }) };
+}
+
+async function runPinCommand({ cwd, workflows, write, token, fix, format }) {
+  const result = await pin({ cwd, workflows, dryRun: !write, token, fix });
+  return { result, payload: renderPin(result, { format, dryRun: !write, cwd }) };
+}
+
+async function runUpgradeCommand(inputs) {
+  const { cwd, workflows, write, token, mode, minAgeDays, fix, format } = inputs;
+  const result = await upgrade({
+    cwd,
+    workflows,
+    dryRun: !write,
+    token,
+    mode,
+    minAgeDays,
+    fix,
+  });
+  return { result, payload: renderUpgrade(result, { format, dryRun: !write, mode, cwd }) };
+}
+
+async function runReportCommand(inputs) {
+  const { cwd, workflows, token, mode, severity, explain, offline, minAgeDays } = inputs;
+  const result = await report({
+    cwd,
+    workflows,
+    token,
+    mode,
+    severity,
+    explain,
+    skipResolve: offline,
+    minAgeDays,
+    configPath: inputs.ignoreConfig ? false : inputs.configPath,
+    baseline: inputs.baseline,
+  });
+  return { result, payload: renderReport(result, { format: inputs.format, mode, cwd }) };
+}
+
+async function runVerifyCommand({ cwd, workflows, token, format }) {
+  const result = await verify({ cwd, workflows, token });
+  return { result, payload: renderVerify(result, { format, cwd }) };
+}
+
+function runRulesCommand({ format }) {
+  const rules = listRules();
+  return {
+    result: { status: 'OK' },
+    payload: renderFormat(
+      format,
+      rules.map(rule => ({ label: 'RULE', fields: rule })),
+      {
+        status: 'OK',
+        title: 'Audit rule catalog',
+        json: { schemaVersion: '1.0', rules, status: 'OK' },
+      },
+    ),
+  };
+}
+
+async function runOrganizationCommand(inputs) {
+  const { organization, cwd, format } = inputs;
+  if (!organization) throw new Error('organization is required for org-scan');
+  if (inputs.checkpointPath && inputs.resumeFrom) {
+    throw new Error('checkpoint-path and resume-from cannot be used together');
   }
-
-  switch (command) {
-    case 'audit':
-      result = await audit({
-        cwd,
-        workflows,
-        severity,
-        explain,
-        configPath: ignoreConfig ? false : configPath,
-        baseline,
-      });
-      payload = renderAudit(result, { format, explain, cwd });
-      break;
-    case 'pin':
-      result = await pin({ cwd, workflows, dryRun: !write, token, fix });
-      payload = renderPin(result, { format, dryRun: !write, cwd });
-      break;
-    case 'upgrade':
-      result = await upgrade({
-        cwd,
-        workflows,
-        dryRun: !write,
-        token,
-        mode,
-        minAgeDays,
-        fix,
-      });
-      payload = renderUpgrade(result, { format, dryRun: !write, mode, cwd });
-      break;
-    case 'report':
-      result = await report({
-        cwd,
-        workflows,
-        token,
-        mode,
-        severity,
-        explain,
-        skipResolve: offline,
-        minAgeDays,
-        configPath: ignoreConfig ? false : configPath,
-        baseline,
-      });
-      payload = renderReport(result, { format, mode, cwd });
-      break;
-    case 'verify':
-      result = await verify({ cwd, workflows, token });
-      payload = renderVerify(result, { format, cwd });
-      break;
-    case 'org-scan': {
-      if (!organization) throw new Error('organization is required for org-scan');
-      if (configuredCheckpointPath && resumeFrom) {
-        throw new Error('checkpoint-path and resume-from cannot be used together');
-      }
-      if (fresh && resumeFrom) {
-        throw new Error('fresh and resume-from cannot be used together');
-      }
-      const needsGeneratedCheckpoint = (
-        !configuredCheckpointPath
-        && !resumeFrom
-        && autoCheckpoint
-      );
-      const artifacts = await createOrganizationScanArtifacts({
+  if (inputs.fresh && inputs.resumeFrom) {
+    throw new Error('fresh and resume-from cannot be used together');
+  }
+  let progressReporter;
+  try {
+    const run = await runOrganizationScan({
+      scan: {
         organization,
         cwd,
-        repositories,
-        visibility,
-        includeArchived,
-        includeDisabled,
-        includeForks,
-        maxRepositories,
-        severity,
-        explain,
-        configPath: ignoreConfig ? false : configPath,
-        baseline,
-        reportFormat: format,
-      });
-      requestedOutput ??= artifacts.reportPath;
-      const outputDestination = await validateWriteDestination({
-        label: 'output-path',
-        path: requestedOutput,
-        cwd,
-      });
-      reportPath = outputDestination.path;
-      const selectedCheckpointPath = resumeFrom
-        ?? configuredCheckpointPath
-        ?? (needsGeneratedCheckpoint ? artifacts.checkpointPath : undefined);
-      checkpointResumed = Boolean(resumeFrom);
-      if (selectedCheckpointPath && !resumeFrom) {
-        checkpointResumed = !fresh && await pathExists(resolve(cwd, selectedCheckpointPath));
-      }
-      const checkpointDestination = selectedCheckpointPath
-        ? await validateWriteDestination({
-            label: resumeFrom ? 'resume-from' : 'checkpoint-path',
-            path: selectedCheckpointPath,
-            cwd,
-          })
-        : null;
-      activeCheckpointPath = checkpointDestination?.path ?? '';
-      const destinations = [outputDestination, checkpointDestination].filter(Boolean);
-      await assertDestinationsAreDistinct(destinations);
-      await assertDestinationsUseSafeNames(destinations, cwd);
-      await assertDestinationsDoNotReplaceControls(
-        destinations,
-        [
-          { label: 'active config', path: artifacts.configPath },
-          { label: 'active baseline', path: artifacts.baselinePath },
-        ],
-      );
-      if (
-        activeCheckpointPath
-        && await sameFilePath(activeCheckpointPath, reportPath)
-      ) throw new Error('checkpoint and report output paths must be different');
-      if (
-        previousReportPath
-        && activeCheckpointPath
-        && await sameFilePath(
-          resolve(cwd, previousReportPath),
-          activeCheckpointPath,
-        )
-      ) throw new Error('checkpoint and previous report paths must be different');
-      if (
-        previousReportPath
-        && await sameFilePath(
-          resolve(cwd, previousReportPath),
-          reportPath,
-        )
-      ) throw new Error('output and previous report paths must be different');
-      const previousReport = previousReportPath
-        ? await loadOrganizationReport({ path: previousReportPath, cwd })
-        : null;
-      const progressReporter = createOrganizationProgressReporter({
-        mode: progress ? 'plain' : 'none',
-        context: 'ci',
-        stream: process.stderr,
-      });
-      try {
-        result = await scanOrganization({
-          organization,
-          cwd,
-          token,
-          repositories,
-          visibility,
-          includeArchived,
-          includeDisabled,
-          includeForks,
-          maxRepositories,
-          concurrency,
-          severity,
-          explain,
-          configPath: ignoreConfig ? false : configPath,
-          baseline,
-          checkpointPath: activeCheckpointPath || undefined,
-          resume: checkpointResumed,
-          onProgress: event => {
-            if (event.type === 'repository-completed' && event.reused) {
-              repositoriesReused += 1;
-            }
-            progressReporter.emit(event);
-          },
+        token: inputs.token,
+        repositories: inputs.repositories,
+        visibility: inputs.visibility,
+        includeArchived: inputs.includeArchived,
+        includeDisabled: inputs.includeDisabled,
+        includeForks: inputs.includeForks,
+        maxRepositories: inputs.maxRepositories,
+        concurrency: inputs.concurrency,
+        severity: inputs.severity,
+        explain: inputs.explain,
+        configPath: inputs.ignoreConfig ? false : inputs.configPath,
+        baseline: inputs.baseline,
+      },
+      scanOrganization,
+      format,
+      output: 'file',
+      outputPath: inputs.requestedOutput,
+      checkpointPath: inputs.checkpointPath,
+      resumePath: inputs.resumeFrom,
+      fresh: inputs.fresh,
+      autoCheckpoint: inputs.autoCheckpoint,
+      previousReportPath: inputs.previousReportPath,
+      labels: { output: 'output-path', checkpoint: 'checkpoint-path', resume: 'resume-from' },
+      openProgress: () => {
+        progressReporter = createOrganizationProgressReporter({
+          mode: inputs.progress ? 'plain' : 'none',
+          context: 'ci',
+          stream: process.stderr,
         });
-      } catch (error) {
-        progressReporter.emit({
-          type: 'scan-failed',
-          organization,
-          error: String(error?.message ?? error),
-        });
-        throw error;
-      } finally {
-        progressReporter.close();
-      }
-      if (previousReport) {
-        const currentReport = buildOrganizationReport(result, { cwd });
-        result.comparison = compareOrganizationReports({
-          previous: previousReport,
-          current: currentReport,
-        });
-      }
-      payload = renderOrganizationScan(result, { format, cwd });
-      await assertDestinationsDoNotReplaceControls(
-        [{ label: 'report output', path: reportPath }],
-        [
-          { label: 'active config', path: result.configPath },
-          { label: 'active baseline', path: result.baseline.path },
-        ],
-      );
-      break;
-    }
-    case 'rules': {
-      const rules = listRules();
-      result = { status: 'OK' };
-      payload = renderFormat(
-        format,
-        rules.map(rule => ({ label: 'RULE', fields: rule })),
-        {
-          status: 'OK',
-          title: 'Audit rule catalog',
-          json: { schemaVersion: '1.0', rules, status: 'OK' },
-        },
-      );
-      break;
-    }
-    default:
-      throw new Error(`unknown command: ${command}`);
+        return progressReporter;
+      },
+    });
+    return {
+      result: run.result,
+      payload: renderOrganizationScan(run.result, { format, cwd }),
+      reportPath: run.outputDestination.path,
+      requestedOutput: run.reportPath,
+      checkpointPath: run.checkpointDestination?.path ?? '',
+      checkpointResumed: run.resumed,
+      repositoriesReused: run.repositoriesReused,
+    };
+  } finally {
+    progressReporter?.close();
   }
+}
 
+async function publishOutcome(inputs, outcome) {
+  const { command, format, cwd } = inputs;
+  const { result, payload, requestedOutput } = outcome;
   if (command !== 'org-scan' && (!['csv', 'html'].includes(format) || !requestedOutput)) {
     process.stdout.write(payload);
   }
-  const annotationResult = annotationsEnabled
+  const annotationResult = inputs.annotationsEnabled
     ? limitAnnotations(collectAnnotations({ command, result, cwd }))
     : { emitted: [], omitted: 0 };
   const annotationCommands = renderAnnotationCommands(annotationResult.emitted);
   if (annotationCommands) process.stdout.write(annotationCommands);
-
-  if (requestedOutput) {
-    reportPath ||= resolve(cwd, requestedOutput);
-    await writeFileGuarded({
-      path: reportPath,
-      content: payload,
-      dryRun: false,
-      cwd,
-    });
-    if (command === 'org-scan') {
-      process.stdout.write(
-        `Organization ${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
-      );
-    } else if (['csv', 'html'].includes(format)) {
-      process.stdout.write(
-        `${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
-      );
-    }
+  const reportPath = await writeReportOutput(inputs, outcome);
+  await publishActionOutputs(inputs, { ...outcome, reportPath }, annotationResult);
+  if (shouldFailAction({ command, result, failOnFindings: inputs.failOnFindings })) {
+    process.exitCode = 1;
   }
+}
 
+async function writeReportOutput({ command, format, cwd }, outcome) {
+  const { requestedOutput, payload } = outcome;
+  if (!requestedOutput) return outcome.reportPath;
+  const reportPath = outcome.reportPath || resolve(cwd, requestedOutput);
+  await writeFileGuarded({ path: reportPath, content: payload, dryRun: false, cwd });
+  if (command === 'org-scan') {
+    process.stdout.write(
+      `Organization ${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
+    );
+  } else if (['csv', 'html'].includes(format)) {
+    process.stdout.write(
+      `${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
+    );
+  }
+  return reportPath;
+}
+
+async function publishActionOutputs(inputs, outcome, annotationResult) {
+  const { command, cwd, write } = inputs;
+  const { result, reportPath, checkpointPath, checkpointResumed, repositoriesReused } = outcome;
   const metrics = collectActionMetrics({ command, result, repositoriesReused });
   await setOutput('status', result.status);
   await setNumericOutputs(metrics);
@@ -372,7 +352,7 @@ async function main() {
   await setOutput('annotations', String(annotationResult.emitted.length));
   await setOutput('annotations-skipped', String(annotationResult.omitted));
   await setOutput('report-path', reportPath);
-  await setOutput('checkpoint-path', activeCheckpointPath);
+  await setOutput('checkpoint-path', checkpointPath);
   await appendSummary(renderActionSummary({
     command,
     result,
@@ -381,15 +361,11 @@ async function main() {
     annotations: annotationResult.emitted.length,
     annotationsSkipped: annotationResult.omitted,
     reportPath,
-    checkpointPath: activeCheckpointPath,
+    checkpointPath,
     checkpointResumed,
     repositoriesReused,
     write,
   }));
-
-  if (shouldFailAction({ command, result, failOnFindings })) {
-    process.exitCode = 1;
-  }
 }
 
 function input(name) {

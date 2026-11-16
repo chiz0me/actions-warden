@@ -14,7 +14,7 @@
  */
 
 import { stat } from 'node:fs/promises';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 
@@ -28,29 +28,21 @@ import { listRules } from './rules/index.js';
 import { format as fmt } from './lib/formatter.js';
 import { writeFileGuarded } from './lib/writer.js';
 import { serializeBaseline } from './lib/baseline.js';
-import { createOrganizationProgressReporter } from './lib/org-progress.js';
+import {
+  createOrganizationProgressReporter,
+  isScanFailureReported,
+} from './lib/org-progress.js';
 import { redact } from './lib/redact.js';
 import { resolveTargets } from './lib/targets.js';
-import { sameFilePath } from './lib/path-equality.js';
-import {
-  compareOrganizationReports,
-  loadOrganizationReport,
-} from './lib/org-report-comparison.js';
 import {
   EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE,
-  createOrganizationScanArtifacts,
   renderOrganizationScanReceipt,
   resolveExecutionContext,
-} from './lib/agent-mode.js';
-import { buildOrganizationReport } from './lib/org-report.js';
+} from './lib/org-artifacts.js';
+import { runOrganizationScan } from './lib/org-run.js';
 import { SEVERITY_LEVELS, VISIBILITY_FILTERS } from './lib/org-schema.js';
-import { pathExists } from './lib/paths.js';
+import { writeOrganizationReportDirectory } from './lib/org-report-directory.js';
 import {
-  validateOrganizationReportDirectory,
-  writeOrganizationReportDirectory,
-} from './lib/org-report-directory.js';
-import {
-  DEFAULT_CONFIG_PATHS,
   assertDestinationsAreDistinct,
   assertDestinationsDoNotReplaceControls,
   assertDestinationsUseSafeNames,
@@ -61,7 +53,6 @@ const program = new Command();
 const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
 const FIX_ID_RE = /^[0-9a-f]{16}$/i;
-const STRUCTURED_PROGRESS_FAILURES = new WeakSet();
 let structuredProgressContext = null;
 program
   .name('actions-warden')
@@ -341,243 +332,36 @@ program.command('org-scan <organization>')
   .action(async (organization, opts, command) => {
     await validateWorkingDirectory(opts.cwd);
     assertMutuallyExclusiveFlags('--agent-mode', '--no-agent-mode');
-    const concurrency = opts.concurrency;
-    const maxRepositories = opts.maxRepos;
     const executionContext = resolveExecutionContext({
       optionValue: opts.agentMode,
       optionSource: command.getOptionValueSource('agentMode'),
       environmentValue: process.env[EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE],
     });
-    const agentMode = executionContext === 'agent';
-    const effective = { ...opts };
-    if (effective.reportDir) {
-      if (command.getOptionValueSource('format') === 'cli' && effective.format !== 'json') {
-        throw new Error('--report-dir supports only --format=json');
-      }
-      if (command.getOptionValueSource('output') === 'cli' && effective.output !== 'file') {
-        throw new Error('--report-dir cannot be used with --output=stdout');
-      }
-      effective.format = 'json';
-      effective.output = 'file';
-    }
-    const needsGeneratedReport = (
-      effective.output === 'file'
-      && !effective.outputPath
-      && !effective.reportDir
-    );
-    const needsGeneratedCheckpoint = (
-      !effective.resume
-      && !effective.checkpoint
-      && effective.autoCheckpoint !== false
-    );
-    const automaticArtifacts = await createOrganizationScanArtifacts({
-      organization,
-      cwd: effective.cwd,
-      repositories: effective.repository,
-      visibility: effective.visibility,
-      includeArchived: Boolean(effective.includeArchived),
-      includeDisabled: Boolean(effective.includeDisabled),
-      includeForks: Boolean(effective.includeForks),
-      maxRepositories,
-      severity: effective.severity,
-      explain: Boolean(effective.explain),
-      configPath: effective.ignoreConfig ? false : effective.config,
-      baseline: effective.baseline,
-      reportFormat: effective.format,
-    });
-    if (needsGeneratedReport) {
-      effective.outputPath = automaticArtifacts.reportPath;
-    }
-    if (effective.previousReport && effective.format === 'sarif') {
-      throw new Error('--previous-report cannot be used with --format=sarif');
-    }
-    const reportDirectory = effective.reportDir
-      ? await validateOrganizationReportDirectory({
-          path: effective.reportDir,
-          cwd: effective.cwd,
-        })
-      : null;
-    if (reportDirectory) assertSafeReportDirectoryName(reportDirectory, effective.cwd);
-    const outputDestination = reportDirectory
-      ? null
-      : await validateOutputDestination(effective);
-    await assertDestinationsUseSafeNames(
-      outputDestination ? [outputDestination] : [],
-      effective.cwd,
-    );
-    let checkpointPath = effective.resume ?? effective.checkpoint;
-    let resume = Boolean(effective.resume);
-    if (!checkpointPath && needsGeneratedCheckpoint) {
-      checkpointPath = automaticArtifacts.checkpointPath;
-      resume = !effective.fresh && automaticArtifacts.resume;
-    } else if (effective.checkpoint) {
-      resume = !effective.fresh && await pathExists(resolve(effective.cwd, checkpointPath));
-    }
-    const checkpointDestination = checkpointPath
-      ? await validateWriteDestination({
-          option: effective.resume ? '--resume' : '--checkpoint',
-          path: checkpointPath,
-          cwd: effective.cwd,
-        })
-      : null;
-    await assertDestinationsUseSafeNames(
-      checkpointDestination ? [checkpointDestination] : [],
-      effective.cwd,
-    );
-    const previousReportPath = effective.previousReport
-      ? resolve(effective.cwd, effective.previousReport)
-      : null;
-    if (
-      checkpointDestination
-      && outputDestination
-      && await sameFilePath(checkpointDestination.path, outputDestination.path)
-    ) {
-      throw new Error('checkpoint and report output paths must be different');
-    }
-    if (
-      previousReportPath
-      && checkpointDestination
-      && await sameFilePath(previousReportPath, checkpointDestination.path)
-    ) {
-      throw new Error('checkpoint and previous report paths must be different');
-    }
-    if (
-      previousReportPath
-      && outputDestination
-      && await sameFilePath(previousReportPath, outputDestination.path)
-    ) {
-      throw new Error('output and previous report paths must be different');
-    }
-    await assertDestinationsDoNotReplaceControls(
-      [outputDestination, checkpointDestination].filter(Boolean),
-      [
-        { label: 'active config', path: automaticArtifacts.configPath },
-        { label: 'active baseline', path: automaticArtifacts.baselinePath },
-      ],
-    );
-    if (reportDirectory) {
-      assertDirectoryDoesNotOverlapControls(reportDirectory, [
-        { label: 'checkpoint', path: checkpointDestination?.path },
-        { label: 'active config', path: automaticArtifacts.configPath },
-        { label: 'active baseline', path: automaticArtifacts.baselinePath },
-        { label: 'previous report', path: previousReportPath },
-        ...DEFAULT_CONFIG_PATHS.map(path => ({
-          label: 'reserved config path',
-          path: resolve(effective.cwd, path),
-        })),
-      ]);
-    }
-    const previousReport = effective.previousReport
-      ? await loadOrganizationReport({
-          path: effective.previousReport,
-          cwd: effective.cwd,
-        })
-      : null;
-    const progressReporter = createOrganizationProgressReporter({
-      mode: effective.progress,
-      context: command.getOptionValueSource('progress') === 'cli'
-        ? 'auto'
-        : executionContext,
-      stream: process.stderr,
-    });
-    if (progressReporter.mode === 'json') {
-      structuredProgressContext = { organization, reporter: progressReporter };
-    }
-    let repositoriesReused = 0;
-    let result;
+    const effective = resolveOrganizationScanOptions(opts, command);
+    let progressReporter;
     try {
-      try {
-        result = await scanOrganization({
-          organization,
-          cwd: effective.cwd,
-          token: effective.token,
-          repositories: effective.repository,
-          visibility: effective.visibility,
-          includeArchived: Boolean(effective.includeArchived),
-          includeDisabled: Boolean(effective.includeDisabled),
-          includeForks: Boolean(effective.includeForks),
-          maxRepositories,
-          concurrency,
-          severity: effective.severity,
-          explain: Boolean(effective.explain),
-          configPath: effective.ignoreConfig ? false : effective.config,
-          baseline: effective.baseline,
-          checkpointPath,
-          resume,
-          onProgress: event => {
-            if (event.type === 'repository-completed' && event.reused) {
-              repositoriesReused += 1;
-            }
-            progressReporter.emit(event);
-          },
-        });
-      } catch (error) {
-        progressReporter.emit({
-          type: 'scan-failed',
-          organization,
-          error: String(error?.message ?? error),
-        });
-        if (progressReporter.mode === 'json' && error && typeof error === 'object') {
-          STRUCTURED_PROGRESS_FAILURES.add(error);
-        }
-        throw error;
-      }
-      await assertDestinationsDoNotReplaceControls(
-        outputDestination ? [outputDestination] : [],
-        [
-          { label: 'active config', path: result.configPath },
-          { label: 'active baseline', path: result.baseline.path },
-          { label: 'previous report', path: previousReportPath },
-        ],
-      );
-      if (previousReport) {
-        const currentReport = buildOrganizationReport(result, { cwd: effective.cwd });
-        result.comparison = compareOrganizationReports({
-          previous: previousReport,
-          current: currentReport,
-        });
-      }
-      let reportPath = effective.outputPath;
-      let reportDirectoryPath;
-      let manifestPath;
-      if (reportDirectory) {
-        const directoryResult = await writeOrganizationReportDirectory({
-          result,
-          path: effective.reportDir,
-          cwd: effective.cwd,
-        });
-        reportPath = directoryResult.reportPath;
-        reportDirectoryPath = directoryResult.directory;
-        manifestPath = directoryResult.manifestPath;
-      } else {
-        const payload = renderOrganizationScan(result, {
-          format: effective.format,
-          cwd: effective.cwd,
-        });
-        await emit(payload, effective);
-      }
-      if (effective.output === 'file') {
-        process.stdout.write(renderOrganizationScanReceipt({
-          result,
-          reportPath,
-          reportFormat: effective.format,
-          checkpointPath: checkpointPath ?? null,
-          resumed: resume,
-          repositoriesReused,
-          reportLayout: reportDirectory ? 'directory' : 'single',
-          reportDirectory: reportDirectoryPath,
-          manifestPath,
-          kind: agentMode
-            ? 'actions-warden-agent-receipt'
-            : 'actions-warden-org-scan-receipt',
-        }));
-      }
-      process.exitCode = result.status === 'OK' ? 0 : 1;
-      progressReporter.close();
+      const run = await runOrganizationScan({
+        ...organizationRunOptions(organization, effective),
+        scanOrganization,
+        openProgress: () => {
+          progressReporter = openOrganizationProgress({
+            organization,
+            effective,
+            command,
+            executionContext,
+          });
+          return progressReporter;
+        },
+      });
+      await writeOrganizationOutput({
+        run,
+        effective,
+        agentMode: executionContext === 'agent',
+      });
+      process.exitCode = run.result.status === 'OK' ? 0 : 1;
+      progressReporter?.close();
     } catch (error) {
-      if (!structuredProgressContext) {
-        progressReporter.close();
-      }
+      if (!structuredProgressContext) progressReporter?.close();
       throw error;
     }
   });
@@ -600,7 +384,7 @@ program.parseAsync(process.argv).catch((err) => {
     process.exitCode = err.exitCode;
     return;
   }
-  if (err && typeof err === 'object' && STRUCTURED_PROGRESS_FAILURES.has(err)) {
+  if (isScanFailureReported(err)) {
     // The scan adapter already emitted the terminal structured failure.
   } else if (structuredProgressContext) {
     structuredProgressContext.reporter.emit({
@@ -659,27 +443,6 @@ function parseFixId(value) {
   return value.toLowerCase();
 }
 
-function assertDirectoryDoesNotOverlapControls(directory, controls) {
-  for (const control of controls) {
-    if (!control.path) continue;
-    const directoryPath = resolve(directory);
-    const controlPath = resolve(control.path);
-    const controlFromDirectory = relative(directoryPath, controlPath);
-    const directoryFromControl = relative(controlPath, directoryPath);
-    if (isInsideOrSame(controlFromDirectory) || isInsideOrSame(directoryFromControl)) {
-      throw new Error(`--report-dir cannot overlap the ${control.label}`);
-    }
-  }
-}
-
-function isInsideOrSame(path) {
-  return path === '' || (!isOutsidePath(path) && !isAbsolute(path));
-}
-
-function isOutsidePath(path) {
-  return path === '..' || path.startsWith(`..${sep}`);
-}
-
 async function preflightRepositoryCommand(opts, { additionalDestinations = [] } = {}) {
   await validateWorkingDirectory(opts.cwd);
   const outputDestination = await validateOutputDestination(opts);
@@ -718,10 +481,14 @@ async function validateWorkingDirectory(cwd) {
   if (!metadata.isDirectory()) throw new Error('--cwd must be an existing directory');
 }
 
-async function validateOutputDestination(opts) {
+function assertOutputPathUsesFile(opts) {
   if (opts.outputPath && opts.output !== 'file') {
     throw new Error('--output-path cannot be used with --output=stdout');
   }
+}
+
+async function validateOutputDestination(opts) {
+  assertOutputPathUsesFile(opts);
   if (opts.output !== 'file') return null;
   if (!opts.outputPath) throw new Error('--output-path is required when --output=file');
   return validateWriteDestination({
@@ -731,6 +498,102 @@ async function validateOutputDestination(opts) {
   });
 }
 
+function resolveOrganizationScanOptions(opts, command) {
+  const effective = { ...opts };
+  if (effective.reportDir) {
+    if (command.getOptionValueSource('format') === 'cli' && effective.format !== 'json') {
+      throw new Error('--report-dir supports only --format=json');
+    }
+    if (command.getOptionValueSource('output') === 'cli' && effective.output !== 'file') {
+      throw new Error('--report-dir cannot be used with --output=stdout');
+    }
+    effective.format = 'json';
+    effective.output = 'file';
+  }
+  if (effective.previousReport && effective.format === 'sarif') {
+    throw new Error('--previous-report cannot be used with --format=sarif');
+  }
+  assertOutputPathUsesFile(effective);
+  return effective;
+}
+
+function organizationRunOptions(organization, effective) {
+  return {
+    scan: {
+      organization,
+      cwd: effective.cwd,
+      token: effective.token,
+      repositories: effective.repository,
+      visibility: effective.visibility,
+      includeArchived: Boolean(effective.includeArchived),
+      includeDisabled: Boolean(effective.includeDisabled),
+      includeForks: Boolean(effective.includeForks),
+      maxRepositories: effective.maxRepos,
+      concurrency: effective.concurrency,
+      severity: effective.severity,
+      explain: Boolean(effective.explain),
+      configPath: effective.ignoreConfig ? false : effective.config,
+      baseline: effective.baseline,
+    },
+    format: effective.format,
+    output: effective.output,
+    outputPath: effective.outputPath,
+    reportDirectory: effective.reportDir,
+    checkpointPath: effective.checkpoint,
+    resumePath: effective.resume,
+    fresh: Boolean(effective.fresh),
+    autoCheckpoint: effective.autoCheckpoint !== false,
+    previousReportPath: effective.previousReport,
+    labels: { output: '--output-path', checkpoint: '--checkpoint', resume: '--resume' },
+  };
+}
+
+function openOrganizationProgress({ organization, effective, command, executionContext }) {
+  const reporter = createOrganizationProgressReporter({
+    mode: effective.progress,
+    context: command.getOptionValueSource('progress') === 'cli' ? 'auto' : executionContext,
+    stream: process.stderr,
+  });
+  if (reporter.mode === 'json') structuredProgressContext = { organization, reporter };
+  return reporter;
+}
+
+async function writeOrganizationOutput({ run, effective, agentMode }) {
+  const { result } = run;
+  let reportPath = run.reportPath;
+  let reportDirectoryPath;
+  let manifestPath;
+  if (run.reportDirectory) {
+    const directoryResult = await writeOrganizationReportDirectory({
+      result,
+      path: effective.reportDir,
+      cwd: effective.cwd,
+    });
+    reportPath = directoryResult.reportPath;
+    reportDirectoryPath = directoryResult.directory;
+    manifestPath = directoryResult.manifestPath;
+  } else {
+    const payload = renderOrganizationScan(result, {
+      format: effective.format,
+      cwd: effective.cwd,
+    });
+    await emit(payload, { ...effective, outputPath: run.reportPath });
+  }
+  if (effective.output !== 'file') return;
+  process.stdout.write(renderOrganizationScanReceipt({
+    result,
+    reportPath,
+    reportFormat: effective.format,
+    checkpointPath: run.checkpointPath,
+    resumed: run.resumed,
+    repositoriesReused: run.repositoriesReused,
+    reportLayout: run.reportDirectory ? 'directory' : 'single',
+    reportDirectory: reportDirectoryPath,
+    manifestPath,
+    kind: agentMode ? 'actions-warden-agent-receipt' : 'actions-warden-org-scan-receipt',
+  }));
+}
+
 function assertMutuallyExclusiveFlags(left, right) {
   const args = process.argv.slice(2);
   if (args.includes(left) && args.includes(right)) {
@@ -738,15 +601,3 @@ function assertMutuallyExclusiveFlags(left, right) {
   }
 }
 
-function assertSafeReportDirectoryName(path, cwd) {
-  const localPath = relative(resolve(cwd), path).split(sep).join('/');
-  if (
-    localPath === '.github/workflows'
-    || localPath.startsWith('.github/workflows/')
-    || localPath === '.github/actions'
-    || localPath.startsWith('.github/actions/')
-    || /(^|\/)action\.ya?ml(?:\/|$)/i.test(localPath)
-  ) {
-    throw new Error('--report-dir cannot use a workflow discovery path');
-  }
-}

@@ -10,6 +10,18 @@
 import { redact, redactDeep } from './redact.js';
 
 const ORGANIZATION_PROGRESS_CONTEXTS = new Set(['agent', 'auto', 'ci', 'interactive']);
+const REPORTED_SCAN_FAILURES = new WeakSet();
+
+/**
+ * Return whether a structured JSON progress channel already reported this
+ * error as a terminal `scan-failed` event, so callers do not report it twice.
+ *
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+export function isScanFailureReported(error) {
+  return Boolean(error) && typeof error === 'object' && REPORTED_SCAN_FAILURES.has(error);
+}
 
 /** Public organization progress modes accepted by the CLI. */
 export const ORGANIZATION_PROGRESS_MODES = Object.freeze([
@@ -131,8 +143,16 @@ export function createOrganizationProgressReporter({
     scheduleCleanup();
   }
 
+  function failScan(organization, error) {
+    emit({ type: 'scan-failed', organization, error: String(error?.message ?? error) });
+    if (resolvedMode === 'json' && error && typeof error === 'object') {
+      REPORTED_SCAN_FAILURES.add(error);
+    }
+  }
+
   return {
     emit,
+    failScan,
     close,
     mode: resolvedMode,
     requestedMode: mode,

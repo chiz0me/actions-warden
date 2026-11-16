@@ -16330,7 +16330,7 @@ function renderToon(records, options = {}) {
  * @param {unknown} payload
  * @returns {string}
  */
-function renderJson(payload) {
+function formatter_renderJson(payload) {
   return JSON.stringify(redactDeep(payload), null, 2) + '\n';
 }
 
@@ -16401,7 +16401,7 @@ function escapeText(value) {
 function formatter_format(format_, records, options = {}) {
   switch (format_) {
     case 'json':
-      return renderJson(options.json ?? recordsToJson(records, options));
+      return formatter_renderJson(options.json ?? recordsToJson(records, options));
     case 'text':
       return renderText(records, options);
     case 'csv':
@@ -16878,7 +16878,7 @@ function renderSarif(records, options = {}) {
     };
   });
 
-  return renderJson({
+  return formatter_renderJson({
     $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
     version: '2.1.0',
     runs: [{
@@ -18537,7 +18537,7 @@ function versionSpecificity(input) {
  * @param {string} [args.cwd]
  * @returns {Promise<WriteResult>}
  */
-async function writeFileGuarded({ path, content, dryRun = true, cwd = process.cwd() }) {
+async function writer_writeFileGuarded({ path, content, dryRun = true, cwd = process.cwd() }) {
   if (typeof path !== 'string' || path.includes('\0')) throw new Error('invalid path');
   const requestedRoot = (0,external_node_path_namespaceObject.resolve)(cwd);
   const requestedPath = (0,external_node_path_namespaceObject.resolve)(requestedRoot, path);
@@ -18965,7 +18965,7 @@ async function pin({ cwd = process.cwd(), workflows, dryRun = true, token, fix }
       const newSource = patcher_applyPatches(source, patches);
       if (newSource !== source) {
         parseWorkflowSource(newSource, file);
-        await writeFileGuarded({ path: file, content: newSource, dryRun, cwd });
+        await writer_writeFileGuarded({ path: file, content: newSource, dryRun, cwd });
       }
       changes.push(...fileChanges);
     } catch (err) {
@@ -19214,7 +19214,7 @@ async function upgrade({
       const newSource = patcher_applyPatches(source, patches);
       if (newSource !== source) {
         parseWorkflowSource(newSource, file);
-        await writeFileGuarded({ path: file, content: newSource, dryRun, cwd });
+        await writer_writeFileGuarded({ path: file, content: newSource, dryRun, cwd });
       }
       changes.push(...fileChanges);
     } catch (err) {
@@ -20352,7 +20352,7 @@ async function loadOrganizationCheckpoint({ path, cwd, identity }) {
 
 /** Validate a checkpoint destination without creating or replacing a file. */
 async function validateOrganizationCheckpointPath({ path, cwd }) {
-  return writeFileGuarded({ path, content: '', cwd, dryRun: true });
+  return writer_writeFileGuarded({ path, content: '', cwd, dryRun: true });
 }
 
 /** Serialize, redact, size-check, and atomically replace a checkpoint. */
@@ -20377,7 +20377,7 @@ async function writeOrganizationCheckpoint({
       `organization checkpoint exceeds ${MAX_ORGANIZATION_CHECKPOINT_BYTES} bytes`,
     );
   }
-  return writeFileGuarded({ path, content, cwd, dryRun: false });
+  return writer_writeFileGuarded({ path, content, cwd, dryRun: false });
 }
 
 /** Return whether a result is error-free and still matches the live revision. */
@@ -20643,7 +20643,7 @@ function org_checkpoint_stableValue(value) {
  * @param {{cwd?: string, comparison?: object}} [options]
  * @returns {object}
  */
-function buildOrganizationReport(result, {
+function org_report_buildOrganizationReport(result, {
   cwd = process.cwd(),
   comparison = result.comparison,
 } = {}) {
@@ -20816,7 +20816,7 @@ function normalizeFinding(finding, cwd) {
  * parents. Existing entries are fully resolved so a control-file symlink is
  * compared with its target rather than only with the symlink name.
  */
-async function sameFilePath(left, right) {
+async function path_equality_sameFilePath(left, right) {
   const [leftPath, rightPath] = await Promise.all([
     path_equality_canonicalPath(left),
     path_equality_canonicalPath(right),
@@ -20958,7 +20958,7 @@ function renderOrganizationScan(result, {
   cwd = process.cwd(),
   comparison = result.comparison,
 }) {
-  const report = buildOrganizationReport(result, { cwd, comparison });
+  const report = org_report_buildOrganizationReport(result, { cwd, comparison });
   if (outputFormat === 'json') {
     return formatter_format('json', [], { status: report.status, json: report });
   }
@@ -21465,7 +21465,7 @@ function repositoryCoverageComplete(repositoryResult) {
 async function assertCheckpointDoesNotReplaceControlFile(path, cwd, controlFiles) {
   const requested = (0,external_node_path_namespaceObject.resolve)(cwd, path);
   for (const controlFile of controlFiles) {
-    if (controlFile && await sameFilePath(requested, (0,external_node_path_namespaceObject.resolve)(controlFile))) {
+    if (controlFile && await path_equality_sameFilePath(requested, (0,external_node_path_namespaceObject.resolve)(controlFile))) {
       throw new Error('checkpoint path cannot replace the active config or baseline');
     }
   }
@@ -21554,6 +21554,18 @@ function hasOperationalFailure(command, result) {
 
 
 const ORGANIZATION_PROGRESS_CONTEXTS = new Set(['agent', 'auto', 'ci', 'interactive']);
+const REPORTED_SCAN_FAILURES = new WeakSet();
+
+/**
+ * Return whether a structured JSON progress channel already reported this
+ * error as a terminal `scan-failed` event, so callers do not report it twice.
+ *
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function isScanFailureReported(error) {
+  return Boolean(error) && typeof error === 'object' && REPORTED_SCAN_FAILURES.has(error);
+}
 
 /** Public organization progress modes accepted by the CLI. */
 const ORGANIZATION_PROGRESS_MODES = Object.freeze([
@@ -21675,8 +21687,16 @@ function createOrganizationProgressReporter({
     scheduleCleanup();
   }
 
+  function failScan(organization, error) {
+    emit({ type: 'scan-failed', organization, error: String(error?.message ?? error) });
+    if (resolvedMode === 'json' && error && typeof error === 'object') {
+      REPORTED_SCAN_FAILURES.add(error);
+    }
+  }
+
   return {
     emit,
+    failScan,
     close,
     mode: resolvedMode,
     requestedMode: mode,
@@ -21759,6 +21779,301 @@ function line(value) {
 
 function count(value, noun) {
   return `${value} ${noun}${value === 1 ? '' : 's'}`;
+}
+
+;// CONCATENATED MODULE: ./src/lib/destination.js
+/**
+ * Shared destination and control-file collision validation.
+ */
+
+
+
+
+
+const DEFAULT_CONFIG_PATHS = ['.actions-warden.yml', '.actions-warden.yaml'];
+
+/**
+ * Check if a path corresponds to a default workflow or composite-action path.
+ *
+ * @param {string} path
+ * @param {string} cwd
+ * @returns {boolean}
+ */
+function isDefaultWorkflowPath(path, cwd) {
+  const localPath = (0,external_node_path_namespaceObject.relative)((0,external_node_path_namespaceObject.resolve)(cwd), path).split(external_node_path_namespaceObject.sep).join('/');
+  return /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(localPath)
+    || /(^|\/)action\.ya?ml$/i.test(localPath);
+}
+
+/**
+ * Ensure destination paths cannot replace reserved config paths or default workflow paths.
+ *
+ * @param {Array<{label?: string, option?: string, path: string}>} destinations
+ * @param {string} cwd
+ */
+async function assertDestinationsUseSafeNames(destinations, cwd) {
+  await assertDestinationsDoNotReplaceControls(
+    destinations,
+    DEFAULT_CONFIG_PATHS.map(path => ({ label: 'reserved config path', path: (0,external_node_path_namespaceObject.resolve)(cwd, path) })),
+  );
+  for (const destination of destinations) {
+    if (isDefaultWorkflowPath(destination.path, cwd)) {
+      const name = destination.option || destination.label || 'destination';
+      throw new Error(`${name} cannot use a default workflow discovery path`);
+    }
+  }
+}
+
+/**
+ * Ensure destination paths do not collide with control files.
+ *
+ * @param {Array<{label?: string, option?: string, path: string}>} destinations
+ * @param {Array<{label: string, path: string|null|undefined}>} controls
+ */
+async function assertDestinationsDoNotReplaceControls(destinations, controls) {
+  for (const destination of destinations) {
+    if (!destination.path) continue;
+    for (const control of controls) {
+      if (control.path && await path_equality_sameFilePath(destination.path, (0,external_node_path_namespaceObject.resolve)(control.path))) {
+        const name = destination.option || destination.label || 'destination';
+        throw new Error(`${name} cannot replace the ${control.label}`);
+      }
+    }
+  }
+}
+
+/**
+ * Ensure multiple write destinations are distinct from each other.
+ *
+ * @param {Array<{label?: string, option?: string, path: string}>} destinations
+ */
+async function assertDestinationsAreDistinct(destinations) {
+  for (let left = 0; left < destinations.length; left += 1) {
+    for (let right = left + 1; right < destinations.length; right += 1) {
+      if (await sameFilePath(destinations[left].path, destinations[right].path)) {
+        const leftName = destinations[left].option || destinations[left].label || 'destination';
+        const rightName = destinations[right].option || destinations[right].label || 'destination';
+        throw new Error(`${leftName} and ${rightName} must use different paths`);
+      }
+    }
+  }
+}
+
+/**
+ * Validate that a write destination can be created safely.
+ *
+ * @param {{option?: string, label?: string, path: string, cwd: string}} options
+ * @returns {Promise<{option?: string, label?: string, path: string}>}
+ */
+async function validateWriteDestination({ option, label, path, cwd }) {
+  const name = option || label || 'destination';
+  if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) {
+    throw new Error(`${name} must be a non-empty path`);
+  }
+  try {
+    await writer_writeFileGuarded({ path, content: '', dryRun: true, cwd });
+    return { option, label, path: (0,external_node_path_namespaceObject.resolve)(cwd, path) };
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+      throw new Error(`parent directory for ${name} must exist`);
+    }
+    throw error;
+  }
+}
+
+;// CONCATENATED MODULE: ./src/lib/org-artifacts.js
+/**
+ * Safe organization-scan artifact defaults.
+ *
+ * There is no reliable cross-agent runtime signal, so callers select an
+ * execution context explicitly. Context controls presentation defaults only;
+ * automatic organization artifacts always derive from the same scan identity.
+ */
+
+
+
+
+
+
+
+
+
+
+/** Preferred execution-context environment variable. */
+const EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_CONTEXT';
+
+const EXECUTION_CONTEXTS = new Set(['agent', 'auto', 'ci', 'interactive']);
+
+const REPORT_EXTENSIONS = Object.freeze({
+  csv: 'csv',
+  html: 'html',
+  json: 'json',
+  sarif: 'sarif',
+  text: 'txt',
+  toon: 'toon',
+});
+const ARTIFACT_PREFIX = '.actions-warden-org-scan';
+
+/**
+ * Resolve CLI flag precedence over the ACTIONS_WARDEN_CONTEXT environment
+ * variable. Returns `auto` when neither selects a context.
+ */
+function resolveExecutionContext({
+  optionValue,
+  optionSource,
+  environmentValue,
+} = {}) {
+  if (optionSource === 'cli') return optionValue ? 'agent' : 'auto';
+  if (environmentValue !== undefined && String(environmentValue).trim() !== '') {
+    const context = String(environmentValue).trim().toLowerCase();
+    if (!EXECUTION_CONTEXTS.has(context)) {
+      throw new Error(
+        `${EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE} must be agent, auto, ci, or interactive`,
+      );
+    }
+    return context;
+  }
+  return 'auto';
+}
+
+/**
+ * Build stable, scope-specific paths for an organization scan.
+ *
+ * @param {object} options
+ * @param {string} options.organization
+ * @param {string} options.cwd
+ * @param {string[]} [options.repositories]
+ * @param {'all'|'public'|'private'|'internal'} options.visibility
+ * @param {boolean} options.includeArchived
+ * @param {boolean} options.includeDisabled
+ * @param {boolean} options.includeForks
+ * @param {number} [options.maxRepositories]
+ * @param {'low'|'medium'|'high'|'critical'} [options.severity]
+ * @param {boolean} options.explain
+ * @param {string|false} [options.configPath]
+ * @param {string} [options.baseline]
+ * @param {'toon'|'json'|'text'|'csv'|'sarif'|'html'} options.reportFormat
+ */
+async function createOrganizationScanArtifacts({
+  organization,
+  cwd,
+  repositories,
+  visibility,
+  includeArchived,
+  includeDisabled,
+  includeForks,
+  maxRepositories,
+  severity,
+  explain,
+  configPath,
+  baseline,
+  reportFormat,
+}) {
+  validateOrganization(organization);
+  const patterns = normalizePatterns(repositories);
+  const config = await loadConfig({
+    cwd,
+    path: configPath,
+    ruleIds: RULES.map(rule => rule.id),
+  });
+  const baselinePath = baseline ?? config.baseline;
+  const baselineData = baselinePath
+    ? await loadBaseline({ path: baselinePath, cwd })
+    : emptyBaseline();
+  const identity = createOrganizationCheckpointIdentity({
+    organization,
+    repositories: patterns,
+    visibility,
+    includeArchived,
+    includeDisabled,
+    includeForks,
+    maxRepositories,
+    severity,
+    explain,
+    config,
+    baselineData,
+  });
+  const key = createOrganizationCheckpointArtifactKey(identity);
+  const groupedKey = key.match(/.{8}/g).join('.');
+  const checkpointPath = `${ARTIFACT_PREFIX}.${groupedKey}.checkpoint.json`;
+  const reportExtension = REPORT_EXTENSIONS[reportFormat];
+  if (!reportExtension) throw new Error(`invalid organization report format: ${reportFormat}`);
+  const reportPath = `${ARTIFACT_PREFIX}.${groupedKey}.report.${reportExtension}`;
+
+  return {
+    checkpointPath,
+    reportPath,
+    resume: await pathExists((0,external_node_path_namespaceObject.resolve)(cwd, checkpointPath)),
+    configPath: config.path,
+    baselinePath: baselineData.path,
+  };
+}
+
+/**
+ * Render the bounded stdout contract emitted after an organization file report.
+ */
+function renderOrganizationScanReceipt({
+  result,
+  reportPath,
+  reportFormat,
+  checkpointPath,
+  resumed,
+  repositoriesReused = 0,
+  reportLayout = 'single',
+  reportDirectory,
+  manifestPath,
+  kind = 'actions-warden-org-scan-receipt',
+}) {
+  return format('json', [], {
+    status: result.status,
+    json: {
+      schemaVersion: '1.0',
+      kind,
+      command: 'org-scan',
+      organization: result.organization,
+      status: result.status,
+      summary: result.summary,
+      report: {
+        path: reportPath,
+        format: reportFormat,
+        layout: reportLayout,
+        ...(reportDirectory ? { directory: reportDirectory } : {}),
+        ...(manifestPath ? { manifest: manifestPath } : {}),
+      },
+      checkpoint: {
+        path: checkpointPath,
+        resumed,
+        repositoriesReused,
+      },
+      coverage: compactCoverage(result.coverage),
+      ...(result.comparison ? { comparison: result.comparison.summary } : {}),
+    },
+  });
+}
+
+function compactCoverage(coverage = {}) {
+  return {
+    complete: coverage.complete === true,
+    enumerationComplete: coverage.enumerationComplete === true,
+    selectedRepositoriesComplete: coverage.selectedRepositoriesComplete === true,
+    eligibleRepositoriesComplete: coverage.eligibleRepositoriesComplete === true,
+    limitedByMaxRepositories: coverage.limitedByMaxRepositories === true,
+    repositoriesOmittedByLimit: Number.isSafeInteger(coverage.repositoriesOmittedByLimit)
+      ? coverage.repositoriesOmittedByLimit
+      : 0,
+    incompleteRepositories: Array.isArray(coverage.incompleteRepositories)
+      ? coverage.incompleteRepositories.length
+      : 0,
+  };
+}
+
+function validateOrganization(organization) {
+  if (
+    typeof organization !== 'string'
+    || !NAME_RE.test(organization)
+    || organization === '.'
+    || organization === '..'
+  ) throw new Error('invalid organization');
 }
 
 ;// CONCATENATED MODULE: ./src/lib/org-report-comparison.js
@@ -22262,13 +22577,13 @@ function compareFindings(left, right) {
     || left.id.localeCompare(right.id);
 }
 
-;// CONCATENATED MODULE: ./src/lib/agent-mode.js
+;// CONCATENATED MODULE: ./src/lib/org-report-directory.js
 /**
- * Safe organization-scan artifact defaults.
+ * Guarded directory layout for large organization JSON reports.
  *
- * There is no reliable cross-agent runtime signal, so callers select an
- * execution context explicitly. Context controls presentation defaults only;
- * automatic organization artifacts always derive from the same scan identity.
+ * The aggregate is intentionally compact. Complete repository evidence is
+ * stored in independently hashed JSON files, and a manifest written last makes
+ * the current artifact set explicit. Existing unrelated files are preserved.
  */
 
 
@@ -22279,282 +22594,484 @@ function compareFindings(left, right) {
 
 
 
-
-/** Preferred execution-context environment variable. */
-const EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_CONTEXT';
-
-const EXECUTION_CONTEXTS = new Set(['agent', 'auto', 'ci', 'interactive']);
-
-const REPORT_EXTENSIONS = Object.freeze({
-  csv: 'csv',
-  html: 'html',
-  json: 'json',
-  sarif: 'sarif',
-  text: 'txt',
-  toon: 'toon',
-});
-const ARTIFACT_PREFIX = '.actions-warden-org-scan';
+const AGGREGATE_FILENAME = 'organization-report.json';
+const COMPARISON_FILENAME = 'organization-comparison.json';
+const MANIFEST_FILENAME = 'manifest.json';
+const REPOSITORIES_DIRECTORY = 'repositories';
 
 /**
- * Resolve CLI flag precedence over the ACTIONS_WARDEN_CONTEXT environment
- * variable. Returns `auto` when neither selects a context.
+ * Validate a future organization report directory without creating it.
+ * Existing path components and owned entries must be real directories/files,
+ * never symbolic links.
  */
-function resolveExecutionContext({
-  optionValue,
-  optionSource,
-  environmentValue,
-} = {}) {
-  if (optionSource === 'cli') return optionValue ? 'agent' : 'auto';
-  if (environmentValue !== undefined && String(environmentValue).trim() !== '') {
-    const context = String(environmentValue).trim().toLowerCase();
-    if (!EXECUTION_CONTEXTS.has(context)) {
-      throw new Error(
-        `${EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE} must be agent, auto, ci, or interactive`,
-      );
-    }
-    return context;
-  }
-  return 'auto';
+async function validateOrganizationReportDirectory({ path, cwd = process.cwd() }) {
+  const directory = await resolveGuardedDirectory({ path, cwd, create: false });
+  await validateExistingLayout(directory);
+  return directory;
 }
 
 /**
- * Build stable, scope-specific paths for an organization scan.
- *
- * @param {object} options
- * @param {string} options.organization
- * @param {string} options.cwd
- * @param {string[]} [options.repositories]
- * @param {'all'|'public'|'private'|'internal'} options.visibility
- * @param {boolean} options.includeArchived
- * @param {boolean} options.includeDisabled
- * @param {boolean} options.includeForks
- * @param {number} [options.maxRepositories]
- * @param {'low'|'medium'|'high'|'critical'} [options.severity]
- * @param {boolean} options.explain
- * @param {string|false} [options.configPath]
- * @param {string} [options.baseline]
- * @param {'toon'|'json'|'text'|'csv'|'sarif'|'html'} options.reportFormat
+ * Write a compact aggregate, complete per-repository JSON artifacts, optional
+ * comparison evidence, and a final integrity manifest.
  */
-async function createOrganizationScanArtifacts({
-  organization,
-  cwd,
-  repositories,
-  visibility,
-  includeArchived,
-  includeDisabled,
-  includeForks,
-  maxRepositories,
-  severity,
-  explain,
-  configPath,
-  baseline,
-  reportFormat,
-}) {
-  validateOrganization(organization);
-  const patterns = normalizePatterns(repositories);
-  const config = await loadConfig({
-    cwd,
-    path: configPath,
-    ruleIds: RULES.map(rule => rule.id),
-  });
-  const baselinePath = baseline ?? config.baseline;
-  const baselineData = baselinePath
-    ? await loadBaseline({ path: baselinePath, cwd })
-    : emptyBaseline();
-  const identity = createOrganizationCheckpointIdentity({
-    organization,
-    repositories: patterns,
-    visibility,
-    includeArchived,
-    includeDisabled,
-    includeForks,
-    maxRepositories,
-    severity,
-    explain,
-    config,
-    baselineData,
-  });
-  const key = createOrganizationCheckpointArtifactKey(identity);
-  const groupedKey = key.match(/.{8}/g).join('.');
-  const checkpointPath = `${ARTIFACT_PREFIX}.${groupedKey}.checkpoint.json`;
-  const reportExtension = REPORT_EXTENSIONS[reportFormat];
-  if (!reportExtension) throw new Error(`invalid organization report format: ${reportFormat}`);
-  const reportPath = `${ARTIFACT_PREFIX}.${groupedKey}.report.${reportExtension}`;
-
-  return {
-    checkpointPath,
-    reportPath,
-    resume: await pathExists((0,external_node_path_namespaceObject.resolve)(cwd, checkpointPath)),
-    configPath: config.path,
-    baselinePath: baselineData.path,
-  };
-}
-
-/**
- * Render the bounded stdout contract emitted after an organization file report.
- */
-function renderOrganizationScanReceipt({
+async function writeOrganizationReportDirectory({
   result,
-  reportPath,
-  reportFormat,
-  checkpointPath,
-  resumed,
-  repositoriesReused = 0,
-  reportLayout = 'single',
-  reportDirectory,
-  manifestPath,
-  kind = 'actions-warden-org-scan-receipt',
+  path,
+  cwd = process.cwd(),
 }) {
-  return format('json', [], {
-    status: result.status,
-    json: {
-      schemaVersion: '1.0',
-      kind,
-      command: 'org-scan',
-      organization: result.organization,
-      status: result.status,
-      summary: result.summary,
-      report: {
-        path: reportPath,
-        format: reportFormat,
-        layout: reportLayout,
-        ...(reportDirectory ? { directory: reportDirectory } : {}),
-        ...(manifestPath ? { manifest: manifestPath } : {}),
-      },
-      checkpoint: {
-        path: checkpointPath,
-        resumed,
-        repositoriesReused,
-      },
-      coverage: compactCoverage(result.coverage),
-      ...(result.comparison ? { comparison: result.comparison.summary } : {}),
-    },
-  });
-}
+  const directory = await resolveGuardedDirectory({ path, cwd, create: true });
+  await validateExistingLayout(directory);
+  const repositoriesDirectory = join(directory, REPOSITORIES_DIRECTORY);
+  await ensureDirectory(repositoriesDirectory);
 
-function compactCoverage(coverage = {}) {
+  const complete = buildOrganizationReport(result, { cwd });
+  const repositoryArtifacts = [];
+  const compactRepositories = [];
+  for (const repositoryResult of complete.repositories) {
+    const artifactName = repositoryArtifactName(repositoryResult.repository);
+    const artifactPath = join(repositoriesDirectory, artifactName);
+    const relativePath = `${REPOSITORIES_DIRECTORY}/${artifactName}`;
+    const content = renderJson({
+      schemaVersion: '1.0',
+      kind: 'actions-warden-org-scan-repository',
+      organization: complete.organization,
+      analysis: complete.analysis,
+      scope: complete.scope,
+      repository: repositoryResult,
+      status: repositoryResult.status,
+    });
+    await writeFileGuarded({ path: artifactPath, content, dryRun: false, cwd });
+    const artifact = integrity(relativePath, content);
+    repositoryArtifacts.push({
+      repository: repositoryResult.repository.fullName,
+      ...artifact,
+    });
+    compactRepositories.push({
+      repository: repositoryResult.repository,
+      revision: repositoryResult.revision,
+      summary: repositoryResult.summary,
+      status: repositoryResult.status,
+      files: repositoryResult.files.length,
+      findings: repositoryResult.findings.length,
+      errors: repositoryResult.errors.length,
+      artifact,
+    });
+  }
+
+  let comparisonArtifact;
+  if (complete.comparison) {
+    const content = renderJson(complete.comparison);
+    await writeFileGuarded({
+      path: join(directory, COMPARISON_FILENAME),
+      content,
+      dryRun: false,
+      cwd,
+    });
+    comparisonArtifact = integrity(COMPARISON_FILENAME, content);
+  }
+
+  const aggregate = {
+    schemaVersion: '1.0',
+    kind: 'actions-warden-org-scan-directory',
+    organization: complete.organization,
+    analysis: complete.analysis,
+    scope: complete.scope,
+    coverage: complete.coverage,
+    repositories: compactRepositories,
+    summary: complete.summary,
+    baseline: complete.baseline,
+    configPath: complete.configPath,
+    ...(complete.comparison ? {
+      comparison: {
+        summary: complete.comparison.summary,
+        artifact: comparisonArtifact,
+      },
+    } : {}),
+    status: complete.status,
+  };
+  const aggregateContent = renderJson(aggregate);
+  await writeFileGuarded({
+    path: join(directory, AGGREGATE_FILENAME),
+    content: aggregateContent,
+    dryRun: false,
+    cwd,
+  });
+  const aggregateArtifact = integrity(AGGREGATE_FILENAME, aggregateContent);
+  const manifest = {
+    schemaVersion: '1.0',
+    kind: 'actions-warden-org-scan-manifest',
+    organization: complete.organization,
+    analysis: complete.analysis,
+    report: aggregateArtifact,
+    repositories: repositoryArtifacts,
+    ...(comparisonArtifact ? { comparison: comparisonArtifact } : {}),
+    status: complete.status,
+  };
+  await writeFileGuarded({
+    path: join(directory, MANIFEST_FILENAME),
+    content: renderJson(manifest),
+    dryRun: false,
+    cwd,
+  });
+
   return {
-    complete: coverage.complete === true,
-    enumerationComplete: coverage.enumerationComplete === true,
-    selectedRepositoriesComplete: coverage.selectedRepositoriesComplete === true,
-    eligibleRepositoriesComplete: coverage.eligibleRepositoriesComplete === true,
-    limitedByMaxRepositories: coverage.limitedByMaxRepositories === true,
-    repositoriesOmittedByLimit: Number.isSafeInteger(coverage.repositoriesOmittedByLimit)
-      ? coverage.repositoriesOmittedByLimit
-      : 0,
-    incompleteRepositories: Array.isArray(coverage.incompleteRepositories)
-      ? coverage.incompleteRepositories.length
-      : 0,
+    directory: canonicalPath(directory, cwd),
+    reportPath: canonicalPath(join(directory, AGGREGATE_FILENAME), cwd),
+    manifestPath: canonicalPath(join(directory, MANIFEST_FILENAME), cwd),
+    repositories: repositoryArtifacts.length,
   };
 }
 
-function validateOrganization(organization) {
-  if (
-    typeof organization !== 'string'
-    || !NAME_RE.test(organization)
-    || organization === '.'
-    || organization === '..'
-  ) throw new Error('invalid organization');
-}
-
-;// CONCATENATED MODULE: ./src/lib/destination.js
-/**
- * Shared destination and control-file collision validation.
- */
-
-
-
-
-
-const DEFAULT_CONFIG_PATHS = ['.actions-warden.yml', '.actions-warden.yaml'];
-
-/**
- * Check if a path corresponds to a default workflow or composite-action path.
- *
- * @param {string} path
- * @param {string} cwd
- * @returns {boolean}
- */
-function isDefaultWorkflowPath(path, cwd) {
-  const localPath = (0,external_node_path_namespaceObject.relative)((0,external_node_path_namespaceObject.resolve)(cwd), path).split(external_node_path_namespaceObject.sep).join('/');
-  return /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(localPath)
-    || /(^|\/)action\.ya?ml$/i.test(localPath);
-}
-
-/**
- * Ensure destination paths cannot replace reserved config paths or default workflow paths.
- *
- * @param {Array<{label?: string, option?: string, path: string}>} destinations
- * @param {string} cwd
- */
-async function assertDestinationsUseSafeNames(destinations, cwd) {
-  await assertDestinationsDoNotReplaceControls(
-    destinations,
-    DEFAULT_CONFIG_PATHS.map(path => ({ label: 'reserved config path', path: (0,external_node_path_namespaceObject.resolve)(cwd, path) })),
-  );
-  for (const destination of destinations) {
-    if (isDefaultWorkflowPath(destination.path, cwd)) {
-      const name = destination.option || destination.label || 'destination';
-      throw new Error(`${name} cannot use a default workflow discovery path`);
-    }
+async function resolveGuardedDirectory({ path, cwd, create }) {
+  if (typeof path !== 'string' || !path || path.includes('\0')) {
+    throw new Error('--report-dir must be a non-empty path');
   }
-}
-
-/**
- * Ensure destination paths do not collide with control files.
- *
- * @param {Array<{label?: string, option?: string, path: string}>} destinations
- * @param {Array<{label: string, path: string|null|undefined}>} controls
- */
-async function assertDestinationsDoNotReplaceControls(destinations, controls) {
-  for (const destination of destinations) {
-    if (!destination.path) continue;
-    for (const control of controls) {
-      if (control.path && await sameFilePath(destination.path, (0,external_node_path_namespaceObject.resolve)(control.path))) {
-        const name = destination.option || destination.label || 'destination';
-        throw new Error(`${name} cannot replace the ${control.label}`);
+  const requestedRoot = (0,external_node_path_namespaceObject.resolve)(cwd);
+  const requested = (0,external_node_path_namespaceObject.resolve)(requestedRoot, path);
+  if (!(0,external_node_path_namespaceObject.isAbsolute)(path) && org_report_directory_isOutside((0,external_node_path_namespaceObject.relative)(requestedRoot, requested))) {
+    throw new Error(`refusing to write outside working directory: ${path}`);
+  }
+  const root = await (0,promises_namespaceObject.realpath)(requestedRoot);
+  const lexicalRelative = (0,external_node_path_namespaceObject.relative)(requestedRoot, requested);
+  if (org_report_directory_isOutside(lexicalRelative)) {
+    throw new Error(`refusing to write outside working directory: ${path}`);
+  }
+  if (lexicalRelative === '') {
+    throw new Error('--report-dir must be a dedicated subdirectory inside the working directory');
+  }
+  let cursor = root;
+  for (const segment of lexicalRelative.split(external_node_path_namespaceObject.sep).filter(Boolean)) {
+    cursor = (0,external_node_path_namespaceObject.join)(cursor, segment);
+    try {
+      const metadata = await (0,promises_namespaceObject.lstat)(cursor);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+        throw new Error(`organization report path is not a regular directory: ${cursor}`);
       }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      if (create) await (0,promises_namespaceObject.mkdir)(cursor, { mode: 0o700 });
     }
   }
+  // Keep the caller's lexical root for stable workspace-relative receipt
+  // paths. Every component above was still checked through the real root.
+  return requested;
 }
 
-/**
- * Ensure multiple write destinations are distinct from each other.
- *
- * @param {Array<{label?: string, option?: string, path: string}>} destinations
- */
-async function assertDestinationsAreDistinct(destinations) {
-  for (let left = 0; left < destinations.length; left += 1) {
-    for (let right = left + 1; right < destinations.length; right += 1) {
-      if (await sameFilePath(destinations[left].path, destinations[right].path)) {
-        const leftName = destinations[left].option || destinations[left].label || 'destination';
-        const rightName = destinations[right].option || destinations[right].label || 'destination';
-        throw new Error(`${leftName} and ${rightName} must use different paths`);
-      }
-    }
-  }
-}
-
-/**
- * Validate that a write destination can be created safely.
- *
- * @param {{option?: string, label?: string, path: string, cwd: string}} options
- * @returns {Promise<{option?: string, label?: string, path: string}>}
- */
-async function validateWriteDestination({ option, label, path, cwd }) {
-  const name = option || label || 'destination';
-  if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) {
-    throw new Error(`${name} must be a non-empty path`);
-  }
+async function validateExistingLayout(directory) {
   try {
-    await writeFileGuarded({ path, content: '', dryRun: true, cwd });
-    return { option, label, path: (0,external_node_path_namespaceObject.resolve)(cwd, path) };
-  } catch (error) {
-    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
-      throw new Error(`parent directory for ${name} must exist`);
+    const metadata = await (0,promises_namespaceObject.lstat)(directory);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error(`organization report path is not a regular directory: ${directory}`);
     }
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
     throw error;
   }
+  for (const name of [AGGREGATE_FILENAME, COMPARISON_FILENAME, MANIFEST_FILENAME]) {
+    await validateOptionalFile((0,external_node_path_namespaceObject.join)(directory, name));
+  }
+  const repositoriesDirectory = (0,external_node_path_namespaceObject.join)(directory, REPOSITORIES_DIRECTORY);
+  try {
+    const metadata = await (0,promises_namespaceObject.lstat)(repositoriesDirectory);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error(`organization report repositories path is unsafe: ${repositoriesDirectory}`);
+    }
+    const entries = await (0,promises_namespaceObject.readdir)(repositoriesDirectory, { withFileTypes: true });
+    if (entries.some(entry => entry.isSymbolicLink() || !entry.isFile())) {
+      throw new Error(`organization report repositories contain an unsafe entry: ${repositoriesDirectory}`);
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
+async function validateOptionalFile(path) {
+  try {
+    const metadata = await (0,promises_namespaceObject.lstat)(path);
+    if (metadata.isSymbolicLink() || !metadata.isFile()) {
+      throw new Error(`organization report artifact is not a regular file: ${path}`);
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
+async function ensureDirectory(path) {
+  try {
+    const metadata = await lstat(path);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error(`organization report path is not a regular directory: ${path}`);
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    await mkdir(path, { mode: 0o700 });
+  }
+}
+
+function repositoryArtifactName(repository) {
+  const name = String(repository?.name ?? 'repository').toLowerCase();
+  const safeName = /^[a-z0-9_.-]+$/.test(name) ? name : 'repository';
+  const hash = createHash('sha256')
+    .update(String(repository?.fullName ?? '').toLowerCase())
+    .digest('hex')
+    .slice(0, 16);
+  return `${safeName}.${hash}.json`;
+}
+
+function integrity(path, content) {
+  return {
+    path,
+    bytes: Buffer.byteLength(content),
+    sha256: createHash('sha256').update(content).digest('hex'),
+  };
+}
+
+function org_report_directory_isOutside(value) {
+  return value === '..' || value.startsWith(`..${external_node_path_namespaceObject.sep}`) || (0,external_node_path_namespaceObject.isAbsolute)(value);
+}
+
+;// CONCATENATED MODULE: ./src/lib/org-run.js
+/**
+ * Organization scan runner shared by the CLI and the GitHub Action.
+ *
+ * The runner owns everything between parsed adapter options and a finished
+ * scan: automatic artifact names, checkpoint selection, every destination and
+ * control-file check (all before the first network request), previous-report
+ * loading, the scan, reused-repository counting, and comparison. Adapters keep
+ * input parsing and output.
+ */
+
+
+
+
+
+
+
+
+
+
+/**
+ * @typedef {object} OrganizationRunOptions
+ * @property {object} scan Options for `scanOrganization` except `checkpointPath`,
+ *   `resume`, and `onProgress`, which the runner supplies. Must include
+ *   `organization`, `cwd`, and `visibility`.
+ * @property {(options: object) => Promise<object>} scanOrganization The scan
+ *   implementation. Callers inject it so this library module does not depend on
+ *   `src/commands/`.
+ * @property {'toon'|'json'|'text'|'csv'|'sarif'|'html'} format Report format.
+ * @property {'file'|'stdout'} output Whether the report is saved or printed.
+ * @property {string} [outputPath] Explicit report path; defaults to the automatic one.
+ * @property {string} [reportDirectory] Dedicated report directory, instead of one file.
+ * @property {string} [checkpointPath] Explicit checkpoint to create or resume.
+ * @property {string} [resumePath] Explicit checkpoint that must be resumed.
+ * @property {boolean} [fresh] Replace rather than resume the selected checkpoint.
+ * @property {boolean} [autoCheckpoint] Use the scope-keyed automatic checkpoint (default true).
+ * @property {string} [previousReportPath] Prior organization JSON report to compare against.
+ * @property {{output: string, checkpoint: string, resume: string}} labels Option names
+ *   used in destination error messages, such as `--checkpoint` or `checkpoint-path`.
+ * @property {() => {emit: Function, failScan: Function}} openProgress Called once, after
+ *   preflight and before the scan, to obtain the progress reporter.
+ */
+
+/**
+ * Run a guarded organization scan: resolve artifacts, validate every
+ * destination, load any previous report, scan, and attach the comparison.
+ *
+ * @param {OrganizationRunOptions} options
+ * @returns {Promise<{result: object, reportPath: string|undefined,
+ *   checkpointPath: string|null, resumed: boolean, repositoriesReused: number,
+ *   outputDestination: object|null, checkpointDestination: object|null,
+ *   reportDirectory: string|null}>}
+ */
+async function runOrganizationScan(options) {
+  const { scan, format } = options;
+  const artifacts = await createOrganizationScanArtifacts({ ...scan, reportFormat: format });
+  const report = await selectReportDestination(options, artifacts);
+  const checkpoint = await selectCheckpoint(options, artifacts);
+  const previousPath = options.previousReportPath
+    ? (0,external_node_path_namespaceObject.resolve)(scan.cwd, options.previousReportPath)
+    : null;
+  await assertNoDestinationCollisions({ artifacts, report, checkpoint, previousPath, scan });
+  const previousReport = options.previousReportPath
+    ? await loadOrganizationReport({ path: options.previousReportPath, cwd: scan.cwd })
+    : null;
+
+  const progress = options.openProgress();
+  const { result, repositoriesReused } = await scanWithProgress(options, checkpoint, progress);
+  await assertDestinationsDoNotReplaceControls(
+    report.destination ? [report.destination] : [],
+    [
+      { label: 'active config', path: result.configPath },
+      { label: 'active baseline', path: result.baseline.path },
+      { label: 'previous report', path: previousPath },
+    ],
+  );
+  if (previousReport) {
+    result.comparison = compareOrganizationReports({
+      previous: previousReport,
+      current: org_report_buildOrganizationReport(result, { cwd: scan.cwd }),
+    });
+  }
+  return {
+    result,
+    reportPath: report.outputPath,
+    checkpointPath: checkpoint.path ?? null,
+    resumed: checkpoint.resume,
+    repositoriesReused,
+    outputDestination: report.destination,
+    checkpointDestination: checkpoint.destination,
+    reportDirectory: report.directory,
+  };
+}
+
+async function selectReportDestination(options, artifacts) {
+  const { cwd } = options.scan;
+  if (options.reportDirectory) {
+    const directory = await validateOrganizationReportDirectory({
+      path: options.reportDirectory,
+      cwd,
+    });
+    assertSafeReportDirectoryName(directory, cwd);
+    return { directory, outputPath: undefined, destination: null };
+  }
+  if (options.output !== 'file') {
+    return { directory: null, outputPath: undefined, destination: null };
+  }
+  const outputPath = options.outputPath ?? artifacts.reportPath;
+  const destination = await validateWriteDestination({
+    label: options.labels.output,
+    path: outputPath,
+    cwd,
+  });
+  await assertDestinationsUseSafeNames([destination], cwd);
+  return { directory: null, outputPath, destination };
+}
+
+async function selectCheckpoint(options, artifacts) {
+  const { cwd } = options.scan;
+  const selection = await chooseCheckpoint(options, artifacts);
+  if (!selection) return { path: undefined, resume: false, destination: null };
+  const destination = await validateWriteDestination({
+    label: selection.label,
+    path: selection.path,
+    cwd,
+  });
+  await assertDestinationsUseSafeNames([destination], cwd);
+  return { ...selection, destination };
+}
+
+async function chooseCheckpoint(options, artifacts) {
+  const { labels, fresh, resumePath, checkpointPath, autoCheckpoint = true } = options;
+  if (resumePath) return { path: resumePath, resume: true, label: labels.resume };
+  if (checkpointPath) {
+    const exists = await pathExists((0,external_node_path_namespaceObject.resolve)(options.scan.cwd, checkpointPath));
+    return { path: checkpointPath, resume: !fresh && exists, label: labels.checkpoint };
+  }
+  if (!autoCheckpoint) return null;
+  return {
+    path: artifacts.checkpointPath,
+    resume: !fresh && artifacts.resume,
+    label: labels.checkpoint,
+  };
+}
+
+async function assertNoDestinationCollisions({
+  artifacts,
+  report,
+  checkpoint,
+  previousPath,
+  scan,
+}) {
+  const output = report.destination;
+  const saved = checkpoint.destination;
+  await assertDifferentPaths(
+    saved?.path,
+    output?.path,
+    'checkpoint and report output paths must be different',
+  );
+  await assertDifferentPaths(
+    previousPath,
+    saved?.path,
+    'checkpoint and previous report paths must be different',
+  );
+  await assertDifferentPaths(
+    previousPath,
+    output?.path,
+    'output and previous report paths must be different',
+  );
+  const controls = [
+    { label: 'active config', path: artifacts.configPath },
+    { label: 'active baseline', path: artifacts.baselinePath },
+  ];
+  await assertDestinationsDoNotReplaceControls([output, saved].filter(Boolean), controls);
+  if (report.directory) {
+    assertDirectoryDoesNotOverlapControls(report.directory, [
+      { label: 'checkpoint', path: saved?.path },
+      ...controls,
+      { label: 'previous report', path: previousPath },
+      ...DEFAULT_CONFIG_PATHS.map(path => ({
+        label: 'reserved config path',
+        path: (0,external_node_path_namespaceObject.resolve)(scan.cwd, path),
+      })),
+    ]);
+  }
+}
+
+async function assertDifferentPaths(left, right, message) {
+  if (left && right && await path_equality_sameFilePath(left, right)) throw new Error(message);
+}
+
+async function scanWithProgress(options, checkpoint, progress) {
+  let repositoriesReused = 0;
+  try {
+    const result = await options.scanOrganization({
+      ...options.scan,
+      checkpointPath: checkpoint.path,
+      resume: checkpoint.resume,
+      onProgress: event => {
+        if (event.type === 'repository-completed' && event.reused) repositoriesReused += 1;
+        progress.emit(event);
+      },
+    });
+    return { result, repositoriesReused };
+  } catch (error) {
+    progress.failScan(options.scan.organization, error);
+    throw error;
+  }
+}
+
+function assertSafeReportDirectoryName(path, cwd) {
+  const localPath = (0,external_node_path_namespaceObject.relative)((0,external_node_path_namespaceObject.resolve)(cwd), path).split(external_node_path_namespaceObject.sep).join('/');
+  if (
+    localPath === '.github/workflows'
+    || localPath.startsWith('.github/workflows/')
+    || localPath === '.github/actions'
+    || localPath.startsWith('.github/actions/')
+    || /(^|\/)action\.ya?ml(?:\/|$)/i.test(localPath)
+  ) {
+    throw new Error('--report-dir cannot use a workflow discovery path');
+  }
+}
+
+function assertDirectoryDoesNotOverlapControls(directory, controls) {
+  for (const control of controls) {
+    if (!control.path) continue;
+    const directoryPath = (0,external_node_path_namespaceObject.resolve)(directory);
+    const controlPath = (0,external_node_path_namespaceObject.resolve)(control.path);
+    const controlFromDirectory = (0,external_node_path_namespaceObject.relative)(directoryPath, controlPath);
+    const directoryFromControl = (0,external_node_path_namespaceObject.relative)(controlPath, directoryPath);
+    if (isInsideOrSame(controlFromDirectory) || isInsideOrSame(directoryFromControl)) {
+      throw new Error(`--report-dir cannot overlap the ${control.label}`);
+    }
+  }
+}
+
+function isInsideOrSame(path) {
+  return path === '' || (!isOutsidePath(path) && !(0,external_node_path_namespaceObject.isAbsolute)(path));
+}
+
+function isOutsidePath(path) {
+  return path === '..' || path.startsWith(`..${external_node_path_namespaceObject.sep}`);
 }
 
 ;// CONCATENATED MODULE: ./src/lib/action-summary.js
@@ -23490,50 +24007,71 @@ function annotations_truncate(value, maxLength) {
 
 
 
-
-
-
-
 const FORMATS = new Set(['toon', 'json', 'text', 'csv', 'sarif', 'html']);
 const MODES = new Set(['major', 'minor', 'patch']);
 
 async function main() {
+  const inputs = readInputs();
+  assertInputCombinations(inputs);
+  const outcome = await runCommand(inputs);
+  await publishOutcome(inputs, outcome);
+}
+
+function readInputs() {
   const command = input('command') || 'audit';
   const requestedFormat = input('format') || 'auto';
   const format = requestedFormat === 'auto'
     ? (command === 'org-scan' ? 'json' : 'toon')
     : requestedFormat;
-  const cwd = (0,external_node_path_namespaceObject.resolve)(input('working-directory') || process.env.GITHUB_WORKSPACE || process.cwd());
-  const workflows = parseStringList(input('workflow'), 'workflow');
-  const token = input('token') || undefined;
-  const severity = optionalChoice(input('severity'), SEVERITIES, 'severity');
-  const mode = choice(input('mode') || 'minor', MODES, 'mode');
-  const minAgeDays = nonNegativeInteger(input('min-age') || '7', 'min-age');
-  const explain = booleanInput('explain', false);
-  const offline = booleanInput('offline', false);
-  const write = booleanInput('write', false);
-  const failOnFindings = booleanInput('fail-on-findings', true);
-  const annotationsEnabled = booleanInput('annotations', true);
-  const fix = input('fix') || undefined;
-  const configPath = input('config') || undefined;
-  const ignoreConfig = booleanInput('ignore-config', false);
-  const baseline = input('baseline') || undefined;
-  const organization = input('organization') || undefined;
-  const repositories = parseStringList(input('repository'), 'repository');
-  const visibility = choice(input('visibility') || 'all', VISIBILITIES, 'visibility');
-  const includeArchived = booleanInput('include-archived', false);
-  const includeDisabled = booleanInput('include-disabled', false);
-  const includeForks = booleanInput('include-forks', false);
-  const maxRepositories = optionalPositiveInteger(input('max-repos'), 'max-repos');
-  const concurrency = action_positiveInteger(input('concurrency') || '4', 'concurrency');
-  const configuredCheckpointPath = input('checkpoint-path') || undefined;
-  const resumeFrom = input('resume-from') || undefined;
-  const previousReportPath = input('previous-report') || undefined;
-  const progress = booleanInput('progress', true);
-  const fresh = booleanInput('fresh', false);
-  const autoCheckpoint = booleanInput('auto-checkpoint', true);
-  let requestedOutput = input('output-path') || undefined;
+  return {
+    command,
+    format,
+    ...readRepositoryInputs(),
+    ...readOrganizationInputs(),
+    requestedOutput: input('output-path') || undefined,
+  };
+}
 
+function readRepositoryInputs() {
+  return {
+    cwd: (0,external_node_path_namespaceObject.resolve)(input('working-directory') || process.env.GITHUB_WORKSPACE || process.cwd()),
+    workflows: parseStringList(input('workflow'), 'workflow'),
+    token: input('token') || undefined,
+    severity: optionalChoice(input('severity'), SEVERITIES, 'severity'),
+    mode: choice(input('mode') || 'minor', MODES, 'mode'),
+    minAgeDays: nonNegativeInteger(input('min-age') || '7', 'min-age'),
+    explain: booleanInput('explain', false),
+    offline: booleanInput('offline', false),
+    write: booleanInput('write', false),
+    failOnFindings: booleanInput('fail-on-findings', true),
+    annotationsEnabled: booleanInput('annotations', true),
+    fix: input('fix') || undefined,
+    configPath: input('config') || undefined,
+    ignoreConfig: booleanInput('ignore-config', false),
+    baseline: input('baseline') || undefined,
+  };
+}
+
+function readOrganizationInputs() {
+  return {
+    organization: input('organization') || undefined,
+    repositories: parseStringList(input('repository'), 'repository'),
+    visibility: choice(input('visibility') || 'all', VISIBILITIES, 'visibility'),
+    includeArchived: booleanInput('include-archived', false),
+    includeDisabled: booleanInput('include-disabled', false),
+    includeForks: booleanInput('include-forks', false),
+    maxRepositories: optionalPositiveInteger(input('max-repos'), 'max-repos'),
+    concurrency: action_positiveInteger(input('concurrency') || '4', 'concurrency'),
+    checkpointPath: input('checkpoint-path') || undefined,
+    resumeFrom: input('resume-from') || undefined,
+    previousReportPath: input('previous-report') || undefined,
+    progress: booleanInput('progress', true),
+    fresh: booleanInput('fresh', false),
+    autoCheckpoint: booleanInput('auto-checkpoint', true),
+  };
+}
+
+function assertInputCombinations({ command, format, requestedOutput, previousReportPath }) {
   if (!FORMATS.has(format)) throw new Error(`invalid format: ${format}`);
   if (command !== 'org-scan' && ['csv', 'html'].includes(format) && !requestedOutput) {
     throw new Error(`output-path is required when format is ${format}`);
@@ -23544,273 +24082,236 @@ async function main() {
   if (previousReportPath && format === 'sarif') {
     throw new Error('previous-report cannot be used with format sarif');
   }
+}
 
-  let result;
-  let payload;
-  let reportPath = '';
-  let activeCheckpointPath = '';
-  let checkpointResumed = false;
-  let repositoriesReused = 0;
+const COMMAND_RUNNERS = new Map([
+  ['audit', runAuditCommand],
+  ['pin', runPinCommand],
+  ['upgrade', runUpgradeCommand],
+  ['report', runReportCommand],
+  ['verify', runVerifyCommand],
+  ['org-scan', runOrganizationCommand],
+  ['rules', runRulesCommand],
+]);
 
-  if (requestedOutput && command !== 'org-scan') {
-    const outputDestination = await validateWriteDestination({
-      label: 'output-path',
-      path: requestedOutput,
-      cwd,
-    });
-    reportPath = outputDestination.path;
-    await assertDestinationsUseSafeNames([outputDestination], cwd);
-    const config = await loadConfig({
-      cwd,
-      path: ignoreConfig ? false : configPath,
-      ruleIds: listRules().map(rule => rule.id),
-    });
-    const baselinePath = baseline ?? config.baseline;
-    const baselineData = baselinePath
-      ? await loadBaseline({ path: baselinePath, cwd })
-      : { path: null };
-    await assertDestinationsDoNotReplaceControls(
-      [outputDestination],
-      [
-        { label: 'active config', path: config.path },
-        { label: 'active baseline', path: baselineData.path },
-        ...workflows.map(wf => ({ label: 'workflow file', path: (0,external_node_path_namespaceObject.resolve)(cwd, wf) })),
-      ],
-    );
+async function runCommand(inputs) {
+  const reportPath = inputs.command === 'org-scan' ? '' : await guardRepositoryOutput(inputs);
+  const runner = COMMAND_RUNNERS.get(inputs.command);
+  if (!runner) throw new Error(`unknown command: ${inputs.command}`);
+  return {
+    reportPath,
+    requestedOutput: inputs.requestedOutput,
+    checkpointPath: '',
+    checkpointResumed: false,
+    repositoriesReused: 0,
+    ...await runner(inputs),
+  };
+}
+
+async function guardRepositoryOutput({
+  requestedOutput,
+  cwd,
+  ignoreConfig,
+  configPath,
+  baseline,
+  workflows,
+}) {
+  if (!requestedOutput) return '';
+  const outputDestination = await validateWriteDestination({
+    label: 'output-path',
+    path: requestedOutput,
+    cwd,
+  });
+  await assertDestinationsUseSafeNames([outputDestination], cwd);
+  const config = await loadConfig({
+    cwd,
+    path: ignoreConfig ? false : configPath,
+    ruleIds: listRules().map(rule => rule.id),
+  });
+  const baselinePath = baseline ?? config.baseline;
+  const baselineData = baselinePath
+    ? await loadBaseline({ path: baselinePath, cwd })
+    : { path: null };
+  await assertDestinationsDoNotReplaceControls(
+    [outputDestination],
+    [
+      { label: 'active config', path: config.path },
+      { label: 'active baseline', path: baselineData.path },
+      ...workflows.map(wf => ({ label: 'workflow file', path: (0,external_node_path_namespaceObject.resolve)(cwd, wf) })),
+    ],
+  );
+  return outputDestination.path;
+}
+
+async function runAuditCommand(inputs) {
+  const { cwd, workflows, severity, explain, baseline, format } = inputs;
+  const result = await audit({
+    cwd,
+    workflows,
+    severity,
+    explain,
+    configPath: inputs.ignoreConfig ? false : inputs.configPath,
+    baseline,
+  });
+  return { result, payload: renderAudit(result, { format, explain, cwd }) };
+}
+
+async function runPinCommand({ cwd, workflows, write, token, fix, format }) {
+  const result = await pin({ cwd, workflows, dryRun: !write, token, fix });
+  return { result, payload: renderPin(result, { format, dryRun: !write, cwd }) };
+}
+
+async function runUpgradeCommand(inputs) {
+  const { cwd, workflows, write, token, mode, minAgeDays, fix, format } = inputs;
+  const result = await upgrade({
+    cwd,
+    workflows,
+    dryRun: !write,
+    token,
+    mode,
+    minAgeDays,
+    fix,
+  });
+  return { result, payload: renderUpgrade(result, { format, dryRun: !write, mode, cwd }) };
+}
+
+async function runReportCommand(inputs) {
+  const { cwd, workflows, token, mode, severity, explain, offline, minAgeDays } = inputs;
+  const result = await report({
+    cwd,
+    workflows,
+    token,
+    mode,
+    severity,
+    explain,
+    skipResolve: offline,
+    minAgeDays,
+    configPath: inputs.ignoreConfig ? false : inputs.configPath,
+    baseline: inputs.baseline,
+  });
+  return { result, payload: renderReport(result, { format: inputs.format, mode, cwd }) };
+}
+
+async function runVerifyCommand({ cwd, workflows, token, format }) {
+  const result = await verify({ cwd, workflows, token });
+  return { result, payload: renderVerify(result, { format, cwd }) };
+}
+
+function runRulesCommand({ format }) {
+  const rules = listRules();
+  return {
+    result: { status: 'OK' },
+    payload: formatter_format(
+      format,
+      rules.map(rule => ({ label: 'RULE', fields: rule })),
+      {
+        status: 'OK',
+        title: 'Audit rule catalog',
+        json: { schemaVersion: '1.0', rules, status: 'OK' },
+      },
+    ),
+  };
+}
+
+async function runOrganizationCommand(inputs) {
+  const { organization, cwd, format } = inputs;
+  if (!organization) throw new Error('organization is required for org-scan');
+  if (inputs.checkpointPath && inputs.resumeFrom) {
+    throw new Error('checkpoint-path and resume-from cannot be used together');
   }
-
-  switch (command) {
-    case 'audit':
-      result = await audit({
-        cwd,
-        workflows,
-        severity,
-        explain,
-        configPath: ignoreConfig ? false : configPath,
-        baseline,
-      });
-      payload = renderAudit(result, { format, explain, cwd });
-      break;
-    case 'pin':
-      result = await pin({ cwd, workflows, dryRun: !write, token, fix });
-      payload = renderPin(result, { format, dryRun: !write, cwd });
-      break;
-    case 'upgrade':
-      result = await upgrade({
-        cwd,
-        workflows,
-        dryRun: !write,
-        token,
-        mode,
-        minAgeDays,
-        fix,
-      });
-      payload = renderUpgrade(result, { format, dryRun: !write, mode, cwd });
-      break;
-    case 'report':
-      result = await report({
-        cwd,
-        workflows,
-        token,
-        mode,
-        severity,
-        explain,
-        skipResolve: offline,
-        minAgeDays,
-        configPath: ignoreConfig ? false : configPath,
-        baseline,
-      });
-      payload = renderReport(result, { format, mode, cwd });
-      break;
-    case 'verify':
-      result = await verify({ cwd, workflows, token });
-      payload = renderVerify(result, { format, cwd });
-      break;
-    case 'org-scan': {
-      if (!organization) throw new Error('organization is required for org-scan');
-      if (configuredCheckpointPath && resumeFrom) {
-        throw new Error('checkpoint-path and resume-from cannot be used together');
-      }
-      if (fresh && resumeFrom) {
-        throw new Error('fresh and resume-from cannot be used together');
-      }
-      const needsGeneratedCheckpoint = (
-        !configuredCheckpointPath
-        && !resumeFrom
-        && autoCheckpoint
-      );
-      const artifacts = await createOrganizationScanArtifacts({
+  if (inputs.fresh && inputs.resumeFrom) {
+    throw new Error('fresh and resume-from cannot be used together');
+  }
+  let progressReporter;
+  try {
+    const run = await runOrganizationScan({
+      scan: {
         organization,
         cwd,
-        repositories,
-        visibility,
-        includeArchived,
-        includeDisabled,
-        includeForks,
-        maxRepositories,
-        severity,
-        explain,
-        configPath: ignoreConfig ? false : configPath,
-        baseline,
-        reportFormat: format,
-      });
-      requestedOutput ??= artifacts.reportPath;
-      const outputDestination = await validateWriteDestination({
-        label: 'output-path',
-        path: requestedOutput,
-        cwd,
-      });
-      reportPath = outputDestination.path;
-      const selectedCheckpointPath = resumeFrom
-        ?? configuredCheckpointPath
-        ?? (needsGeneratedCheckpoint ? artifacts.checkpointPath : undefined);
-      checkpointResumed = Boolean(resumeFrom);
-      if (selectedCheckpointPath && !resumeFrom) {
-        checkpointResumed = !fresh && await pathExists((0,external_node_path_namespaceObject.resolve)(cwd, selectedCheckpointPath));
-      }
-      const checkpointDestination = selectedCheckpointPath
-        ? await validateWriteDestination({
-            label: resumeFrom ? 'resume-from' : 'checkpoint-path',
-            path: selectedCheckpointPath,
-            cwd,
-          })
-        : null;
-      activeCheckpointPath = checkpointDestination?.path ?? '';
-      const destinations = [outputDestination, checkpointDestination].filter(Boolean);
-      await assertDestinationsAreDistinct(destinations);
-      await assertDestinationsUseSafeNames(destinations, cwd);
-      await assertDestinationsDoNotReplaceControls(
-        destinations,
-        [
-          { label: 'active config', path: artifacts.configPath },
-          { label: 'active baseline', path: artifacts.baselinePath },
-        ],
-      );
-      if (
-        activeCheckpointPath
-        && await sameFilePath(activeCheckpointPath, reportPath)
-      ) throw new Error('checkpoint and report output paths must be different');
-      if (
-        previousReportPath
-        && activeCheckpointPath
-        && await sameFilePath(
-          (0,external_node_path_namespaceObject.resolve)(cwd, previousReportPath),
-          activeCheckpointPath,
-        )
-      ) throw new Error('checkpoint and previous report paths must be different');
-      if (
-        previousReportPath
-        && await sameFilePath(
-          (0,external_node_path_namespaceObject.resolve)(cwd, previousReportPath),
-          reportPath,
-        )
-      ) throw new Error('output and previous report paths must be different');
-      const previousReport = previousReportPath
-        ? await loadOrganizationReport({ path: previousReportPath, cwd })
-        : null;
-      const progressReporter = createOrganizationProgressReporter({
-        mode: progress ? 'plain' : 'none',
-        context: 'ci',
-        stream: process.stderr,
-      });
-      try {
-        result = await scanOrganization({
-          organization,
-          cwd,
-          token,
-          repositories,
-          visibility,
-          includeArchived,
-          includeDisabled,
-          includeForks,
-          maxRepositories,
-          concurrency,
-          severity,
-          explain,
-          configPath: ignoreConfig ? false : configPath,
-          baseline,
-          checkpointPath: activeCheckpointPath || undefined,
-          resume: checkpointResumed,
-          onProgress: event => {
-            if (event.type === 'repository-completed' && event.reused) {
-              repositoriesReused += 1;
-            }
-            progressReporter.emit(event);
-          },
+        token: inputs.token,
+        repositories: inputs.repositories,
+        visibility: inputs.visibility,
+        includeArchived: inputs.includeArchived,
+        includeDisabled: inputs.includeDisabled,
+        includeForks: inputs.includeForks,
+        maxRepositories: inputs.maxRepositories,
+        concurrency: inputs.concurrency,
+        severity: inputs.severity,
+        explain: inputs.explain,
+        configPath: inputs.ignoreConfig ? false : inputs.configPath,
+        baseline: inputs.baseline,
+      },
+      scanOrganization: scanOrganization,
+      format,
+      output: 'file',
+      outputPath: inputs.requestedOutput,
+      checkpointPath: inputs.checkpointPath,
+      resumePath: inputs.resumeFrom,
+      fresh: inputs.fresh,
+      autoCheckpoint: inputs.autoCheckpoint,
+      previousReportPath: inputs.previousReportPath,
+      labels: { output: 'output-path', checkpoint: 'checkpoint-path', resume: 'resume-from' },
+      openProgress: () => {
+        progressReporter = createOrganizationProgressReporter({
+          mode: inputs.progress ? 'plain' : 'none',
+          context: 'ci',
+          stream: process.stderr,
         });
-      } catch (error) {
-        progressReporter.emit({
-          type: 'scan-failed',
-          organization,
-          error: String(error?.message ?? error),
-        });
-        throw error;
-      } finally {
-        progressReporter.close();
-      }
-      if (previousReport) {
-        const currentReport = buildOrganizationReport(result, { cwd });
-        result.comparison = compareOrganizationReports({
-          previous: previousReport,
-          current: currentReport,
-        });
-      }
-      payload = renderOrganizationScan(result, { format, cwd });
-      await assertDestinationsDoNotReplaceControls(
-        [{ label: 'report output', path: reportPath }],
-        [
-          { label: 'active config', path: result.configPath },
-          { label: 'active baseline', path: result.baseline.path },
-        ],
-      );
-      break;
-    }
-    case 'rules': {
-      const rules = listRules();
-      result = { status: 'OK' };
-      payload = formatter_format(
-        format,
-        rules.map(rule => ({ label: 'RULE', fields: rule })),
-        {
-          status: 'OK',
-          title: 'Audit rule catalog',
-          json: { schemaVersion: '1.0', rules, status: 'OK' },
-        },
-      );
-      break;
-    }
-    default:
-      throw new Error(`unknown command: ${command}`);
+        return progressReporter;
+      },
+    });
+    return {
+      result: run.result,
+      payload: renderOrganizationScan(run.result, { format, cwd }),
+      reportPath: run.outputDestination.path,
+      requestedOutput: run.reportPath,
+      checkpointPath: run.checkpointDestination?.path ?? '',
+      checkpointResumed: run.resumed,
+      repositoriesReused: run.repositoriesReused,
+    };
+  } finally {
+    progressReporter?.close();
   }
+}
 
+async function publishOutcome(inputs, outcome) {
+  const { command, format, cwd } = inputs;
+  const { result, payload, requestedOutput } = outcome;
   if (command !== 'org-scan' && (!['csv', 'html'].includes(format) || !requestedOutput)) {
     process.stdout.write(payload);
   }
-  const annotationResult = annotationsEnabled
+  const annotationResult = inputs.annotationsEnabled
     ? limitAnnotations(collectAnnotations({ command, result, cwd }))
     : { emitted: [], omitted: 0 };
   const annotationCommands = renderAnnotationCommands(annotationResult.emitted);
   if (annotationCommands) process.stdout.write(annotationCommands);
-
-  if (requestedOutput) {
-    reportPath ||= (0,external_node_path_namespaceObject.resolve)(cwd, requestedOutput);
-    await writeFileGuarded({
-      path: reportPath,
-      content: payload,
-      dryRun: false,
-      cwd,
-    });
-    if (command === 'org-scan') {
-      process.stdout.write(
-        `Organization ${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
-      );
-    } else if (['csv', 'html'].includes(format)) {
-      process.stdout.write(
-        `${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
-      );
-    }
+  const reportPath = await writeReportOutput(inputs, outcome);
+  await publishActionOutputs(inputs, { ...outcome, reportPath }, annotationResult);
+  if (shouldFailAction({ command, result, failOnFindings: inputs.failOnFindings })) {
+    process.exitCode = 1;
   }
+}
 
+async function writeReportOutput({ command, format, cwd }, outcome) {
+  const { requestedOutput, payload } = outcome;
+  if (!requestedOutput) return outcome.reportPath;
+  const reportPath = outcome.reportPath || (0,external_node_path_namespaceObject.resolve)(cwd, requestedOutput);
+  await writer_writeFileGuarded({ path: reportPath, content: payload, dryRun: false, cwd });
+  if (command === 'org-scan') {
+    process.stdout.write(
+      `Organization ${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
+    );
+  } else if (['csv', 'html'].includes(format)) {
+    process.stdout.write(
+      `${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
+    );
+  }
+  return reportPath;
+}
+
+async function publishActionOutputs(inputs, outcome, annotationResult) {
+  const { command, cwd, write } = inputs;
+  const { result, reportPath, checkpointPath, checkpointResumed, repositoriesReused } = outcome;
   const metrics = collectActionMetrics({ command, result, repositoriesReused });
   await setOutput('status', result.status);
   await setNumericOutputs(metrics);
@@ -23821,7 +24322,7 @@ async function main() {
   await setOutput('annotations', String(annotationResult.emitted.length));
   await setOutput('annotations-skipped', String(annotationResult.omitted));
   await setOutput('report-path', reportPath);
-  await setOutput('checkpoint-path', activeCheckpointPath);
+  await setOutput('checkpoint-path', checkpointPath);
   await appendSummary(renderActionSummary({
     command,
     result,
@@ -23830,15 +24331,11 @@ async function main() {
     annotations: annotationResult.emitted.length,
     annotationsSkipped: annotationResult.omitted,
     reportPath,
-    checkpointPath: activeCheckpointPath,
+    checkpointPath,
     checkpointResumed,
     repositoriesReused,
     write,
   }));
-
-  if (shouldFailAction({ command, result, failOnFindings })) {
-    process.exitCode = 1;
-  }
 }
 
 function input(name) {
