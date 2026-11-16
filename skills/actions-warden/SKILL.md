@@ -33,26 +33,26 @@ Invoke `actions-warden` when the user:
 The package is on npm as `actions-warden`. Invoke the reviewed version exactly:
 
 ```sh
-npx --yes actions-warden@0.5.0 audit
-npx --yes actions-warden@0.5.0 audit --severity=high --explain
-npx --yes actions-warden@0.5.0 audit --create-baseline=.actions-warden-baseline.json
-npx --yes actions-warden@0.5.0 audit --baseline=.actions-warden-baseline.json
-npx --yes actions-warden@0.5.0 audit --format=sarif
-npx --yes actions-warden@0.5.0 audit --format=csv --output-path=actions-warden.csv
-npx --yes actions-warden@0.5.0 pin
-npx --yes actions-warden@0.5.0 pin --write
-npx --yes actions-warden@0.5.0 upgrade --mode=minor
-npx --yes actions-warden@0.5.0 upgrade --min-age=14 --write
-npx --yes actions-warden@0.5.0 verify
-npx --yes actions-warden@0.5.0 report --offline
-npx --yes actions-warden@0.5.0 org-scan my-org --severity=high
-npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --format=html --output-path=actions-warden-org.html
-npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --previous-report=previous.json --format=json
-npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --report-dir=reports/actions-warden-org
-npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --agent-mode
-npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --checkpoint=.actions-warden-org-checkpoint.json
-npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --resume=.actions-warden-org-checkpoint.json
-npx --yes actions-warden@0.5.0 rules
+npx --yes actions-warden@0.6.0 audit
+npx --yes actions-warden@0.6.0 audit --severity=high --explain
+npx --yes actions-warden@0.6.0 audit --create-baseline=.actions-warden-baseline.json
+npx --yes actions-warden@0.6.0 audit --baseline=.actions-warden-baseline.json
+npx --yes actions-warden@0.6.0 audit --format=sarif
+npx --yes actions-warden@0.6.0 audit --format=csv --output-path=actions-warden.csv
+npx --yes actions-warden@0.6.0 pin
+npx --yes actions-warden@0.6.0 pin --write
+npx --yes actions-warden@0.6.0 upgrade --mode=minor
+npx --yes actions-warden@0.6.0 upgrade --min-age=14 --write
+npx --yes actions-warden@0.6.0 verify
+npx --yes actions-warden@0.6.0 report --offline
+npx --yes actions-warden@0.6.0 org-scan my-org --severity=high
+npx --yes actions-warden@0.6.0 org-scan my-org --severity=high --format=html --output-path=actions-warden-org.html
+npx --yes actions-warden@0.6.0 org-scan my-org --severity=high --previous-report=previous.json --format=json
+npx --yes actions-warden@0.6.0 org-scan my-org --severity=high --report-dir=reports/actions-warden-org
+npx --yes actions-warden@0.6.0 org-scan my-org --severity=high --agent-mode
+npx --yes actions-warden@0.6.0 org-scan my-org --severity=high --checkpoint=.actions-warden-org-checkpoint.json
+npx --yes actions-warden@0.6.0 org-scan my-org --severity=high --resume=.actions-warden-org-checkpoint.json
+npx --yes actions-warden@0.6.0 rules
 ```
 
 Useful shared command flags: `--workflow <path-or-glob>` (repeatable),
@@ -152,7 +152,7 @@ authorized workflow mutation whenever the needed path information is known.
    agent-initiated broad scan must use the explicit agent mode:
 
    ```sh
-   npx --yes actions-warden@0.5.0 org-scan my-org \
+   npx --yes actions-warden@0.6.0 org-scan my-org \
      --agent-mode
    ```
 

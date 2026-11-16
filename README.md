@@ -68,7 +68,7 @@ You can install it globally, or run it directly without installing using `npx`:
 npm install --global actions-warden
 
 # Or use npx for a quick one-off run without installing:
-npx --yes actions-warden@0.5.0 audit --explain
+npx --yes actions-warden@0.6.0 audit --explain
 ```
 
 ### 2. Follow the 3-step security workflow
