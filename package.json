@@ -76,7 +76,7 @@
     "eslint": "9.39.2",
     "globals": "17.7.0",
     "typescript": "7.0.2",
-    "vitest": "4.1.10"
+    "vitest": "4.1.12"
   },
   "keywords": [
     "github-actions",
