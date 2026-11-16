@@ -661,15 +661,43 @@ for a copyable artifact-first workflow.
 
 SARIF output uses version 2.1.0 and identifies the tool as `actions-warden`.
 Findings and operational records become SARIF results; `FILE` inventory records
-do not. Finding IDs and semantic
-fingerprints are included as partial fingerprints where available, and source
-locations use repository-relative POSIX paths.
+do not. Finding IDs and semantic fingerprints are included as partial
+fingerprints where available, and source locations use repository-relative
+POSIX paths.
+
+Every rule descriptor that has a severity carries
+`properties['security-severity']`, a string GitHub uses to rank code-scanning
+alerts: critical `9.5`, high `7.0`, medium `4.0`, and low `1.0`. GitHub maps
+scores over 9.0 to critical, 7.0 to 8.9 to high, 4.0 to 6.9 to medium, and 0.1
+to 3.9 to low, so critical uses 9.5 instead of the boundary value. Descriptors
+for operational errors, warnings, and change plans have no score because they
+are not security alerts.
+
+Local commands (`audit`, `pin`, `upgrade`, `verify`, and `report`) write a
+single run. An organization scan writes one run per repository, in repository
+order, with an empty `results` array for a repository that has no findings:
+
+```js
+{
+  tool: { driver: { name: 'actions-warden', rules: [/* ... */] } },
+  versionControlProvenance: [{
+    repositoryUri: string,   // https://github.com/<owner>/<repo>
+    revisionId?: string,     // scanned commit; omitted when it is unknown
+    branch?: string          // default branch
+  }],
+  invocations: [{ executionSuccessful: boolean }],
+  results: [/* locations use the repo-relative `path` */]
+}
+```
+
+A repository-level error, such as an unreadable tree, is a result in that
+repository's run. Organization findings point at files in other repositories, so
+treat the combined file as a portable report. GitHub code scanning accepts at
+most 20 runs per SARIF file and one repository per upload, so split an
+organization file by run before uploading anything to code scanning.
 
 For a local repository, upload the generated file with the code-scanning tool
-used by your CI platform. Organization findings point at files in other
-repositories, so a single organization SARIF artifact is best treated as a
-portable report unless your ingestion system explicitly supports
-cross-repository locations.
+used by your CI platform.
 
 GitHub Action annotations are separate from the selected output format. Choosing
 SARIF does not disable annotations.

@@ -113,6 +113,7 @@ function appendRepositoryRecords(records, repositoryResult, format) {
       findings: repositoryResult.findings.length,
       errors: repositoryResult.errors.length,
       status: repositoryResult.status,
+      ...(format === 'sarif' ? { url: repositoryResult.repository.htmlUrl } : {}),
     },
   });
   for (const detail of repositoryResult.fileDetails) {

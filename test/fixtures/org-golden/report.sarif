@@ -15,6 +15,9 @@
               },
               "defaultConfiguration": {
                 "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
               }
             },
             {
@@ -24,6 +27,9 @@
               },
               "defaultConfiguration": {
                 "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
               }
             },
             {
@@ -33,6 +39,9 @@
               },
               "defaultConfiguration": {
                 "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
               }
             },
             {
@@ -42,6 +51,9 @@
               },
               "defaultConfiguration": {
                 "level": "warning"
+              },
+              "properties": {
+                "security-severity": "4.0"
               }
             },
             {
@@ -51,6 +63,9 @@
               },
               "defaultConfiguration": {
                 "level": "warning"
+              },
+              "properties": {
+                "security-severity": "4.0"
               }
             },
             {
@@ -60,6 +75,9 @@
               },
               "defaultConfiguration": {
                 "level": "error"
+              },
+              "properties": {
+                "security-severity": "9.5"
               }
             },
             {
@@ -69,6 +87,9 @@
               },
               "defaultConfiguration": {
                 "level": "error"
+              },
+              "properties": {
+                "security-severity": "9.5"
               }
             },
             {
@@ -78,6 +99,9 @@
               },
               "defaultConfiguration": {
                 "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
               }
             },
             {
@@ -87,6 +111,9 @@
               },
               "defaultConfiguration": {
                 "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
               }
             },
             {
@@ -96,6 +123,9 @@
               },
               "defaultConfiguration": {
                 "level": "error"
+              },
+              "properties": {
+                "security-severity": "9.5"
               }
             },
             {
@@ -105,6 +135,9 @@
               },
               "defaultConfiguration": {
                 "level": "warning"
+              },
+              "properties": {
+                "security-severity": "4.0"
               }
             },
             {
@@ -115,19 +148,17 @@
               "defaultConfiguration": {
                 "level": "error"
               }
-            },
-            {
-              "id": "parse-error",
-              "shortDescription": {
-                "text": "parse-error"
-              },
-              "defaultConfiguration": {
-                "level": "error"
-              }
             }
           ]
         }
       },
+      "versionControlProvenance": [
+        {
+          "repositoryUri": "https://github.com/octo-org/app",
+          "revisionId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "branch": "main"
+        }
+      ],
       "invocations": [
         {
           "executionSuccessful": true
@@ -144,7 +175,7 @@
             {
               "physicalLocation": {
                 "artifactLocation": {
-                  "uri": "octo-org/app/.github/workflows/ci.yml"
+                  "uri": ".github/workflows/ci.yml"
                 },
                 "region": {
                   "startLine": 9
@@ -168,7 +199,7 @@
             {
               "physicalLocation": {
                 "artifactLocation": {
-                  "uri": "octo-org/app/.github/workflows/ci.yml"
+                  "uri": ".github/workflows/ci.yml"
                 },
                 "region": {
                   "startLine": 1
@@ -192,7 +223,7 @@
             {
               "physicalLocation": {
                 "artifactLocation": {
-                  "uri": "octo-org/app/.github/workflows/ci.yml"
+                  "uri": ".github/workflows/ci.yml"
                 },
                 "region": {
                   "startLine": 11
@@ -216,12 +247,180 @@
             {
               "physicalLocation": {
                 "artifactLocation": {
-                  "uri": "octo-org/app/.github/workflows/release.yml"
+                  "uri": ".github/workflows/release.yml"
                 }
               }
             }
           ]
-        },
+        }
+      ]
+    },
+    {
+      "tool": {
+        "driver": {
+          "name": "actions-warden",
+          "informationUri": "https://github.com/chiz0me/actions-warden",
+          "rules": [
+            {
+              "id": "unpinned-action",
+              "shortDescription": {
+                "text": "External action or reusable workflow is not pinned to a full commit SHA."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            },
+            {
+              "id": "unpinned-docker-action",
+              "shortDescription": {
+                "text": "Docker action image is not pinned to a SHA-256 digest."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            },
+            {
+              "id": "unpinned-container-image",
+              "shortDescription": {
+                "text": "Job, service, or Docker action image is not pinned to a SHA-256 digest."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            },
+            {
+              "id": "excessive-permissions",
+              "shortDescription": {
+                "text": "Workflow or job grants broadly writable GITHUB_TOKEN permissions."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "security-severity": "4.0"
+              }
+            },
+            {
+              "id": "secrets-in-env",
+              "shortDescription": {
+                "text": "Workflow- or job-level env exposes secrets to unrelated steps."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "security-severity": "4.0"
+              }
+            },
+            {
+              "id": "script-injection",
+              "shortDescription": {
+                "text": "Untrusted GitHub context is interpolated into run or github-script code."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "9.5"
+              }
+            },
+            {
+              "id": "pull-request-target-checkout",
+              "shortDescription": {
+                "text": "pull_request_target can fetch attacker-controlled code without an active checkout guard."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "9.5"
+              }
+            },
+            {
+              "id": "reusable-workflow-secrets-inherit",
+              "shortDescription": {
+                "text": "Cross-repository reusable workflow inherits every caller secret."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            },
+            {
+              "id": "untrusted-self-hosted-runner",
+              "shortDescription": {
+                "text": "Untrusted pull-request code can reach a self-hosted runner."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            },
+            {
+              "id": "workflow-run-artifact-execution",
+              "shortDescription": {
+                "text": "Privileged workflow_run job executes files from a cross-run artifact."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "9.5"
+              }
+            },
+            {
+              "id": "workflow-structure",
+              "shortDescription": {
+                "text": "Workflow or composite action contains invalid or ambiguous GitHub Actions syntax."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "security-severity": "4.0"
+              }
+            },
+            {
+              "id": "parse-error",
+              "shortDescription": {
+                "text": "parse-error"
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            }
+          ]
+        }
+      },
+      "versionControlProvenance": [
+        {
+          "repositoryUri": "https://github.com/octo-org/broken",
+          "revisionId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "branch": "main"
+        }
+      ],
+      "invocations": [
+        {
+          "executionSuccessful": true
+        }
+      ],
+      "results": [
         {
           "ruleId": "parse-error",
           "level": "error",
@@ -232,7 +431,7 @@
             {
               "physicalLocation": {
                 "artifactLocation": {
-                  "uri": "octo-org/broken/.github/workflows/bad.yml"
+                  "uri": ".github/workflows/bad.yml"
                 }
               }
             }
@@ -244,6 +443,315 @@
           }
         }
       ]
+    },
+    {
+      "tool": {
+        "driver": {
+          "name": "actions-warden",
+          "informationUri": "https://github.com/chiz0me/actions-warden",
+          "rules": [
+            {
+              "id": "unpinned-action",
+              "shortDescription": {
+                "text": "External action or reusable workflow is not pinned to a full commit SHA."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            },
+            {
+              "id": "unpinned-docker-action",
+              "shortDescription": {
+                "text": "Docker action image is not pinned to a SHA-256 digest."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            },
+            {
+              "id": "unpinned-container-image",
+              "shortDescription": {
+                "text": "Job, service, or Docker action image is not pinned to a SHA-256 digest."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            },
+            {
+              "id": "excessive-permissions",
+              "shortDescription": {
+                "text": "Workflow or job grants broadly writable GITHUB_TOKEN permissions."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "security-severity": "4.0"
+              }
+            },
+            {
+              "id": "secrets-in-env",
+              "shortDescription": {
+                "text": "Workflow- or job-level env exposes secrets to unrelated steps."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "security-severity": "4.0"
+              }
+            },
+            {
+              "id": "script-injection",
+              "shortDescription": {
+                "text": "Untrusted GitHub context is interpolated into run or github-script code."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "9.5"
+              }
+            },
+            {
+              "id": "pull-request-target-checkout",
+              "shortDescription": {
+                "text": "pull_request_target can fetch attacker-controlled code without an active checkout guard."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "9.5"
+              }
+            },
+            {
+              "id": "reusable-workflow-secrets-inherit",
+              "shortDescription": {
+                "text": "Cross-repository reusable workflow inherits every caller secret."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            },
+            {
+              "id": "untrusted-self-hosted-runner",
+              "shortDescription": {
+                "text": "Untrusted pull-request code can reach a self-hosted runner."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            },
+            {
+              "id": "workflow-run-artifact-execution",
+              "shortDescription": {
+                "text": "Privileged workflow_run job executes files from a cross-run artifact."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "9.5"
+              }
+            },
+            {
+              "id": "workflow-structure",
+              "shortDescription": {
+                "text": "Workflow or composite action contains invalid or ambiguous GitHub Actions syntax."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "security-severity": "4.0"
+              }
+            }
+          ]
+        }
+      },
+      "versionControlProvenance": [
+        {
+          "repositoryUri": "https://github.com/octo-org/clean",
+          "revisionId": "cccccccccccccccccccccccccccccccccccccccc",
+          "branch": "main"
+        }
+      ],
+      "invocations": [
+        {
+          "executionSuccessful": true
+        }
+      ],
+      "results": []
+    },
+    {
+      "tool": {
+        "driver": {
+          "name": "actions-warden",
+          "informationUri": "https://github.com/chiz0me/actions-warden",
+          "rules": [
+            {
+              "id": "unpinned-action",
+              "shortDescription": {
+                "text": "External action or reusable workflow is not pinned to a full commit SHA."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            },
+            {
+              "id": "unpinned-docker-action",
+              "shortDescription": {
+                "text": "Docker action image is not pinned to a SHA-256 digest."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            },
+            {
+              "id": "unpinned-container-image",
+              "shortDescription": {
+                "text": "Job, service, or Docker action image is not pinned to a SHA-256 digest."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            },
+            {
+              "id": "excessive-permissions",
+              "shortDescription": {
+                "text": "Workflow or job grants broadly writable GITHUB_TOKEN permissions."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "security-severity": "4.0"
+              }
+            },
+            {
+              "id": "secrets-in-env",
+              "shortDescription": {
+                "text": "Workflow- or job-level env exposes secrets to unrelated steps."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "security-severity": "4.0"
+              }
+            },
+            {
+              "id": "script-injection",
+              "shortDescription": {
+                "text": "Untrusted GitHub context is interpolated into run or github-script code."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "9.5"
+              }
+            },
+            {
+              "id": "pull-request-target-checkout",
+              "shortDescription": {
+                "text": "pull_request_target can fetch attacker-controlled code without an active checkout guard."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "9.5"
+              }
+            },
+            {
+              "id": "reusable-workflow-secrets-inherit",
+              "shortDescription": {
+                "text": "Cross-repository reusable workflow inherits every caller secret."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            },
+            {
+              "id": "untrusted-self-hosted-runner",
+              "shortDescription": {
+                "text": "Untrusted pull-request code can reach a self-hosted runner."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "7.0"
+              }
+            },
+            {
+              "id": "workflow-run-artifact-execution",
+              "shortDescription": {
+                "text": "Privileged workflow_run job executes files from a cross-run artifact."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "9.5"
+              }
+            },
+            {
+              "id": "workflow-structure",
+              "shortDescription": {
+                "text": "Workflow or composite action contains invalid or ambiguous GitHub Actions syntax."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "security-severity": "4.0"
+              }
+            }
+          ]
+        }
+      },
+      "versionControlProvenance": [
+        {
+          "repositoryUri": "https://github.com/octo-org/empty",
+          "branch": "main"
+        }
+      ],
+      "invocations": [
+        {
+          "executionSuccessful": true
+        }
+      ],
+      "results": []
     }
   ]
 }

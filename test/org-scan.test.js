@@ -136,8 +136,15 @@ describe('organization scan command', () => {
     expect(compareOrganizationReports({ previous: json, current: json }).summary)
       .toMatchObject({ unchangedFindings: 1, complete: true });
     const sarif = JSON.parse(renderOrganizationScan(result, { format: 'sarif', cwd }));
+    expect(sarif.runs).toHaveLength(2);
     expect(sarif.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri)
-      .toBe('octo-org/app/.github/workflows/ci.yml');
+      .toBe('.github/workflows/ci.yml');
+    expect(sarif.runs[0].versionControlProvenance).toEqual([{
+      repositoryUri: 'https://github.com/octo-org/app',
+      revisionId: MOCK_COMMIT_SHA,
+      branch: 'main',
+    }]);
+    expect(sarif.runs[1].results).toEqual([]);
 
     const html = renderOrganizationScan(result, { format: 'html', cwd });
     expect(html).toMatch(/^<!doctype html>/);
