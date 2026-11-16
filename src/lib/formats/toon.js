@@ -4,7 +4,7 @@
  * `LABEL: key=value key=value`, empty values omitted, trailing `STATUS:` line.
  */
 
-import { redact } from '../redact.js';
+import { redact, redactField } from '../redact.js';
 
 /**
  * @param {string} value
@@ -31,7 +31,7 @@ export function toonLine(label, fields) {
     if (v === null || v === undefined || v === '') continue;
     const value = typeof v === 'string' ? v : String(v);
     const key = redact(String(k)).replace(/[^a-zA-Z0-9_.-]/g, '_');
-    parts.push(`${key}=${quoteIfNeeded(redact(value))}`);
+    parts.push(`${key}=${quoteIfNeeded(redactField(k, value))}`);
   }
   return parts.length === 0 ? `${label}:` : `${label}: ${parts.join(' ')}`;
 }

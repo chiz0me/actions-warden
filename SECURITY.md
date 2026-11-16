@@ -66,6 +66,12 @@ Out of scope:
   metadata rather than a compatibility boundary. They still contain redacted
   repository and finding evidence and should be protected like organization
   reports.
+- Redaction treats names, not credentials, as readable. Repository names, file paths,
+  action references, and URLs in fixed identifier fields keep long runs that read like
+  words; token formats, `key=value` secrets, and random-looking runs are still
+  redacted there. This residual risk applies only to a secret written as a readable,
+  separator-joined lowercase or capitalized word sequence inside a name. See
+  [`docs/OUTPUTS.md`](./docs/OUTPUTS.md).
 - Explicit CLI agent mode shares the normal scope-keyed report and checkpoint
   identity, uses the same guarded writer and `0600` creation mode, and changes
   only presentation defaults plus the bounded receipt kind.

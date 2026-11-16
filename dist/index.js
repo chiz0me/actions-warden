@@ -16151,7 +16151,8 @@ const HIGH_ENTROPY = /[A-Za-z0-9_+/-]{32,}={0,2}/g;
 // with an optional #L<line>. A commit SHA in the ref makes the whole link one long
 // high-entropy run, so these links are exempt from the entropy heuristic only; explicit
 // token patterns above still redact credential-shaped text inside them. The shape is exact
-// (encodeURIComponent characters only) so it cannot shelter arbitrary secret-like text.
+// (encodeURIComponent characters only) and isReadableSourceUrl also requires every segment
+// to be a commit SHA or to read like words, so it cannot shelter secret-like file names.
 const URL_SEGMENT = "[A-Za-z0-9._~%!'()*-]+";
 const GITHUB_SOURCE_URL = new RegExp(
   `https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/blob/${URL_SEGMENT}`
@@ -16170,6 +16171,30 @@ const SAFE_PUBLIC_VALUES = new Set([
   'actions-warden-org-scan-progress',
   'actions-warden-org-scan-repository',
 ]);
+// Fields, or arrays of strings under them, whose values the scanner derives from GitHub
+// identifiers: repository names, file paths, action references, and URLs. Only these may
+// keep a long run readable when it reads like words; see redactIdentifier. Free text such
+// as explain or msg is never in this set.
+const READABLE_IDENTIFIER_KEYS = new Set([
+  'file',
+  'files',
+  'path',
+  'repo',
+  'repository',
+  'incompleteRepositories',
+  'fullName',
+  'action',
+  'workflow',
+  'htmlUrl',
+  'url',
+  'permalink',
+  'uri',
+  'repositoryUri',
+]);
+const FULL_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+const NAME_PART_SEPARATORS = /[-_./]/;
+const MAX_NAME_PART_LENGTH = 24;
+const MAX_NAME_PART_TRANSITIONS = 4;
 
 /**
  * Redacts sensitive substrings from a value.
@@ -16178,26 +16203,57 @@ const SAFE_PUBLIC_VALUES = new Set([
  * @returns {string}
  */
 function redact(input) {
+  return redactWith(input, false);
+}
+
+/**
+ * Redact a value that the scanner knows is a name: a repository, file path, action
+ * reference, or URL. Credential patterns and `key=value` secrets are still redacted.
+ * Only the generic entropy heuristic is relaxed, and only for runs that read like
+ * words, so long `payments-platform-service-gateway` names stay readable while hex,
+ * base64, and mixed-case random tokens are still redacted.
+ *
+ * @param {unknown} input
+ * @returns {string}
+ */
+function redactIdentifier(input) {
+  return redactWith(input, true);
+}
+
+/**
+ * Redact the string value of one named field. Fields in the identifier set use
+ * {@link redactIdentifier}; every other field uses {@link redact}.
+ *
+ * @param {unknown} key Field name, such as `path` or `htmlUrl`.
+ * @param {unknown} input
+ * @returns {string}
+ */
+function redactField(key, input) {
+  return READABLE_IDENTIFIER_KEYS.has(key) ? redactIdentifier(input) : redact(input);
+}
+
+function redactWith(input, readableNames) {
   if (input == null) return '';
   let s = typeof input === 'string' ? input : String(input);
   for (const re of TOKEN_PATTERNS) s = s.replace(re, '<redacted>');
   s = s.replace(KV_TOKEN_KEYS, (_, key, separator) => `${key}${separator}<redacted>`);
-  return redactHighEntropyOutsideSourceUrls(s);
+  return redactHighEntropyOutsideSourceUrls(s, readableNames);
 }
 
-function redactHighEntropyOutsideSourceUrls(input) {
+function redactHighEntropyOutsideSourceUrls(input, readableNames) {
   let output = '';
   let position = 0;
   for (const match of input.matchAll(GITHUB_SOURCE_URL)) {
-    output += redactHighEntropy(input.slice(position, match.index)) + match[0];
+    if (!isReadableSourceUrl(match[0])) continue;
+    output += redactHighEntropy(input.slice(position, match.index), readableNames) + match[0];
     position = match.index + match[0].length;
   }
-  return output + redactHighEntropy(input.slice(position));
+  return output + redactHighEntropy(input.slice(position), readableNames);
 }
 
-function redactHighEntropy(text) {
+function redactHighEntropy(text, readableNames) {
   return text.replace(HIGH_ENTROPY, value => (
-    shouldRedactHighEntropy(value) ? '<redacted>' : value
+    shouldRedactHighEntropy(value, readableNames) ? '<redacted>' : value
   ));
 }
 
@@ -16222,32 +16278,41 @@ function redactDeep(input, seen = new WeakSet()) {
       message: redact(input.message),
     };
     for (const [key, value] of Object.entries(input)) {
-      output[key] = SENSITIVE_KEY.test(key) ? '<redacted>' : redactDeep(value, seen);
+      output[key] = redactEntry(key, value, seen);
     }
   } else if (input instanceof Set) {
     output = [...input].map(item => redactDeep(item, seen));
   } else if (input instanceof Map) {
     output = Object.fromEntries(
-      [...input.entries()].map(([k, v]) => [
-        redact(String(k)),
-        SENSITIVE_KEY.test(String(k)) ? '<redacted>' : redactDeep(v, seen),
-      ]),
+      [...input.entries()].map(([k, v]) => [redact(String(k)), redactEntry(String(k), v, seen)]),
     );
   } else if (Array.isArray(input)) {
     output = input.map(item => redactDeep(item, seen));
   } else {
     output = {};
     for (const [key, value] of Object.entries(input)) {
-      output[key] = SENSITIVE_KEY.test(key) ? '<redacted>' : redactDeep(value, seen);
+      output[key] = redactEntry(key, value, seen);
     }
   }
   seen.delete(input);
   return output;
 }
 
-function shouldRedactHighEntropy(value) {
+function redactEntry(key, value, seen) {
+  if (SENSITIVE_KEY.test(key)) return '<redacted>';
+  if (typeof value === 'string') return redactField(key, value);
+  if (Array.isArray(value) && READABLE_IDENTIFIER_KEYS.has(key)) {
+    return value.map(item => (
+      typeof item === 'string' ? redactIdentifier(item) : redactDeep(item, seen)
+    ));
+  }
+  return redactDeep(value, seen);
+}
+
+function shouldRedactHighEntropy(value, readableNames) {
   if (SAFE_PUBLIC_VALUES.has(value)) return false;
-  if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value)) return false;
+  if (FULL_SHA.test(value)) return false;
+  if (readableNames && readsLikeWords(value)) return false;
   const categories = [
     /[a-z]/.test(value),
     /[A-Z]/.test(value),
@@ -16263,6 +16328,49 @@ function shouldRedactHighEntropy(value) {
     entropy -= probability * Math.log2(probability);
   }
   return entropy >= 3.5;
+}
+
+// A source link stays readable only when every owner, repository, ref, and path segment
+// is a full commit SHA or reads like words, so a secret-shaped file name inside a link is
+// still redacted. Percent-escapes count as separators.
+function isReadableSourceUrl(url) {
+  const segments = url.replace(/#L\d{1,9}$/, '').split('/').slice(3);
+  return segments.every(segment => (
+    FULL_SHA.test(segment) || readsLikeWords(segment.replace(/%[0-9A-Fa-f]{2}/g, '-'))
+  ));
+}
+
+// A run reads like words when every `-`, `_`, `.`, or `/` separated part is short,
+// alphanumeric, not hex-like, and changes between lowercase, uppercase, and digits only
+// a few times (`payments`, `PaymentsGatewayV2`, `k8s`). Random hex, base64, and
+// mixed-case tokens fail at least one of those tests.
+function readsLikeWords(run) {
+  return run.split(NAME_PART_SEPARATORS).every(isNamePart);
+}
+
+function isNamePart(part) {
+  if (part.length > MAX_NAME_PART_LENGTH || !/^[A-Za-z0-9]*$/.test(part)) return false;
+  if (part.length >= 8 && /^[0-9a-f]+$/i.test(part) && /\d/.test(part) && /[a-f]/i.test(part)) {
+    return false;
+  }
+  return characterClassTransitions(part) <= MAX_NAME_PART_TRANSITIONS;
+}
+
+function characterClassTransitions(part) {
+  let transitions = 0;
+  let previous = '';
+  for (const character of part) {
+    const kind = characterClass(character);
+    if (previous && kind !== previous) transitions += 1;
+    previous = kind;
+  }
+  return transitions;
+}
+
+function characterClass(character) {
+  if (character >= 'a' && character <= 'z') return 'lower';
+  if (character >= 'A' && character <= 'Z') return 'upper';
+  return 'digit';
 }
 
 /**
@@ -16333,10 +16441,11 @@ function renderCsv(records, options = {}) {
   discovered.delete('record_type');
   const preferred = CSV_PREFERRED_COLUMNS.filter(column => discovered.delete(column));
   const columns = ['record_type', ...preferred, ...[...discovered].sort()];
-  const rows = [columns.map(csvCell).join(',')];
+  const rows = [columns.map(column => csvCell(column)).join(',')];
   for (const record of normalized) {
     rows.push(columns.map(column => csvCell(
       column === 'record_type' ? record.label : record.fields.get(column),
+      column,
     )).join(','));
   }
   return `${rows.join('\r\n')}\r\n`;
@@ -16357,26 +16466,32 @@ function normalizeCsvRecords(records) {
       label: redact(String(record?.label ?? 'RECORD')),
       fields: new Map(entries.map(([key, value]) => [
         redact(String(key)),
-        redactDeep(value),
+        typeof value === 'string' ? redactField(key, value) : redactDeep(value),
       ])),
     };
   });
 }
 
-/** @param {unknown} value */
-function csvCell(value) {
+/**
+ * @param {unknown} value
+ * @param {string} [column] Column name; string values in identifier columns keep
+ *   long name-like runs readable.
+ */
+function csvCell(value, column) {
   if (value === null || value === undefined) return '';
   const formulaSensitive = typeof value === 'string';
   let serialized;
   if (typeof value === 'string') {
-    serialized = redact(value);
+    serialized = redactField(column, value);
   } else if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
     serialized = String(value);
   } else {
     serialized = JSON.stringify(redactDeep(value));
     if (serialized === undefined) serialized = String(value);
   }
-  serialized = escapeCsvControls(redact(serialized));
+  serialized = escapeCsvControls(
+    formulaSensitive ? redactField(column, serialized) : redact(serialized),
+  );
   if (formulaSensitive && /^\s*[=+\-@]/u.test(serialized)) serialized = `'${serialized}`;
   return /[",\r\n]/.test(serialized)
     ? `"${serialized.replaceAll('"', '""')}"`
@@ -16593,15 +16708,16 @@ function normalizeFields(fields) {
   if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return {};
   return Object.fromEntries(Object.entries(fields)
     .filter(([, value]) => value !== null && value !== undefined && value !== '')
-    .map(([key, value]) => [redact(String(key)), htmlValue(value)]));
+    .map(([key, value]) => [redact(String(key)), htmlValue(key, value)]));
 }
 
 /**
+ * @param {string} key
  * @param {unknown} value
  * @returns {string}
  */
-function htmlValue(value) {
-  if (typeof value === 'string') return redact(value);
+function htmlValue(key, value) {
+  if (typeof value === 'string') return redactField(key, value);
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return redact(JSON.stringify(value));
 }
@@ -17067,7 +17183,7 @@ function renderText(records, options = {}) {
   const lines = records.map(r => {
     const kv = Object.entries(r.fields)
       .filter(([, v]) => v !== null && v !== undefined && v !== '')
-      .map(([k, v]) => `${k}=${escapeText(redact(String(v)))}`)
+      .map(([k, v]) => `${k}=${escapeText(redactField(k, String(v)))}`)
       .join(' ');
     return `[${r.label}] ${kv}`;
   });
@@ -17114,7 +17230,7 @@ function toonLine(label, fields) {
     if (v === null || v === undefined || v === '') continue;
     const value = typeof v === 'string' ? v : String(v);
     const key = redact(String(k)).replace(/[^a-zA-Z0-9_.-]/g, '_');
-    parts.push(`${key}=${quoteIfNeeded(redact(value))}`);
+    parts.push(`${key}=${quoteIfNeeded(redactField(k, value))}`);
   }
   return parts.length === 0 ? `${label}:` : `${label}: ${parts.join(' ')}`;
 }

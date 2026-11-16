@@ -3,7 +3,7 @@
  * Deterministic RFC 4180-compatible CSV with an explicit status row.
  */
 
-import { redact, redactDeep } from '../redact.js';
+import { redact, redactDeep, redactField } from '../redact.js';
 
 const CSV_PREFERRED_COLUMNS = Object.freeze([
   'status',
@@ -55,10 +55,11 @@ export function renderCsv(records, options = {}) {
   discovered.delete('record_type');
   const preferred = CSV_PREFERRED_COLUMNS.filter(column => discovered.delete(column));
   const columns = ['record_type', ...preferred, ...[...discovered].sort()];
-  const rows = [columns.map(csvCell).join(',')];
+  const rows = [columns.map(column => csvCell(column)).join(',')];
   for (const record of normalized) {
     rows.push(columns.map(column => csvCell(
       column === 'record_type' ? record.label : record.fields.get(column),
+      column,
     )).join(','));
   }
   return `${rows.join('\r\n')}\r\n`;
@@ -79,26 +80,32 @@ function normalizeCsvRecords(records) {
       label: redact(String(record?.label ?? 'RECORD')),
       fields: new Map(entries.map(([key, value]) => [
         redact(String(key)),
-        redactDeep(value),
+        typeof value === 'string' ? redactField(key, value) : redactDeep(value),
       ])),
     };
   });
 }
 
-/** @param {unknown} value */
-function csvCell(value) {
+/**
+ * @param {unknown} value
+ * @param {string} [column] Column name; string values in identifier columns keep
+ *   long name-like runs readable.
+ */
+function csvCell(value, column) {
   if (value === null || value === undefined) return '';
   const formulaSensitive = typeof value === 'string';
   let serialized;
   if (typeof value === 'string') {
-    serialized = redact(value);
+    serialized = redactField(column, value);
   } else if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
     serialized = String(value);
   } else {
     serialized = JSON.stringify(redactDeep(value));
     if (serialized === undefined) serialized = String(value);
   }
-  serialized = escapeCsvControls(redact(serialized));
+  serialized = escapeCsvControls(
+    formulaSensitive ? redactField(column, serialized) : redact(serialized),
+  );
   if (formulaSensitive && /^\s*[=+\-@]/u.test(serialized)) serialized = `'${serialized}`;
   return /[",\r\n]/.test(serialized)
     ? `"${serialized.replaceAll('"', '""')}"`

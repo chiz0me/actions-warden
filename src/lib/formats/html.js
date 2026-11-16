@@ -3,7 +3,7 @@
  * Self-contained, deterministic HTML report with client-side search and filters.
  */
 
-import { redact, redactDeep } from '../redact.js';
+import { redact, redactDeep, redactField } from '../redact.js';
 
 /**
  * @typedef {{label: string, fields: Record<string, string>}} HtmlRecord
@@ -188,15 +188,16 @@ function normalizeFields(fields) {
   if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return {};
   return Object.fromEntries(Object.entries(fields)
     .filter(([, value]) => value !== null && value !== undefined && value !== '')
-    .map(([key, value]) => [redact(String(key)), htmlValue(value)]));
+    .map(([key, value]) => [redact(String(key)), htmlValue(key, value)]));
 }
 
 /**
+ * @param {string} key
  * @param {unknown} value
  * @returns {string}
  */
-function htmlValue(value) {
-  if (typeof value === 'string') return redact(value);
+function htmlValue(key, value) {
+  if (typeof value === 'string') return redactField(key, value);
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return redact(JSON.stringify(value));
 }

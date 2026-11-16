@@ -179,7 +179,8 @@ Changes must preserve these boundaries:
   workflows or reserved policy paths, and are checked against active controls
   again before output is written.
 - Credentials are redacted in JSON, TOON, text, CSV, SARIF, HTML, annotations, and
-  top-level errors.
+  top-level errors. Renderers that redact a value again must pass its field name to
+  `redactField`, or the second pass re-redacts names that `redactDeep` kept readable.
 - HTML contains no externally loaded assets or dynamic report data in
   executable JavaScript. Values are escaped, links require HTTPS, a restrictive
   content security policy is emitted, and output is capped at 32 MiB.
