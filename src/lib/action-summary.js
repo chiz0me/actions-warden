@@ -8,11 +8,14 @@
 
 import { isAbsolute, resolve } from 'node:path';
 import { canonicalPath } from './identity.js';
+import { SEVERITY_LEVELS } from './org-schema.js';
 import { redact } from './redact.js';
 import { listRules } from '../rules/index.js';
 
-const SEVERITIES = ['critical', 'high', 'medium', 'low'];
-const SEVERITY_ORDER = new Map(SEVERITIES.map((severity, index) => [severity, index]));
+const SEVERITIES_DESCENDING = [...SEVERITY_LEVELS].reverse();
+const SEVERITY_ORDER = new Map(
+  SEVERITIES_DESCENDING.map((severity, index) => [severity, index]),
+);
 const MAX_ROWS_PER_SECTION = 10;
 const MAX_CELL_LENGTH = 240;
 
@@ -625,7 +628,7 @@ function normalizeSeverity(value) {
 }
 
 function severityRank(value) {
-  return SEVERITY_ORDER.get(value) ?? SEVERITIES.length;
+  return SEVERITY_ORDER.get(value) ?? SEVERITIES_DESCENDING.length;
 }
 
 function array(value) {

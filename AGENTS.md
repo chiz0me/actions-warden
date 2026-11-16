@@ -34,7 +34,8 @@ network behavior, deterministic output, and no-remote-code-execution model.
 - Begin with read-only inspection. Preserve unrelated user changes in a dirty
   worktree.
 - Use `rg` or `rg --files` for discovery.
-- Use `apply_patch` for hand edits.
+- Make hand edits with your editor's patch or edit tool, not by regenerating
+  whole files.
 - Do not add `--write`, change policy, create a baseline, suppress a finding,
   or broaden a GitHub organization scan without explicit authorization.
 - Do not print tokens. Prefer `GITHUB_TOKEN` or `GH_TOKEN` over a CLI token.
@@ -61,8 +62,7 @@ actions-warden org-scan ORG --agent-mode
   receipt kind. It shares `.actions-warden-org-scan.*` artifacts with normal
   execution so a context switch retains compatible resume state. The packaged
   skill should pass the flag; an integration may instead set
-  `ACTIONS_WARDEN_CONTEXT=agent` once. `ACTIONS_WARDEN_MODE=agent` is a legacy
-  alias.
+  `ACTIONS_WARDEN_CONTEXT=agent` once.
 - Automatic artifact names are derived from the checkpoint compatibility
   identity. An exact-scope later run resumes its checkpoint across compatible
   package versions; a changed filter, severity, policy, baseline, analysis
@@ -142,7 +142,12 @@ deprecating a package. A release request does not authorize those actions.
 - Incomplete organization coverage produces visible errors and status `FAIL`.
 - Organization resume requires fresh discovery and matching default-branch tree
   SHAs; never reuse failed results or parse errors. Checkpoints remain guarded,
-  atomic, and free of tokens or raw YAML.
+  atomic, and free of tokens, raw YAML, commits, and links; each run rebuilds
+  permalinks and `revision.commitSha` from the live default-branch commit.
+- Organization ref resolution is pinned: the default-branch commit is resolved
+  first, the tree is read by that commit's tree SHA and must match it, and
+  permalinks point at that commit. Only an HTTP 409 on the commit request means
+  an empty repository; every other non-200 is a repository error.
 - `ORGANIZATION_ANALYSIS_GENERATION` is the organization-result compatibility
   boundary. Increment it whenever discovery, parser, finding identity, rule
   evaluation, or persisted result semantics can change; do not increment it

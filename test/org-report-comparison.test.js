@@ -90,6 +90,85 @@ describe('organization report comparison', () => {
       .toThrow(/duplicate finding identity/);
   });
 
+  describe('commit, file details, and links', () => {
+    const blobSha = 'b'.repeat(40);
+    const permalink = `https://github.com/octo-org/app/blob/${'2'.repeat(40)}`
+      + '/.github/workflows/ci.yml';
+
+    function linked(overrides = {}) {
+      return finding('octo-org/app', 'a', {
+        path: '.github/workflows/ci.yml',
+        blobSha,
+        permalink: `${permalink}#L1`,
+        ...overrides,
+      });
+    }
+
+    function withDetails(findings, errors = []) {
+      const result = repository('octo-org/app', []);
+      result.fileDetails = [{
+        path: '.github/workflows/ci.yml',
+        blobSha,
+        bytes: 12,
+        status: 'scanned',
+        findings: findings.length,
+        permalink,
+      }];
+      return report({
+        repositories: [result],
+        findings,
+        errors,
+        analysis: { generation: 3, identity: 'a'.repeat(64) },
+      });
+    }
+
+    it('accepts the additive fields and carries them through the comparison', () => {
+      const current = withDetails([linked()]);
+      const comparison = compareOrganizationReports({ previous: current, current });
+      expect(comparison.summary).toMatchObject({ unchangedFindings: 1, complete: true });
+      expect(comparison.findings.unchanged[0]).toMatchObject({
+        path: '.github/workflows/ci.yml',
+        blobSha,
+        permalink: `${permalink}#L1`,
+      });
+    });
+
+    it('rejects a flattened finding whose new fields differ from the repository evidence', () => {
+      const valid = withDetails([linked()]);
+      for (const changed of [
+        { permalink: `${permalink}#L2` },
+        { blobSha: 'c'.repeat(40) },
+        { path: '.github/workflows/other.yml' },
+      ]) {
+        const tampered = { ...valid, findings: [linked(changed)] };
+        expect(() => compareOrganizationReports({ previous: valid, current: tampered }))
+          .toThrow(/findings are inconsistent with repository results/);
+      }
+    });
+
+    it('rejects a flattened error whose permalink differs from the repository evidence', () => {
+      const error = {
+        repository: 'octo-org/app',
+        path: '.github/workflows/ci.yml',
+        error: 'could not read workflow blob',
+        permalink,
+      };
+      const valid = withDetails([], [error]);
+      const tampered = { ...valid, errors: [{ ...error, permalink: `${permalink}?x=1` }] };
+      expect(() => compareOrganizationReports({ previous: valid, current: tampered }))
+        .toThrow(/errors are inconsistent with repository results/);
+    });
+
+    it('refuses a previous report from analysis generation 2', () => {
+      const previous = {
+        ...withDetails([linked()]),
+        analysis: { generation: 2, identity: 'd'.repeat(64) },
+      };
+      expect(() => compareOrganizationReports({ previous, current: withDetails([linked()]) }))
+        .toThrow(/does not match the current analysis scope and policy/);
+    });
+  });
+
   it('does not resolve findings when the current repository has a parse error', () => {
     const previousFinding = finding('octo-org/app', 'a');
     const previous = report({
@@ -355,8 +434,9 @@ function repository(fullName, errors = []) {
   const [owner, name] = fullName.split('/');
   return {
     repository: { owner, name, fullName },
-    revision: { branch: 'main', treeSha: '1'.repeat(40) },
+    revision: { branch: 'main', treeSha: '1'.repeat(40), commitSha: '2'.repeat(40) },
     files: [],
+    fileDetails: [],
     findings: [],
     errors: errors.map(error => ({ repository: fullName, error })),
     summary: { findings: 0 },

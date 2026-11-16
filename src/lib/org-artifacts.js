@@ -6,26 +6,24 @@
  * automatic organization artifacts always derive from the same scan identity.
  */
 
-import { lstat } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { loadBaseline } from './baseline.js';
+import { emptyBaseline, loadBaseline } from './baseline.js';
 import { loadConfig } from './config.js';
 import { format } from './formatter.js';
 import {
   createOrganizationCheckpointArtifactKey,
   createOrganizationCheckpointIdentity,
 } from './org-checkpoint.js';
+import { NAME_RE, normalizePatterns } from './org-schema.js';
+import { pathExists } from './paths.js';
 import { RULES } from '../rules/index.js';
-
-/** Legacy agent-mode environment opt-in retained for compatibility. */
-export const AGENT_MODE_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_MODE';
+import { VERSION } from '../version.js';
 
 /** Preferred execution-context environment variable. */
 export const EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_CONTEXT';
 
 const EXECUTION_CONTEXTS = new Set(['agent', 'auto', 'ci', 'interactive']);
 
-const ORGANIZATION_RE = /^[A-Za-z0-9_.-]+$/;
 const REPORT_EXTENSIONS = Object.freeze({
   csv: 'csv',
   html: 'html',
@@ -34,37 +32,16 @@ const REPORT_EXTENSIONS = Object.freeze({
   text: 'txt',
   toon: 'toon',
 });
-const ARTIFACT_PREFIXES = Object.freeze({
-  agent: '.actions-warden-agent',
-  'org-scan': '.actions-warden-org-scan',
-});
+const ARTIFACT_PREFIX = '.actions-warden-org-scan';
 
 /**
- * Resolve explicit CLI precedence over the environment opt-in.
- *
- * @param {object} options
- * @param {boolean} [options.optionValue]
- * @param {string} [options.optionSource]
- * @param {string} [options.environmentValue]
- */
-export function resolveAgentMode({ optionValue, optionSource, environmentValue } = {}) {
-  if (optionSource === 'cli') return Boolean(optionValue);
-  if (environmentValue === undefined || environmentValue === '') return false;
-  if (environmentValue !== 'agent') {
-    throw new Error(`${AGENT_MODE_ENVIRONMENT_VARIABLE} must be "agent" when set`);
-  }
-  return true;
-}
-
-/**
- * Resolve CLI flag precedence over the preferred context environment variable
- * and the legacy ACTIONS_WARDEN_MODE=agent alias.
+ * Resolve CLI flag precedence over the ACTIONS_WARDEN_CONTEXT environment
+ * variable. Returns `auto` when neither selects a context.
  */
 export function resolveExecutionContext({
   optionValue,
   optionSource,
   environmentValue,
-  legacyEnvironmentValue,
 } = {}) {
   if (optionSource === 'cli') return optionValue ? 'agent' : 'auto';
   if (environmentValue !== undefined && String(environmentValue).trim() !== '') {
@@ -76,7 +53,7 @@ export function resolveExecutionContext({
     }
     return context;
   }
-  return resolveAgentMode({ environmentValue: legacyEnvironmentValue }) ? 'agent' : 'auto';
+  return 'auto';
 }
 
 /**
@@ -96,7 +73,6 @@ export function resolveExecutionContext({
  * @param {string|false} [options.configPath]
  * @param {string} [options.baseline]
  * @param {'toon'|'json'|'text'|'csv'|'sarif'|'html'} options.reportFormat
- * @param {'agent'|'org-scan'} [options.artifactNamespace]
  */
 export async function createOrganizationScanArtifacts({
   organization,
@@ -112,7 +88,6 @@ export async function createOrganizationScanArtifacts({
   configPath,
   baseline,
   reportFormat,
-  artifactNamespace = 'org-scan',
 }) {
   validateOrganization(organization);
   const patterns = normalizePatterns(repositories);
@@ -124,7 +99,7 @@ export async function createOrganizationScanArtifacts({
   const baselinePath = baseline ?? config.baseline;
   const baselineData = baselinePath
     ? await loadBaseline({ path: baselinePath, cwd })
-    : { path: null, ids: new Set(), fingerprints: new Set() };
+    : emptyBaseline();
   const identity = createOrganizationCheckpointIdentity({
     organization,
     repositories: patterns,
@@ -140,12 +115,10 @@ export async function createOrganizationScanArtifacts({
   });
   const key = createOrganizationCheckpointArtifactKey(identity);
   const groupedKey = key.match(/.{8}/g).join('.');
-  const prefix = ARTIFACT_PREFIXES[artifactNamespace];
-  if (!prefix) throw new Error(`invalid organization artifact namespace: ${artifactNamespace}`);
-  const checkpointPath = `${prefix}.${groupedKey}.checkpoint.json`;
+  const checkpointPath = `${ARTIFACT_PREFIX}.${groupedKey}.checkpoint.json`;
   const reportExtension = REPORT_EXTENSIONS[reportFormat];
   if (!reportExtension) throw new Error(`invalid organization report format: ${reportFormat}`);
-  const reportPath = `${prefix}.${groupedKey}.report.${reportExtension}`;
+  const reportPath = `${ARTIFACT_PREFIX}.${groupedKey}.report.${reportExtension}`;
 
   return {
     checkpointPath,
@@ -153,15 +126,22 @@ export async function createOrganizationScanArtifacts({
     resume: await pathExists(resolve(cwd, checkpointPath)),
     configPath: config.path,
     baselinePath: baselineData.path,
-    identity,
   };
 }
 
 /**
  * Render the bounded stdout contract emitted after an organization file report.
+ * Run provenance (tool version and timing) appears only here, never in the
+ * deterministic report, aggregate, or manifest.
+ *
+ * @param {object} options
+ * @param {Date} options.startedAt When the run began.
+ * @param {Date} options.finishedAt When the report was written.
  */
 export function renderOrganizationScanReceipt({
   result,
+  startedAt,
+  finishedAt,
   reportPath,
   reportFormat,
   checkpointPath,
@@ -179,6 +159,12 @@ export function renderOrganizationScanReceipt({
       kind,
       command: 'org-scan',
       organization: result.organization,
+      tool: { name: 'actions-warden', version: VERSION },
+      run: {
+        startedAt: startedAt.toISOString(),
+        finishedAt: finishedAt.toISOString(),
+        durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+      },
       status: result.status,
       summary: result.summary,
       report: {
@@ -218,26 +204,8 @@ function compactCoverage(coverage = {}) {
 function validateOrganization(organization) {
   if (
     typeof organization !== 'string'
-    || !ORGANIZATION_RE.test(organization)
+    || !NAME_RE.test(organization)
     || organization === '.'
     || organization === '..'
   ) throw new Error('invalid organization');
-}
-
-function normalizePatterns(patterns) {
-  if (patterns === undefined) return [];
-  if (!Array.isArray(patterns) || patterns.some(pattern => typeof pattern !== 'string' || !pattern)) {
-    throw new Error('repository filters must be non-empty strings');
-  }
-  return [...new Set(patterns)];
-}
-
-async function pathExists(path) {
-  try {
-    await lstat(path);
-    return true;
-  } catch (error) {
-    if (error.code === 'ENOENT') return false;
-    throw error;
-  }
 }

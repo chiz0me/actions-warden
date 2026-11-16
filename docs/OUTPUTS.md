@@ -66,8 +66,7 @@ contains JSON when the process exits `2`.
 Organization-scan live progress is also a stderr-only channel. It never becomes
 part of JSON, CSV, SARIF, TOON, text, or HTML stdout. `--progress=auto` enables
 plain lines for an interactive stderr, `plain` enables human-readable output,
-`json` emits JSON Lines, and `none` disables it. `always` and `never` are
-compatibility aliases for `plain` and `none`. Once a JSON progress channel has
+`json` emits JSON Lines, and `none` disables it. Once a JSON progress channel has
 started, a fatal scan error is represented by `scan-failed` instead of an
 additional plain `error:` line. GitHub Action organization scans show the same
 phase, repository, retry, checkpoint, and completion updates in the step log by
@@ -100,7 +99,7 @@ credential-redacted before serialization.
 stdout is a separate bounded JSON receipt. Normal scans use kind
 `actions-warden-org-scan-receipt`; `--agent-mode`, or
 `ACTIONS_WARDEN_CONTEXT=agent`, uses `actions-warden-agent-receipt` and disables
-implicit progress. `ACTIONS_WARDEN_MODE=agent` remains a legacy alias:
+implicit progress:
 
 ```js
 {
@@ -108,6 +107,12 @@ implicit progress. `ACTIONS_WARDEN_MODE=agent` remains a legacy alias:
   kind: 'actions-warden-org-scan-receipt' | 'actions-warden-agent-receipt',
   command: 'org-scan',
   organization: string,
+  tool: { name: 'actions-warden', version: string },
+  run: {
+    startedAt: string,    // ISO 8601 UTC
+    finishedAt: string,   // ISO 8601 UTC
+    durationMs: number    // integer
+  },
   status: 'OK' | 'FAIL',
   summary: object,
   report: {
@@ -135,6 +140,8 @@ implicit progress. `ACTIONS_WARDEN_MODE=agent` remains a legacy alias:
 }
 ```
 
+`tool` and `run` are run provenance. They appear only in the receipt, so the
+saved report, the directory aggregate, and the manifest stay byte-deterministic.
 `summary` is the normal bounded organization coverage and severity summary;
 the receipt never embeds repository arrays, findings, or operational error
 details. When comparison was requested, `comparison` is its bounded count
@@ -213,7 +220,7 @@ Record labels by command:
 | `upgrade` | `UPGRADE`, `SKIP`, `ERROR`, `SUMMARY` |
 | `verify` | `VERIFIED`, `WARNING`, `ERROR`, `SUMMARY` |
 | `report` | `FINDING`, `PIN`, `UPGRADE`, `SKIP`, `ERROR`, `SUMMARY` |
-| `org-scan` | `REPOSITORY`, `FINDING`, `ERROR`, `COVERAGE`, optional comparison records, `SUMMARY` |
+| `org-scan` | `REPOSITORY`, `FILE`, `FINDING`, `ERROR`, `COVERAGE`, optional comparison records, `SUMMARY` |
 | `rules` | `RULE` |
 
 Example:
@@ -266,7 +273,23 @@ Audit and organization findings use this core shape:
 }
 ```
 
-Organization findings additionally include `repository`, `branch`, and `url`.
+Organization findings additionally include `repository`, `branch`, `url`, and
+the source location:
+
+```js
+{
+  url: string,        // default-branch link, #L<line> when line > 0
+  path: string,       // repo-relative POSIX path
+  blobSha: string | null, // lowercase 40-hex blob of the scanned file
+  permalink: string   // {htmlUrl}/blob/{commitSha}/{path}, #L<line> when line > 0
+}
+```
+
+`file`, `fields.file`, `url`, `id`, and `fingerprint` are unchanged; `path` is
+the same location without the `owner/repo/` prefix. `permalink` pins the exact
+commit that was scanned, so it stays valid after the branch moves. It falls back
+to the `url` form only when no commit is known. An organization `errors` entry
+that has a `path` also carries a `permalink`.
 `fields.type`, `fields.sev`, and `fields.file` provide the equivalent flat
 fields used by line-oriented formats.
 
@@ -412,8 +435,20 @@ fields used by line-oriented formats.
       disabled: boolean,
       htmlUrl: string
     },
-    revision: { branch: string | null, treeSha: string | null },
-    files: string[],
+    revision: {
+      branch: string | null,
+      treeSha: string | null,
+      commitSha: string | null   // null only for an empty repository or a failed read
+    },
+    files: string[],         // workflow files that were read and audited
+    fileDetails: [{          // every selected workflow file, sorted by path
+      path: string,
+      blobSha: string | null,
+      bytes: number | null,  // decoded size when read, else tree size, else null
+      status: 'scanned' | 'parse-error' | 'unreadable',
+      findings: number,      // unsuppressed findings reported for this file
+      permalink: string
+    }],
     findings: Finding[],
     errors: object[],
     summary: object,
@@ -428,6 +463,11 @@ fields used by line-oriented formats.
   status: 'OK' | 'FAIL'
 }
 ```
+
+`fileDetails` lists every workflow tree entry selected after ignore filtering,
+including clean files, so a consumer can prove which files were inspected.
+`unreadable` marks an entry that produced a fetch error; it is absent from
+`files` and appears in `errors`. `files` itself stays a `string[]`.
 
 The organization summary includes repository coverage counts in addition to
 file, finding, suppression, error, and severity counts. A consumer can use the
@@ -477,7 +517,8 @@ finding and error arrays:
 
 Each repository pointer names an
 `actions-warden-org-scan-repository` document containing the complete
-repository result. `manifest.json` uses kind
+repository result, including `fileDetails`; the compact aggregate keeps only the
+file count and the `revision` (with its `commitSha`). `manifest.json` uses kind
 `actions-warden-org-scan-manifest` and lists the compact report, every
 repository artifact, and optional comparison artifact with its exact UTF-8
 byte count and SHA-256 digest. The final manifest, rather than a directory
@@ -524,7 +565,10 @@ unmatched previous findings are `resolved` only for repositories successfully
 covered and parsed by the current report; otherwise they are `unknown`. A
 missing, failed, or unparseable repository makes the comparison incomplete. Current scan status does
 not change merely because findings were resolved. Comparison requires matching
-analysis identities and is unavailable with SARIF.
+analysis identities and is unavailable with SARIF. Analysis generation 3 added
+the commit, file inventory, and permalinks, so a report produced by an earlier
+version cannot be used with `--previous-report`; regenerate it once with the
+current version.
 
 ### `rules`
 
@@ -551,8 +595,8 @@ The remaining header is the union of fields present in the result. Common
 fields use this stable preferred order when present:
 
 ```text
-status,organization,repo,repository,file,line,id,type,ruleId,sev,severity,
-action,image,from,to,sha,version,level,change,msg,explain,url
+status,organization,repo,repository,file,path,line,id,type,ruleId,sev,severity,
+action,image,from,to,sha,version,level,change,msg,explain,url,permalink
 ```
 
 Additional field names follow in lexical order. Empty, null, and missing
@@ -590,7 +634,8 @@ human-review artifacts. They provide:
 - report scope and summary metric cards;
 - severity/rule and organization repository breakdowns;
 - client-side search plus record type, severity, and repository filters;
-- complete record tables, HTTPS source links, and comparison groups;
+- complete record tables, including a "Scanned files" table, HTTPS source and
+  permalink links, and comparison groups;
 - print styling without external fonts, scripts, stylesheets, or network calls.
 
 Every dynamic value passes through credential redaction and HTML escaping. No
@@ -615,15 +660,44 @@ for a copyable artifact-first workflow.
 ## SARIF
 
 SARIF output uses version 2.1.0 and identifies the tool as `actions-warden`.
-Findings and operational records become SARIF results. Finding IDs and semantic
-fingerprints are included as partial fingerprints where available, and source
-locations use repository-relative POSIX paths.
+Findings and operational records become SARIF results; `FILE` inventory records
+do not. Finding IDs and semantic fingerprints are included as partial
+fingerprints where available, and source locations use repository-relative
+POSIX paths.
+
+Every rule descriptor that has a severity carries
+`properties['security-severity']`, a string GitHub uses to rank code-scanning
+alerts: critical `9.5`, high `7.0`, medium `4.0`, and low `1.0`. GitHub maps
+scores over 9.0 to critical, 7.0 to 8.9 to high, 4.0 to 6.9 to medium, and 0.1
+to 3.9 to low, so critical uses 9.5 instead of the boundary value. Descriptors
+for operational errors, warnings, and change plans have no score because they
+are not security alerts.
+
+Local commands (`audit`, `pin`, `upgrade`, `verify`, and `report`) write a
+single run. An organization scan writes one run per repository, in repository
+order, with an empty `results` array for a repository that has no findings:
+
+```js
+{
+  tool: { driver: { name: 'actions-warden', rules: [/* ... */] } },
+  versionControlProvenance: [{
+    repositoryUri: string,   // https://github.com/<owner>/<repo>
+    revisionId?: string,     // scanned commit; omitted when it is unknown
+    branch?: string          // default branch
+  }],
+  invocations: [{ executionSuccessful: boolean }],
+  results: [/* locations use the repo-relative `path` */]
+}
+```
+
+A repository-level error, such as an unreadable tree, is a result in that
+repository's run. Organization findings point at files in other repositories, so
+treat the combined file as a portable report. GitHub code scanning accepts at
+most 20 runs per SARIF file and one repository per upload, so split an
+organization file by run before uploading anything to code scanning.
 
 For a local repository, upload the generated file with the code-scanning tool
-used by your CI platform. Organization findings point at files in other
-repositories, so a single organization SARIF artifact is best treated as a
-portable report unless your ingestion system explicitly supports
-cross-repository locations.
+used by your CI platform.
 
 GitHub Action annotations are separate from the selected output format. Choosing
 SARIF does not disable annotations.
@@ -649,6 +723,8 @@ repository access change.
 Resuming an organization scan does not add execution-history fields to the
 final report. When all validated repository revisions are unchanged, a resumed
 report has the same serialized bytes as a fresh result with the same inputs.
+Checkpoints store neither commits nor links; a resumed report rebuilds finding
+`path`s, `permalink`s, and `revision.commitSha` from the current run's commit.
 Checkpoint and progress metadata stay outside the report contract.
 
 ## GitHub Action outputs

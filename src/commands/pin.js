@@ -17,8 +17,7 @@ import { pinOccurrenceId, canonicalPath } from '../lib/identity.js';
 import { applyPatches, planUsesPatches } from '../lib/patcher.js';
 import { resolveTargets } from '../lib/targets.js';
 import { mapLimit } from '../lib/concurrency.js';
-
-const SHA_RE = /^[0-9a-f]{40}$/i;
+import { GIT_SHA_RE } from '../lib/org-schema.js';
 
 /**
  * @typedef {object} PinChange
@@ -69,7 +68,7 @@ export async function pin({ cwd = process.cwd(), workflows, dryRun = true, token
     const ignore = parseIgnoreDirectives(source);
     for (const { ref } of collectUses(doc)) {
       if (ref.kind !== 'external' && ref.kind !== 'reusable-workflow') continue;
-      if (!ref.ref || SHA_RE.test(ref.ref)) continue;
+      if (!ref.ref || GIT_SHA_RE.test(ref.ref)) continue;
       if (isIgnored(ignore, ref.line, 'unpinned-action')) continue;
       const id = pinOccurrenceId({ file, cwd, ref });
       if (fix && fix !== id) continue;

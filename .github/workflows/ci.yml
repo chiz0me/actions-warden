@@ -43,6 +43,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
         run: npm run check:package
       - run: npm run lint
+      - run: npm run typecheck
       - name: Audit dependencies
         if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
         run: npm audit --audit-level=high

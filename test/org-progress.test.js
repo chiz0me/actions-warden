@@ -3,14 +3,16 @@ import { Writable } from 'node:stream';
 import {
   createOrganizationProgressReporter,
   formatOrganizationProgress,
-  normalizeOrganizationProgressMode,
   resolveOrganizationProgressMode,
 } from '../src/lib/org-progress.js';
 
 describe('organization progress reporting', () => {
-  it('resolves explicit contexts and compatibility aliases without heuristics', () => {
-    expect(normalizeOrganizationProgressMode('always')).toBe('plain');
-    expect(normalizeOrganizationProgressMode('never')).toBe('none');
+  it('resolves explicit contexts without heuristics and rejects unknown modes', () => {
+    for (const mode of ['always', 'never', 'verbose']) {
+      expect(() => resolveOrganizationProgressMode({ mode }))
+        .toThrow('progress must be auto, plain, json, or none');
+    }
+    expect(resolveOrganizationProgressMode({ mode: 'plain', context: 'agent' })).toBe('plain');
     expect(resolveOrganizationProgressMode({ mode: 'auto', context: 'agent', isTTY: true }))
       .toBe('none');
     expect(resolveOrganizationProgressMode({ mode: 'auto', context: 'ci', isTTY: false }))

@@ -2,7 +2,7 @@
  * Workflow file discovery with safe path handling.
  */
 
-import { readdir, stat, realpath } from 'node:fs/promises';
+import { lstat, readdir, stat, realpath } from 'node:fs/promises';
 import { resolve, join, relative, isAbsolute, sep } from 'node:path';
 import picomatch from 'picomatch';
 
@@ -17,6 +17,23 @@ export const DEFAULT_WORKFLOW_PATTERNS = [
   '**/action.yml',
   '**/action.yaml',
 ];
+
+/**
+ * Return whether a path exists without following a final symbolic link. Errors other
+ * than a missing path are rethrown.
+ *
+ * @param {string} path
+ * @returns {Promise<boolean>}
+ */
+export async function pathExists(path) {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
 
 /**
  * Reject path-traversal and absolute-escape attempts.

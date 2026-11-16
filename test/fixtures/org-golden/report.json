@@ -1,0 +1,426 @@
+{
+  "schemaVersion": "1.0",
+  "organization": "octo-org",
+  "analysis": {
+    "generation": 3,
+    "identity": "1f61fd579a0b4f8533b47382290ee1bb92343cf7c7d0b562c4643642baecf6a0"
+  },
+  "scope": {
+    "repositories": [],
+    "visibility": "all",
+    "includeArchived": false,
+    "includeDisabled": false,
+    "includeForks": false,
+    "maxRepositories": null,
+    "concurrency": 4,
+    "severity": null
+  },
+  "coverage": {
+    "complete": false,
+    "enumerationComplete": true,
+    "selectedRepositoriesComplete": false,
+    "eligibleRepositoriesComplete": false,
+    "limitedByMaxRepositories": false,
+    "repositoriesOmittedByLimit": 0,
+    "incompleteRepositories": [
+      "octo-org/app",
+      "octo-org/broken"
+    ]
+  },
+  "repositories": [
+    {
+      "repository": {
+        "owner": "octo-org",
+        "name": "app",
+        "fullName": "octo-org/app",
+        "defaultBranch": "main",
+        "visibility": "public",
+        "private": false,
+        "fork": false,
+        "archived": false,
+        "disabled": false,
+        "htmlUrl": "https://github.com/octo-org/app"
+      },
+      "revision": {
+        "branch": "main",
+        "treeSha": "1111111111111111111111111111111111111111",
+        "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "files": [
+        ".github/workflows/ci.yml",
+        ".github/workflows/lint.yml"
+      ],
+      "fileDetails": [
+        {
+          "path": ".github/workflows/ci.yml",
+          "blobSha": "02936520f2119e51bad8381d22097a03db6f10f8",
+          "bytes": 202,
+          "status": "scanned",
+          "findings": 3,
+          "permalink": "https://github.com/octo-org/app/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.github/workflows/ci.yml"
+        },
+        {
+          "path": ".github/workflows/lint.yml",
+          "blobSha": "29d998a51419a23adf422bc3074762c84d88b2e9",
+          "bytes": 209,
+          "status": "scanned",
+          "findings": 0,
+          "permalink": "https://github.com/octo-org/app/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.github/workflows/lint.yml"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "blobSha": "348350c8a3b122eaeb4845542c3550a5f18db462",
+          "bytes": 61,
+          "status": "unreadable",
+          "findings": 0,
+          "permalink": "https://github.com/octo-org/app/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.github/workflows/release.yml"
+        }
+      ],
+      "findings": [
+        {
+          "id": "7b287551b34a7901",
+          "ruleId": "unpinned-action",
+          "severity": "high",
+          "file": "octo-org/app/.github/workflows/ci.yml",
+          "line": 9,
+          "fields": {
+            "type": "unpinned-action",
+            "sev": "high",
+            "action": "actions/checkout@v4",
+            "ref": "v4",
+            "file": "octo-org/app/.github/workflows/ci.yml"
+          },
+          "fingerprint": "04f2aa0f03981937",
+          "repository": "octo-org/app",
+          "branch": "main",
+          "url": "https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L9",
+          "path": ".github/workflows/ci.yml",
+          "blobSha": "02936520f2119e51bad8381d22097a03db6f10f8",
+          "permalink": "https://github.com/octo-org/app/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.github/workflows/ci.yml#L9"
+        },
+        {
+          "id": "7e4fadc623fcc5dc",
+          "ruleId": "excessive-permissions",
+          "severity": "low",
+          "file": "octo-org/app/.github/workflows/ci.yml",
+          "line": 1,
+          "fields": {
+            "type": "excessive-permissions",
+            "sev": "low",
+            "scope": "workflow-default-unspecified",
+            "file": "octo-org/app/.github/workflows/ci.yml"
+          },
+          "fingerprint": "8932eed11ca8a74a",
+          "repository": "octo-org/app",
+          "branch": "main",
+          "url": "https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L1",
+          "path": ".github/workflows/ci.yml",
+          "blobSha": "02936520f2119e51bad8381d22097a03db6f10f8",
+          "permalink": "https://github.com/octo-org/app/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.github/workflows/ci.yml#L1"
+        },
+        {
+          "id": "aa41850a4cc3ce6b",
+          "ruleId": "script-injection",
+          "severity": "critical",
+          "file": "octo-org/app/.github/workflows/ci.yml",
+          "line": 11,
+          "fields": {
+            "type": "script-injection",
+            "sev": "critical",
+            "job": "build",
+            "sink": "run",
+            "expr": "${{ github.event.issue.title }}",
+            "file": "octo-org/app/.github/workflows/ci.yml"
+          },
+          "fingerprint": "08be962bbf8f1e80",
+          "repository": "octo-org/app",
+          "branch": "main",
+          "url": "https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L11",
+          "path": ".github/workflows/ci.yml",
+          "blobSha": "02936520f2119e51bad8381d22097a03db6f10f8",
+          "permalink": "https://github.com/octo-org/app/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.github/workflows/ci.yml#L11"
+        }
+      ],
+      "errors": [
+        {
+          "repository": "octo-org/app",
+          "path": ".github/workflows/release.yml",
+          "error": "could not read workflow blob 348350c8a3b122eaeb4845542c3550a5f18db462 (HTTP 404)",
+          "permalink": "https://github.com/octo-org/app/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.github/workflows/release.yml"
+        }
+      ],
+      "summary": {
+        "files": 2,
+        "findings": 3,
+        "totalFindings": 3,
+        "suppressed": 0,
+        "critical": 1,
+        "high": 1,
+        "medium": 0,
+        "low": 1
+      },
+      "status": "FAIL"
+    },
+    {
+      "repository": {
+        "owner": "octo-org",
+        "name": "broken",
+        "fullName": "octo-org/broken",
+        "defaultBranch": "main",
+        "visibility": "public",
+        "private": false,
+        "fork": false,
+        "archived": false,
+        "disabled": false,
+        "htmlUrl": "https://github.com/octo-org/broken"
+      },
+      "revision": {
+        "branch": "main",
+        "treeSha": "2222222222222222222222222222222222222222",
+        "commitSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "files": [
+        ".github/workflows/bad.yml"
+      ],
+      "fileDetails": [
+        {
+          "path": ".github/workflows/bad.yml",
+          "blobSha": "650f00ed5de6fd1b3aa0c492e3601de35ee35204",
+          "bytes": 25,
+          "status": "parse-error",
+          "findings": 1,
+          "permalink": "https://github.com/octo-org/broken/blob/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/.github/workflows/bad.yml"
+        }
+      ],
+      "findings": [
+        {
+          "id": "a8c70afc9626b51a",
+          "ruleId": "parse-error",
+          "severity": "high",
+          "file": "octo-org/broken/.github/workflows/bad.yml",
+          "line": 0,
+          "fields": {
+            "type": "parse-error",
+            "sev": "high",
+            "file": "octo-org/broken/.github/workflows/bad.yml"
+          },
+          "fingerprint": "c234e541bd2d9e8d",
+          "repository": "octo-org/broken",
+          "branch": "main",
+          "url": "https://github.com/octo-org/broken/blob/main/.github/workflows/bad.yml",
+          "path": ".github/workflows/bad.yml",
+          "blobSha": "650f00ed5de6fd1b3aa0c492e3601de35ee35204",
+          "permalink": "https://github.com/octo-org/broken/blob/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/.github/workflows/bad.yml"
+        }
+      ],
+      "errors": [],
+      "summary": {
+        "files": 1,
+        "findings": 1,
+        "totalFindings": 1,
+        "suppressed": 0,
+        "critical": 0,
+        "high": 1,
+        "medium": 0,
+        "low": 0
+      },
+      "status": "FAIL"
+    },
+    {
+      "repository": {
+        "owner": "octo-org",
+        "name": "clean",
+        "fullName": "octo-org/clean",
+        "defaultBranch": "main",
+        "visibility": "public",
+        "private": false,
+        "fork": false,
+        "archived": false,
+        "disabled": false,
+        "htmlUrl": "https://github.com/octo-org/clean"
+      },
+      "revision": {
+        "branch": "main",
+        "treeSha": "3333333333333333333333333333333333333333",
+        "commitSha": "cccccccccccccccccccccccccccccccccccccccc"
+      },
+      "files": [
+        ".github/workflows/build.yml"
+      ],
+      "fileDetails": [
+        {
+          "path": ".github/workflows/build.yml",
+          "blobSha": "29d998a51419a23adf422bc3074762c84d88b2e9",
+          "bytes": 209,
+          "status": "scanned",
+          "findings": 0,
+          "permalink": "https://github.com/octo-org/clean/blob/cccccccccccccccccccccccccccccccccccccccc/.github/workflows/build.yml"
+        }
+      ],
+      "findings": [],
+      "errors": [],
+      "summary": {
+        "files": 1,
+        "findings": 0,
+        "totalFindings": 0,
+        "suppressed": 0,
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "status": "OK"
+    },
+    {
+      "repository": {
+        "owner": "octo-org",
+        "name": "empty",
+        "fullName": "octo-org/empty",
+        "defaultBranch": "main",
+        "visibility": "public",
+        "private": false,
+        "fork": false,
+        "archived": false,
+        "disabled": false,
+        "htmlUrl": "https://github.com/octo-org/empty"
+      },
+      "revision": {
+        "branch": "main",
+        "treeSha": null,
+        "commitSha": null
+      },
+      "files": [],
+      "fileDetails": [],
+      "findings": [],
+      "errors": [],
+      "summary": {
+        "files": 0,
+        "findings": 0,
+        "totalFindings": 0,
+        "suppressed": 0,
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "status": "OK"
+    }
+  ],
+  "findings": [
+    {
+      "id": "7b287551b34a7901",
+      "ruleId": "unpinned-action",
+      "severity": "high",
+      "file": "octo-org/app/.github/workflows/ci.yml",
+      "line": 9,
+      "fields": {
+        "type": "unpinned-action",
+        "sev": "high",
+        "action": "actions/checkout@v4",
+        "ref": "v4",
+        "file": "octo-org/app/.github/workflows/ci.yml"
+      },
+      "fingerprint": "04f2aa0f03981937",
+      "repository": "octo-org/app",
+      "branch": "main",
+      "url": "https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L9",
+      "path": ".github/workflows/ci.yml",
+      "blobSha": "02936520f2119e51bad8381d22097a03db6f10f8",
+      "permalink": "https://github.com/octo-org/app/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.github/workflows/ci.yml#L9"
+    },
+    {
+      "id": "7e4fadc623fcc5dc",
+      "ruleId": "excessive-permissions",
+      "severity": "low",
+      "file": "octo-org/app/.github/workflows/ci.yml",
+      "line": 1,
+      "fields": {
+        "type": "excessive-permissions",
+        "sev": "low",
+        "scope": "workflow-default-unspecified",
+        "file": "octo-org/app/.github/workflows/ci.yml"
+      },
+      "fingerprint": "8932eed11ca8a74a",
+      "repository": "octo-org/app",
+      "branch": "main",
+      "url": "https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L1",
+      "path": ".github/workflows/ci.yml",
+      "blobSha": "02936520f2119e51bad8381d22097a03db6f10f8",
+      "permalink": "https://github.com/octo-org/app/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.github/workflows/ci.yml#L1"
+    },
+    {
+      "id": "aa41850a4cc3ce6b",
+      "ruleId": "script-injection",
+      "severity": "critical",
+      "file": "octo-org/app/.github/workflows/ci.yml",
+      "line": 11,
+      "fields": {
+        "type": "script-injection",
+        "sev": "critical",
+        "job": "build",
+        "sink": "run",
+        "expr": "${{ github.event.issue.title }}",
+        "file": "octo-org/app/.github/workflows/ci.yml"
+      },
+      "fingerprint": "08be962bbf8f1e80",
+      "repository": "octo-org/app",
+      "branch": "main",
+      "url": "https://github.com/octo-org/app/blob/main/.github/workflows/ci.yml#L11",
+      "path": ".github/workflows/ci.yml",
+      "blobSha": "02936520f2119e51bad8381d22097a03db6f10f8",
+      "permalink": "https://github.com/octo-org/app/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.github/workflows/ci.yml#L11"
+    },
+    {
+      "id": "a8c70afc9626b51a",
+      "ruleId": "parse-error",
+      "severity": "high",
+      "file": "octo-org/broken/.github/workflows/bad.yml",
+      "line": 0,
+      "fields": {
+        "type": "parse-error",
+        "sev": "high",
+        "file": "octo-org/broken/.github/workflows/bad.yml"
+      },
+      "fingerprint": "c234e541bd2d9e8d",
+      "repository": "octo-org/broken",
+      "branch": "main",
+      "url": "https://github.com/octo-org/broken/blob/main/.github/workflows/bad.yml",
+      "path": ".github/workflows/bad.yml",
+      "blobSha": "650f00ed5de6fd1b3aa0c492e3601de35ee35204",
+      "permalink": "https://github.com/octo-org/broken/blob/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/.github/workflows/bad.yml"
+    }
+  ],
+  "errors": [
+    {
+      "repository": "octo-org/app",
+      "path": ".github/workflows/release.yml",
+      "error": "could not read workflow blob 348350c8a3b122eaeb4845542c3550a5f18db462 (HTTP 404)",
+      "permalink": "https://github.com/octo-org/app/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.github/workflows/release.yml"
+    }
+  ],
+  "summary": {
+    "repositoriesDiscovered": 4,
+    "repositoriesEligible": 4,
+    "repositoriesSelected": 4,
+    "repositoriesScanned": 4,
+    "repositoriesWithWorkflows": 3,
+    "repositoriesWithFindings": 2,
+    "repositoriesFailed": 1,
+    "repositoriesSkipped": 0,
+    "files": 4,
+    "findings": 4,
+    "totalFindings": 4,
+    "suppressed": 0,
+    "errors": 1,
+    "critical": 1,
+    "high": 2,
+    "medium": 0,
+    "low": 1
+  },
+  "baseline": {
+    "path": null,
+    "suppressed": 0
+  },
+  "configPath": null,
+  "status": "FAIL"
+}

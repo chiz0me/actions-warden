@@ -21,7 +21,7 @@ actions-warden --version
 For reproducible one-off automation, invoke an exact package version:
 
 ```sh
-npx --yes actions-warden@0.5.0 audit
+npx --yes actions-warden@0.6.0 audit
 ```
 
 Network-backed commands resolve credentials in this order:
@@ -313,7 +313,7 @@ actions-warden org-scan <organization> \
   [--checkpoint=<path> | --resume=<path>] [--fresh] \
   [--no-auto-checkpoint] \
   [--previous-report=<path>] \
-  [--progress=auto|plain|json|none|always|never] \
+  [--progress=auto|plain|json|none] \
   [--report-dir=<dedicated-directory>] \
   [--agent-mode | --no-agent-mode] \
   [--format=toon|json|text|csv|sarif|html] \
@@ -408,7 +408,8 @@ actions-warden org-scan my-org \
 The previous report must be inside `--cwd`, use schema `1.0`, contain a public
 analysis identity, and match the current organization, scope, normalized
 policy, baseline contents, rule catalog, and analysis generation. Reports made
-before analysis identities were added must be regenerated once. Token,
+by an earlier analysis generation, including every report made before commits,
+file inventories, and permalinks were added, must be regenerated once. Token,
 concurrency, progress, and output destination do not affect compatibility.
 
 Comparison uses semantic fingerprints and returns complete `new`, `resolved`,
@@ -481,10 +482,8 @@ actions-warden org-scan my-org
 ```
 
 `ACTIONS_WARDEN_CONTEXT` accepts `agent`, `auto`, `ci`, or `interactive`.
-`ACTIONS_WARDEN_MODE=agent` remains a compatibility alias for older
-integrations. With implicit `--progress=auto`, agent context is quiet, CI and
-interactive contexts use plain progress, and auto context follows stderr TTY
-state.
+With implicit `--progress=auto`, agent context is quiet, CI and interactive
+contexts use plain progress, and auto context follows stderr TTY state.
 
 The general organization-scan defaults already select JSON file output, a
 scope-keyed checkpoint, compatible automatic resume, and a bounded receipt.
@@ -509,10 +508,7 @@ all use these paths:
 An explicitly selected report format changes the report extension. Generated
 files are mode `0600` when first created and may reveal private security
 posture; protect them and ignore `.actions-warden-org-scan.*` in consuming
-repositories when appropriate. On an automatic-checkpoint run, a compatible
-legacy `.actions-warden-agent.*` checkpoint is validated and copied atomically
-to the common path before resume. The legacy file is retained as possible
-audit evidence.
+repositories when appropriate.
 
 After writing the full report, stdout contains only a bounded JSON receipt:
 
@@ -556,16 +552,14 @@ an invocation error. Explicit `--format`, `--output`, `--output-path`,
 With explicit `--output=stdout`, stdout is the complete selected report and no
 receipt is added. Use `--no-agent-mode` to override an inherited environment
 marker. Passing both agent-mode flags is rejected. An explicit agent-mode flag
-has precedence over both environment variables; the preferred context variable
-has precedence over the legacy marker.
+has precedence over `ACTIONS_WARDEN_CONTEXT`.
 
 ### Progress and resume
 
 Progress is independent of the report format and is written only to stderr.
 This keeps stdout valid JSON, CSV, SARIF, TOON, text, or HTML. Select `plain`
 for human CI or redirected logs, `json` for one parseable event per line, and
-`none` when a caller wants no progress channel. `always` and `never` remain
-aliases for `plain` and `none`:
+`none` when a caller wants no progress channel:
 
 ```sh
 actions-warden org-scan my-org \
@@ -608,16 +602,15 @@ actions-warden org-scan my-org \
 
 The token, concurrency, output format, progress mode, and report destination do
 not affect checkpoint compatibility. Neither does a package-version-only
-upgrade: the producing version is retained as checkpoint metadata, and a
-compatible older checkpoint is rewritten atomically on its first successful
-resume. The
+upgrade: the producing version is retained as checkpoint metadata that the next
+checkpoint write refreshes. The
 explicit analysis generation is advanced when discovery, parsing, finding
 identity, rule evaluation, or persisted result behavior changes. An
 incompatible generation fails closed; automatic organization scans select a
-new keyed path. A resumed scan always lists repositories again and
-fetches a fresh
-default-branch tree for each selected repository. An error-free result is
-reused only when repository identity, default branch, and tree SHA still match.
+new keyed path. A checkpoint from an older schema or generation is rejected.
+A resumed scan always lists repositories again and resolves the current
+default-branch commit and its tree for each selected repository. An error-free
+result is reused only when repository identity, default branch, and tree SHA still match.
 Changed repositories and any checkpointed result with an operational error are
 scanned again.
 
@@ -638,7 +631,9 @@ artifacts. When an analysis generation intentionally changes, the older keyed re
 retained rather than deleted automatically because they may be needed as audit
 evidence; remove them according to the consuming repository's retention policy.
 
-The scanner reads the default-branch Git tree and YAML blobs in memory. It
+The scanner resolves the default-branch commit, reads that commit's Git tree,
+and reads YAML blobs in memory, so each repository costs one extra request for
+the commit that permalinks point at. It
 never clones, checks out, or executes remote content. It fails closed on
 truncated trees and enforces these bounds per repository:
 

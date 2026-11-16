@@ -58,6 +58,7 @@ npm run verify-deps
 npm run check:yaml
 npm run check:docs
 npm run lint
+npm run typecheck
 npm test
 npm run audit
 ```

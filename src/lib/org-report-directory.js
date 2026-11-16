@@ -9,9 +9,9 @@
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, readdir, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { renderOrganizationScan } from '../commands/org-scan.js';
 import { canonicalPath } from './identity.js';
 import { renderJson } from './formatter.js';
+import { buildOrganizationReport } from './org-report.js';
 import { writeFileGuarded } from './writer.js';
 
 const AGGREGATE_FILENAME = 'organization-report.json';
@@ -44,7 +44,7 @@ export async function writeOrganizationReportDirectory({
   const repositoriesDirectory = join(directory, REPOSITORIES_DIRECTORY);
   await ensureDirectory(repositoriesDirectory);
 
-  const complete = JSON.parse(renderOrganizationScan(result, { format: 'json', cwd }));
+  const complete = buildOrganizationReport(result, { cwd });
   const repositoryArtifacts = [];
   const compactRepositories = [];
   for (const repositoryResult of complete.repositories) {

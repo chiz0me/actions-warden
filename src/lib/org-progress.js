@@ -10,6 +10,18 @@
 import { redact, redactDeep } from './redact.js';
 
 const ORGANIZATION_PROGRESS_CONTEXTS = new Set(['agent', 'auto', 'ci', 'interactive']);
+const REPORTED_SCAN_FAILURES = new WeakSet();
+
+/**
+ * Return whether a structured JSON progress channel already reported this
+ * error as a terminal `scan-failed` event, so callers do not report it twice.
+ *
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+export function isScanFailureReported(error) {
+  return Boolean(error) && typeof error === 'object' && REPORTED_SCAN_FAILURES.has(error);
+}
 
 /** Public organization progress modes accepted by the CLI. */
 export const ORGANIZATION_PROGRESS_MODES = Object.freeze([
@@ -17,19 +29,7 @@ export const ORGANIZATION_PROGRESS_MODES = Object.freeze([
   'plain',
   'json',
   'none',
-  'always',
-  'never',
 ]);
-
-/** Normalize compatibility aliases to the canonical progress modes. */
-export function normalizeOrganizationProgressMode(mode = 'auto') {
-  if (!ORGANIZATION_PROGRESS_MODES.includes(mode)) {
-    throw new Error('progress must be auto, plain, json, none, always, or never');
-  }
-  if (mode === 'always') return 'plain';
-  if (mode === 'never') return 'none';
-  return mode;
-}
 
 /**
  * Resolve an implicit progress mode for an explicit execution context.
@@ -40,11 +40,13 @@ export function resolveOrganizationProgressMode({
   context = 'auto',
   isTTY = false,
 } = {}) {
-  const normalized = normalizeOrganizationProgressMode(mode);
+  if (!ORGANIZATION_PROGRESS_MODES.includes(mode)) {
+    throw new Error('progress must be auto, plain, json, or none');
+  }
   if (!ORGANIZATION_PROGRESS_CONTEXTS.has(context)) {
     throw new Error('progress context must be agent, auto, ci, or interactive');
   }
-  if (normalized !== 'auto') return normalized;
+  if (mode !== 'auto') return mode;
   if (context === 'agent') return 'none';
   if (context === 'ci') return 'plain';
   if (context === 'interactive') return 'plain';
@@ -141,8 +143,16 @@ export function createOrganizationProgressReporter({
     scheduleCleanup();
   }
 
+  function failScan(organization, error) {
+    emit({ type: 'scan-failed', organization, error: String(error?.message ?? error) });
+    if (resolvedMode === 'json' && error && typeof error === 'object') {
+      REPORTED_SCAN_FAILURES.add(error);
+    }
+  }
+
   return {
     emit,
+    failScan,
     close,
     mode: resolvedMode,
     requestedMode: mode,

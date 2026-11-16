@@ -6,11 +6,13 @@
  */
 
 import { TextDecoder } from 'node:util';
+import { GIT_SHA_RE, NAME_RE, REPOSITORY_VISIBILITIES } from './org-schema.js';
 import { ghFetch } from './resolver.js';
 
 const API = 'https://api.github.com';
-const NAME_RE = /^[A-Za-z0-9_.-]+$/;
-const SHA_RE = /^[0-9a-f]{40}$/i;
+
+/** HTTP status GitHub returns for Git requests against a repository with no commits. */
+const EMPTY_REPOSITORY_STATUS = 409;
 
 /** Maximum decoded bytes accepted for one remote workflow YAML blob. */
 export const MAX_WORKFLOW_BYTES = 2 * 1024 * 1024;
@@ -96,6 +98,8 @@ export async function listOrganizationRepositories({
 
 /**
  * Fetch and validate the workflow-bearing portion of a repository tree.
+ * The default-branch commit is resolved first and the tree is then read by that
+ * commit's tree SHA, so the evidence and its permalinks describe one revision.
  * The returned snapshot can be compared with a checkpoint before any blobs
  * are downloaded.
  */
@@ -110,65 +114,39 @@ export async function fetchRepositoryWorkflowTree({
   if (includePath !== undefined && typeof includePath !== 'function') {
     throw new Error('includePath must be a function');
   }
-  if (!normalized.defaultBranch) {
-    return workflowTree(normalized, { entries: [], empty: true, treeSha: null });
-  }
-  const treeUrl = `${API}/repos/${encodeURIComponent(normalized.owner)}`
-    + `/${encodeURIComponent(normalized.name)}/git/trees/`
-    + `${encodeURIComponent(normalized.defaultBranch)}?recursive=1`;
+  const emptyTree = () => workflowTree(normalized, {
+    entries: [],
+    empty: true,
+    treeSha: null,
+    commitSha: null,
+  });
+  if (!normalized.defaultBranch) return emptyTree();
+  const commit = await fetchDefaultBranchCommit({ repository: normalized, token, cwd, onRetry });
+  if (commit === null) return emptyTree();
+
   const treeResponse = await ghFetch({
-    url: treeUrl,
+    url: `${repositoryApiUrl(normalized)}/git/trees/${commit.treeSha}?recursive=1`,
     token,
     cwd,
     useCache: false,
     onRetry,
   });
-  if (treeResponse.status === 409) {
-    return workflowTree(normalized, { entries: [], empty: true, treeSha: null });
-  }
   if (treeResponse.status !== 200) {
-    throw new Error(`could not read ${normalized.fullName}@${normalized.defaultBranch} tree (HTTP ${treeResponse.status})`);
-  }
-  if (!treeResponse.body || typeof treeResponse.body !== 'object' || !Array.isArray(treeResponse.body.tree)) {
-    throw new Error(`invalid tree response for ${normalized.fullName}`);
-  }
-  if (typeof treeResponse.body.truncated !== 'boolean') {
-    throw new Error(`invalid tree truncation state for ${normalized.fullName}`);
-  }
-  if (!SHA_RE.test(String(treeResponse.body.sha ?? ''))) {
-    throw new Error(`invalid tree SHA for ${normalized.fullName}`);
-  }
-  if (treeResponse.body.truncated === true) {
-    throw new Error(`tree response for ${normalized.fullName} was truncated; refusing an incomplete scan`);
-  }
-
-  const entries = treeResponse.body.tree
-    .filter(entry => (
-      entry?.type === 'blob'
-      && isWorkflowPath(entry.path)
-      && (includePath === undefined || includePath(entry.path))
-    ))
-    .sort((left, right) => left.path.localeCompare(right.path));
-  if (entries.length > MAX_WORKFLOW_FILES) {
     throw new Error(
-      `${normalized.fullName} has more than ${MAX_WORKFLOW_FILES} workflow files; refusing an unbounded scan`,
+      `could not read ${normalized.fullName}@${normalized.defaultBranch} tree`
+      + ` (HTTP ${treeResponse.status})`,
     );
   }
-  const declaredBytes = entries.reduce(
-    (total, entry) => total + (
-      Number.isSafeInteger(entry.size) && entry.size >= 0 ? entry.size : 0
-    ),
-    0,
-  );
-  if (declaredBytes > MAX_REPOSITORY_WORKFLOW_BYTES) {
-    throw new Error(
-      `${normalized.fullName} workflow sources exceed the ${MAX_REPOSITORY_WORKFLOW_BYTES}-byte repository limit`,
-    );
-  }
+  const entries = selectWorkflowEntries(treeResponse.body, {
+    repository: normalized,
+    expectedTreeSha: commit.treeSha,
+    includePath,
+  });
   return workflowTree(normalized, {
     entries,
     empty: false,
-    treeSha: String(treeResponse.body.sha).toLowerCase(),
+    treeSha: commit.treeSha,
+    commitSha: commit.commitSha,
   });
 }
 
@@ -195,60 +173,30 @@ export async function fetchRepositoryWorkflows({
     onRetry,
   });
   validateWorkflowTree(tree, normalized);
-  if (tree.empty) {
-    return { sources: [], errors: [], empty: true, treeSha: tree.treeSha };
-  }
-
-  const sources = [];
-  const errors = [];
-  let sourceBytes = 0;
-  for (const entry of tree.entries) {
-    if (!SHA_RE.test(String(entry.sha ?? ''))) {
-      errors.push({ path: entry.path, error: 'workflow tree entry has an invalid blob SHA' });
-      continue;
-    }
-    if (
-      entry.size !== undefined
-      && (!Number.isSafeInteger(entry.size) || entry.size < 0)
-    ) {
-      errors.push({ path: entry.path, error: 'workflow tree entry has an invalid size' });
-      continue;
-    }
-    if (Number.isFinite(entry.size) && entry.size > MAX_WORKFLOW_BYTES) {
-      errors.push({
-        path: entry.path,
-        error: `workflow exceeds the ${MAX_WORKFLOW_BYTES}-byte scan limit`,
-      });
-      continue;
-    }
-    let source;
-    try {
-      source = await fetchBlobText({
-        owner: normalized.owner,
-        repo: normalized.name,
-        sha: entry.sha,
-        token,
-        cwd,
-        onRetry,
-      });
-    } catch (error) {
-      errors.push({ path: entry.path, error: String(error.message ?? error) });
-      continue;
-    }
-    sourceBytes += Buffer.byteLength(source);
-    if (sourceBytes > MAX_REPOSITORY_WORKFLOW_BYTES) {
-      throw new Error(
-        `${normalized.fullName} workflow sources exceed the ${MAX_REPOSITORY_WORKFLOW_BYTES}-byte repository limit`,
-      );
-    }
-    sources.push({ path: entry.path, source, sha: String(entry.sha).toLowerCase() });
-  }
-  return {
-    sources,
-    errors,
-    empty: false,
+  const result = {
+    sources: [],
+    errors: [],
+    entries: [],
+    empty: tree.empty,
     treeSha: tree.treeSha,
+    commitSha: tree.commitSha,
   };
+  if (tree.empty) return result;
+
+  let sourceBytes = 0;
+  const request = { owner: normalized.owner, repo: normalized.name, token, cwd, onRetry };
+  for (const entry of tree.entries) {
+    const outcome = await readWorkflowEntry(entry, request);
+    result.entries.push(outcome.detail);
+    if (outcome.error) {
+      result.errors.push({ path: entry.path, error: outcome.error });
+      continue;
+    }
+    sourceBytes += Buffer.byteLength(outcome.text);
+    if (sourceBytes > MAX_REPOSITORY_WORKFLOW_BYTES) throw repositoryLimitError(normalized);
+    result.sources.push({ path: entry.path, source: outcome.text, sha: outcome.detail.blobSha });
+  }
+  return result;
 }
 
 /**
@@ -309,13 +257,127 @@ async function fetchBlobText({ owner, repo, sha, token, cwd, onRetry }) {
     throw new Error(`workflow blob ${sha} size did not match its metadata`);
   }
   try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return { text: new TextDecoder('utf-8', { fatal: true }).decode(bytes), bytes: bytes.length };
   } catch {
     throw new Error(`workflow blob ${sha} is not valid UTF-8`);
   }
 }
 
-function workflowTree(repository, { entries, empty, treeSha }) {
+async function readWorkflowEntry(entry, request) {
+  const blobSha = GIT_SHA_RE.test(String(entry.sha ?? ''))
+    ? String(entry.sha).toLowerCase()
+    : null;
+  const treeBytes = Number.isSafeInteger(entry.size) && entry.size >= 0 ? entry.size : null;
+  const unreadable = error => ({
+    detail: { path: entry.path, blobSha, bytes: treeBytes, readable: false },
+    error,
+  });
+  const failure = checkEntryReadable(entry);
+  if (failure) return unreadable(failure);
+  try {
+    const blob = await fetchBlobText({ ...request, sha: entry.sha });
+    return {
+      detail: { path: entry.path, blobSha, bytes: blob.bytes, readable: true },
+      text: blob.text,
+    };
+  } catch (error) {
+    return unreadable(String(error.message ?? error));
+  }
+}
+
+function repositoryLimitError(repository) {
+  return new Error(
+    `${repository.fullName} workflow sources exceed`
+    + ` the ${MAX_REPOSITORY_WORKFLOW_BYTES}-byte repository limit`,
+  );
+}
+
+async function fetchDefaultBranchCommit({ repository, token, cwd, onRetry }) {
+  const response = await ghFetch({
+    url: `${repositoryApiUrl(repository)}/commits/heads/`
+      + encodeURIComponent(repository.defaultBranch),
+    token,
+    cwd,
+    useCache: false,
+    onRetry,
+  });
+  if (response.status === EMPTY_REPOSITORY_STATUS) return null;
+  if (response.status !== 200) {
+    throw new Error(
+      `could not read ${repository.fullName}@${repository.defaultBranch} commit`
+      + ` (HTTP ${response.status})`,
+    );
+  }
+  const commitSha = String(response.body?.sha ?? '');
+  const treeSha = String(response.body?.commit?.tree?.sha ?? '');
+  if (!GIT_SHA_RE.test(commitSha) || !GIT_SHA_RE.test(treeSha)) {
+    throw new Error(`invalid commit response for ${repository.fullName}`);
+  }
+  return { commitSha: commitSha.toLowerCase(), treeSha: treeSha.toLowerCase() };
+}
+
+function selectWorkflowEntries(body, { repository, expectedTreeSha, includePath }) {
+  if (!body || typeof body !== 'object' || !Array.isArray(body.tree)) {
+    throw new Error(`invalid tree response for ${repository.fullName}`);
+  }
+  if (typeof body.truncated !== 'boolean') {
+    throw new Error(`invalid tree truncation state for ${repository.fullName}`);
+  }
+  if (!GIT_SHA_RE.test(String(body.sha ?? ''))) {
+    throw new Error(`invalid tree SHA for ${repository.fullName}`);
+  }
+  if (String(body.sha).toLowerCase() !== expectedTreeSha) {
+    throw new Error(`tree response for ${repository.fullName} did not match the commit`);
+  }
+  if (body.truncated === true) {
+    throw new Error(
+      `tree response for ${repository.fullName} was truncated; refusing an incomplete scan`,
+    );
+  }
+  const entries = body.tree
+    .filter(entry => (
+      entry?.type === 'blob'
+      && isWorkflowPath(entry.path)
+      && (includePath === undefined || includePath(entry.path))
+    ))
+    .sort((left, right) => left.path.localeCompare(right.path));
+  if (entries.length > MAX_WORKFLOW_FILES) {
+    throw new Error(
+      `${repository.fullName} has more than ${MAX_WORKFLOW_FILES} workflow files;`
+      + ' refusing an unbounded scan',
+    );
+  }
+  const declaredBytes = entries.reduce(
+    (total, entry) => total + (
+      Number.isSafeInteger(entry.size) && entry.size >= 0 ? entry.size : 0
+    ),
+    0,
+  );
+  if (declaredBytes > MAX_REPOSITORY_WORKFLOW_BYTES) {
+    throw repositoryLimitError(repository);
+  }
+  return entries;
+}
+
+function checkEntryReadable(entry) {
+  if (!GIT_SHA_RE.test(String(entry.sha ?? ''))) {
+    return 'workflow tree entry has an invalid blob SHA';
+  }
+  if (entry.size !== undefined && (!Number.isSafeInteger(entry.size) || entry.size < 0)) {
+    return 'workflow tree entry has an invalid size';
+  }
+  if (Number.isFinite(entry.size) && entry.size > MAX_WORKFLOW_BYTES) {
+    return `workflow exceeds the ${MAX_WORKFLOW_BYTES}-byte scan limit`;
+  }
+  return null;
+}
+
+function repositoryApiUrl(repository) {
+  return `${API}/repos/${encodeURIComponent(repository.owner)}`
+    + `/${encodeURIComponent(repository.name)}`;
+}
+
+function workflowTree(repository, { entries, empty, treeSha, commitSha }) {
   return {
     repository: repository.fullName,
     branch: repository.defaultBranch,
@@ -327,6 +389,7 @@ function workflowTree(repository, { entries, empty, treeSha }) {
     })),
     empty,
     treeSha,
+    commitSha,
   };
 }
 
@@ -338,14 +401,15 @@ function validateWorkflowTree(tree, repository) {
     || tree.branch !== repository.defaultBranch
     || typeof tree.empty !== 'boolean'
     || !Array.isArray(tree.entries)
-    || (tree.treeSha !== null && !SHA_RE.test(String(tree.treeSha)))
+    || (tree.treeSha !== null && !GIT_SHA_RE.test(String(tree.treeSha)))
+    || (tree.commitSha !== null && !GIT_SHA_RE.test(String(tree.commitSha)))
   ) {
     throw new Error(`invalid workflow tree snapshot for ${repository.fullName}`);
   }
   if (tree.empty && tree.entries.length > 0) {
     throw new Error(`invalid workflow tree snapshot for ${repository.fullName}`);
   }
-  if (!tree.empty && tree.treeSha === null) {
+  if (!tree.empty && (tree.treeSha === null || tree.commitSha === null)) {
     throw new Error(`invalid workflow tree snapshot for ${repository.fullName}`);
   }
   if (tree.entries.length > MAX_WORKFLOW_FILES) {
@@ -382,7 +446,7 @@ function normalizeRepository(raw, expectedOwner) {
   const defaultBranch = suppliedDefaultBranch == null
     ? null
     : validateRef(String(suppliedDefaultBranch));
-  const visibility = ['public', 'private', 'internal'].includes(raw.visibility)
+  const visibility = REPOSITORY_VISIBILITIES.includes(raw.visibility)
     ? raw.visibility
     : raw.private === true ? 'private' : 'public';
   return {

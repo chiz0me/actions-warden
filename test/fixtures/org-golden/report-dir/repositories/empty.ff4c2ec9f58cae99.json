@@ -1,0 +1,54 @@
+{
+  "schemaVersion": "1.0",
+  "kind": "actions-warden-org-scan-repository",
+  "organization": "octo-org",
+  "analysis": {
+    "generation": 3,
+    "identity": "1f61fd579a0b4f8533b47382290ee1bb92343cf7c7d0b562c4643642baecf6a0"
+  },
+  "scope": {
+    "repositories": [],
+    "visibility": "all",
+    "includeArchived": false,
+    "includeDisabled": false,
+    "includeForks": false,
+    "maxRepositories": null,
+    "concurrency": 4,
+    "severity": null
+  },
+  "repository": {
+    "repository": {
+      "owner": "octo-org",
+      "name": "empty",
+      "fullName": "octo-org/empty",
+      "defaultBranch": "main",
+      "visibility": "public",
+      "private": false,
+      "fork": false,
+      "archived": false,
+      "disabled": false,
+      "htmlUrl": "https://github.com/octo-org/empty"
+    },
+    "revision": {
+      "branch": "main",
+      "treeSha": null,
+      "commitSha": null
+    },
+    "files": [],
+    "fileDetails": [],
+    "findings": [],
+    "errors": [],
+    "summary": {
+      "files": 0,
+      "findings": 0,
+      "totalFindings": 0,
+      "suppressed": 0,
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0
+    },
+    "status": "OK"
+  },
+  "status": "OK"
+}

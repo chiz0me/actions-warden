@@ -49,9 +49,12 @@ export async function checkDocumentationCoverage({ root = process.cwd() } = {}) 
       `docs/JAVASCRIPT-API.md: missing non-empty reference row for export ${item.publicName}`,
     );
 
-    const sourcePath = resolve(dirname(indexPath), item.modulePath);
-    const source = await readFile(sourcePath, 'utf8');
-    const commentStatus = exportedDeclarationComment(source, item.importedName);
+    const declaration = await findExportedDeclaration(
+      resolve(dirname(indexPath), item.modulePath),
+      item.importedName,
+    );
+    const { sourcePath } = declaration;
+    const commentStatus = exportedDeclarationComment(declaration.source, item.importedName);
     add(
       'JavaScript exports commented',
       item.publicName,
@@ -248,6 +251,26 @@ export function parsePublicReexports(source) {
     }
   }
   return exports;
+}
+
+/**
+ * Locate the module that actually declares an export, following
+ * `export { name } from './module.js'` re-exports so documentation is checked
+ * where the code lives. Returns the last module reached when no declaration is found.
+ */
+export async function findExportedDeclaration(sourcePath, name, seen = new Set([sourcePath])) {
+  const source = await readFile(sourcePath, 'utf8');
+  if (exportedDeclarationComment(source, name) !== 'missing-declaration') {
+    return { sourcePath, source };
+  }
+  for (const reexport of parsePublicReexports(source)) {
+    if (reexport.publicName !== name) continue;
+    const next = resolve(dirname(sourcePath), reexport.modulePath);
+    if (seen.has(next)) break;
+    seen.add(next);
+    return findExportedDeclaration(next, reexport.importedName, seen);
+  }
+  return { sourcePath, source };
 }
 
 /** Return whether a named exported declaration has directly leading JSDoc. */

@@ -12,6 +12,16 @@ import { resolveRepositoryFile } from './config.js';
 import { summarize } from './formatter.js';
 import { isWorkflowPath } from './github-org.js';
 import { canonicalPath } from './identity.js';
+import {
+  FILE_STATUSES,
+  GIT_SHA_RE,
+  NAME_RE,
+  SEVERITIES,
+  comparePaths,
+  isJsonValue,
+  isRecord,
+} from './org-schema.js';
+import { sourcePermalink, sourceUrl } from './org-source-links.js';
 import { redactDeep } from './redact.js';
 import { writeFileGuarded } from './writer.js';
 import { listRules } from '../rules/index.js';
@@ -19,8 +29,6 @@ import { VERSION } from '../version.js';
 
 const CHECKPOINT_KIND = 'actions-warden-org-scan';
 const CHECKPOINT_SCHEMA_VERSION = '1.1';
-const LEGACY_CHECKPOINT_SCHEMA_VERSION = '1.0';
-const FIRST_ANALYSIS_GENERATION_TOOL_VERSION = '0.3.0';
 const TOOL_VERSION_RE = /^\d+\.\d+\.\d+$/;
 
 /**
@@ -28,14 +36,11 @@ const TOOL_VERSION_RE = /^\d+\.\d+\.\d+$/;
  * discovery, parsing, finding identity, rule evaluation, or persisted result
  * semantics change; compatible package releases keep the current value.
  */
-export const ORGANIZATION_ANALYSIS_GENERATION = 2;
+export const ORGANIZATION_ANALYSIS_GENERATION = 3;
 
 /** Maximum accepted or generated checkpoint size, in bytes. */
 export const MAX_ORGANIZATION_CHECKPOINT_BYTES = 256 * 1024 * 1024;
-const NAME_RE = /^[A-Za-z0-9_.-]+$/;
-const SHA_RE = /^[0-9a-f]{40}$/i;
 const ID_RE = /^[0-9a-f]{16}$/;
-const SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
 const RULE_IDS = new Set(['parse-error', ...listRules().map(rule => rule.id)]);
 const RULES_HASH = digest(listRules());
 
@@ -83,44 +88,19 @@ export function createOrganizationCheckpointIdentity({
 }
 
 /**
- * Create the stable key used by automatic organization-scan artifacts.
- *
- * Generation 1 deliberately retains the exact identity serialization used by
- * v0.3.0 so existing automatic checkpoints remain discoverable after an
- * upgrade. Later generations use the version-independent compatibility
- * identity directly.
+ * Create the stable key used by automatic organization-scan artifacts from
+ * the version-independent compatibility identity.
  */
 export function createOrganizationCheckpointArtifactKey(identity) {
-  const compatibleIdentity = identity.analysisGeneration === 1
-    ? {
-        toolVersion: FIRST_ANALYSIS_GENERATION_TOOL_VERSION,
-        rulesHash: identity.rulesHash,
-        organization: identity.organization,
-        scope: {
-          repositories: identity.scope.repositories,
-          visibility: identity.scope.visibility,
-          includeArchived: identity.scope.includeArchived,
-          includeDisabled: identity.scope.includeDisabled,
-          includeForks: identity.scope.includeForks,
-          maxRepositories: identity.scope.maxRepositories,
-          severity: identity.scope.severity,
-          explain: identity.scope.explain,
-        },
-        configHash: identity.configHash,
-        baselineHash: identity.baselineHash,
-      }
-    : identity;
   return createHash('sha256')
-    .update(identity.analysisGeneration === 1
-      ? JSON.stringify(compatibleIdentity)
-      : stableStringify(compatibleIdentity))
+    .update(stableStringify(identity))
     .digest('hex')
     .slice(0, 32);
 }
 
 /**
- * Load and fully validate a checkpoint, returning reusable repository results
- * plus whether a successful resume should migrate its metadata.
+ * Load and fully validate a checkpoint, returning its reusable repository
+ * results. Only the current schema version is accepted.
  */
 export async function loadOrganizationCheckpoint({ path, cwd, identity }) {
   const resolvedPath = await resolveRepositoryFile(path, cwd);
@@ -139,14 +119,10 @@ export async function loadOrganizationCheckpoint({ path, cwd, identity }) {
     if (error instanceof SyntaxError) throw new Error('organization checkpoint is not valid JSON');
     throw error;
   }
-  if (
-    !isRecord(checkpoint)
-    || ![CHECKPOINT_SCHEMA_VERSION, LEGACY_CHECKPOINT_SCHEMA_VERSION]
-      .includes(checkpoint.schemaVersion)
-  ) {
+  if (!isRecord(checkpoint) || checkpoint.schemaVersion !== CHECKPOINT_SCHEMA_VERSION) {
     throw new Error(
-      `organization checkpoint schemaVersion must be "${CHECKPOINT_SCHEMA_VERSION}"`
-      + ` or "${LEGACY_CHECKPOINT_SCHEMA_VERSION}"`,
+      `organization checkpoint schemaVersion must be "${CHECKPOINT_SCHEMA_VERSION}";`
+      + ' older checkpoints cannot be resumed, so start a fresh scan to replace it',
     );
   }
   if (checkpoint.kind !== CHECKPOINT_KIND) {
@@ -165,12 +141,7 @@ export async function loadOrganizationCheckpoint({ path, cwd, identity }) {
     if (results.has(key)) throw new Error(`duplicate checkpoint repository: ${result.repository}`);
     results.set(key, result);
   }
-  return {
-    path: resolvedPath,
-    results,
-    migrationRequired: checkpoint.schemaVersion !== CHECKPOINT_SCHEMA_VERSION
-      || checkpoint.toolVersion !== VERSION,
-  };
+  return { path: resolvedPath, results };
 }
 
 /** Validate a checkpoint destination without creating or replacing a file. */
@@ -212,25 +183,40 @@ export function canReuseCheckpointResult(result, repository, treeSha) {
     && !result.findings.some(finding => finding.ruleId === 'parse-error');
 }
 
-/** Rehydrate validated checkpoint data with local paths and live source URLs. */
-export function restoreCheckpointResult(result, { repository, cwd, sourceUrl }) {
+/**
+ * Rehydrate validated checkpoint data with local paths and live source links.
+ * The live default-branch commit supplies every permalink and the revision's
+ * commit, so a resumed report matches a freshly scanned one.
+ */
+export function restoreCheckpointResult(result, { repository, cwd, commitSha }) {
   const repositoryRoot = resolve(cwd, repository.owner, repository.name);
+  const blobShas = new Map(result.fileDetails.map(detail => [detail.path, detail.blobSha]));
+  const link = (path, line) => sourcePermalink(repository, commitSha, path, line);
   const findings = result.findings.map(finding => ({
     ...finding,
     file: resolve(repositoryRoot, ...finding.file.split('/')),
     repository: repository.fullName,
     branch: repository.defaultBranch,
     url: sourceUrl(repository, finding.file, finding.line),
+    path: finding.file,
+    blobSha: blobShas.get(finding.file) ?? null,
+    permalink: link(finding.file, finding.line),
   }));
   return {
     repository,
-    revision: { branch: repository.defaultBranch, treeSha: result.treeSha },
+    revision: {
+      branch: repository.defaultBranch,
+      treeSha: result.treeSha,
+      commitSha: commitSha ?? null,
+    },
     files: [...result.files],
+    fileDetails: result.fileDetails.map(detail => ({ ...detail, permalink: link(detail.path) })),
     findings,
     errors: result.errors.map(error => ({
       repository: repository.fullName,
       ...(error.path ? { path: error.path } : {}),
       error: error.error,
+      ...(error.path ? { permalink: link(error.path) } : {}),
     })),
     summary: { ...result.summary },
     status: result.status,
@@ -244,11 +230,18 @@ function serializeCheckpointResult(result, cwd) {
     branch: result.revision.branch,
     treeSha: result.revision.treeSha,
     files: [...result.files],
+    fileDetails: result.fileDetails.map(detail => ({
+      path: detail.path,
+      blobSha: detail.blobSha,
+      bytes: detail.bytes,
+      status: detail.status,
+      findings: detail.findings,
+    })),
     findings: result.findings.map(finding => {
       const copy = { ...finding, file: canonicalPath(finding.file, repositoryRoot) };
-      delete copy.repository;
-      delete copy.branch;
-      delete copy.url;
+      for (const derived of ['repository', 'branch', 'url', 'path', 'blobSha', 'permalink']) {
+        delete copy[derived];
+      }
       return copy;
     }),
     errors: result.errors.map(error => ({
@@ -280,26 +273,10 @@ function normalizeCheckpointIdentity(checkpoint) {
   if (!isRecord(checkpoint.identity)) {
     throw new Error('organization checkpoint identity is invalid');
   }
-  if (checkpoint.schemaVersion === CHECKPOINT_SCHEMA_VERSION) {
-    if (typeof checkpoint.toolVersion !== 'string' || !TOOL_VERSION_RE.test(checkpoint.toolVersion)) {
-      throw new Error('organization checkpoint toolVersion is invalid');
-    }
-    return checkpoint.identity;
+  if (typeof checkpoint.toolVersion !== 'string' || !TOOL_VERSION_RE.test(checkpoint.toolVersion)) {
+    throw new Error('organization checkpoint toolVersion is invalid');
   }
-  if (checkpoint.identity.toolVersion !== FIRST_ANALYSIS_GENERATION_TOOL_VERSION) {
-    throw new Error(
-      `organization checkpoint toolVersion ${String(checkpoint.identity.toolVersion)}`
-      + ' has no compatible analysis generation',
-    );
-  }
-  return {
-    analysisGeneration: 1,
-    rulesHash: checkpoint.identity.rulesHash,
-    organization: checkpoint.identity.organization,
-    scope: checkpoint.identity.scope,
-    configHash: checkpoint.identity.configHash,
-    baselineHash: checkpoint.identity.baselineHash,
-  };
+  return checkpoint.identity;
 }
 
 function validateCheckpointResult(value, identity) {
@@ -314,12 +291,18 @@ function validateCheckpointResult(value, identity) {
     explain: identity.scope.explain,
   });
   const errors = validateErrors(value.errors, repository);
+  const fileDetails = validateFileDetails(value.fileDetails, {
+    repository,
+    files,
+    findings,
+    errors,
+  });
   const summary = validateSummary(value.summary, files, findings, repository);
   const status = findings.length === 0 && errors.length === 0 ? 'OK' : 'FAIL';
   if (value.status !== status) {
     throw new Error(`organization checkpoint status is inconsistent for ${repository}`);
   }
-  return { repository, branch, treeSha, files, findings, errors, summary, status };
+  return { repository, branch, treeSha, files, fileDetails, findings, errors, summary, status };
 }
 
 function validateFullName(value) {
@@ -345,7 +328,7 @@ function validateBranch(value) {
 }
 
 function validateSha(value, repository) {
-  if (typeof value !== 'string' || !SHA_RE.test(value)) {
+  if (typeof value !== 'string' || !GIT_SHA_RE.test(value)) {
     throw new Error(`invalid checkpoint tree SHA for ${repository}`);
   }
   return value.toLowerCase();
@@ -359,7 +342,7 @@ function validateFiles(value, repository) {
   if (new Set(value).size !== value.length) {
     throw new Error(`duplicate checkpoint workflow path for ${repository}`);
   }
-  if (value.some((path, index) => index > 0 && value[index - 1].localeCompare(path) > 0)) {
+  if (value.some((path, index) => index > 0 && comparePaths(value[index - 1], path) > 0)) {
     throw new Error(`checkpoint workflow paths are not ordered for ${repository}`);
   }
   return [...value];
@@ -415,6 +398,64 @@ function validateErrors(value, repository) {
   });
 }
 
+const FILE_DETAIL_KEYS = ['blobSha', 'bytes', 'findings', 'path', 'status'];
+
+function validateFileDetails(value, { repository, files, findings, errors }) {
+  if (!Array.isArray(value)) throw new Error(`invalid checkpoint fileDetails for ${repository}`);
+  const details = value.map(detail => validateFileDetail(detail, repository));
+  for (let index = 1; index < details.length; index += 1) {
+    const order = comparePaths(details[index - 1].path, details[index].path);
+    if (order === 0) throw new Error(`duplicate checkpoint fileDetails path for ${repository}`);
+    if (order > 0) throw new Error(`checkpoint fileDetails are not ordered for ${repository}`);
+  }
+  assertFileDetailsMatchEvidence(details, { repository, files, findings, errors });
+  return details;
+}
+
+function validateFileDetail(detail, repository) {
+  if (
+    !isRecord(detail)
+    || Object.keys(detail).sort().join() !== FILE_DETAIL_KEYS.join()
+    || !isWorkflowPath(detail.path)
+    || !FILE_STATUSES.has(detail.status)
+    || (detail.blobSha !== null && !GIT_SHA_RE.test(String(detail.blobSha)))
+    || (detail.bytes !== null && !isCount(detail.bytes))
+    || !isCount(detail.findings)
+  ) throw new Error(`invalid checkpoint fileDetails entry for ${repository}`);
+  return {
+    path: detail.path,
+    blobSha: detail.blobSha === null ? null : detail.blobSha.toLowerCase(),
+    bytes: detail.bytes,
+    status: detail.status,
+    findings: detail.findings,
+  };
+}
+
+function assertFileDetailsMatchEvidence(details, { repository, files, findings, errors }) {
+  const readable = details
+    .filter(detail => detail.status !== 'unreadable')
+    .map(detail => detail.path);
+  const errorPaths = new Set(errors.map(error => error.path));
+  const inconsistent = (
+    readable.length !== files.length
+    || readable.some((path, index) => path !== files[index])
+    || details.some(detail => detail.status === 'unreadable' && !errorPaths.has(detail.path))
+    || details.some(detail => !fileDetailMatchesFindings(detail, findings))
+  );
+  if (inconsistent) throw new Error(`inconsistent checkpoint fileDetails for ${repository}`);
+}
+
+function fileDetailMatchesFindings(detail, findings) {
+  const own = findings.filter(finding => finding.file === detail.path);
+  const parseError = own.some(finding => finding.ruleId === 'parse-error');
+  return own.length === detail.findings
+    && (detail.status === 'parse-error') === parseError;
+}
+
+function isCount(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
 function validateSummary(value, files, findings, repository) {
   if (!isRecord(value)) throw new Error(`invalid checkpoint summary for ${repository}`);
   const fields = [
@@ -458,22 +499,4 @@ function stableValue(value) {
     );
   }
   return value;
-}
-
-function isJsonValue(value, seen = new Set()) {
-  if (value === null || ['string', 'boolean'].includes(typeof value)) return true;
-  if (typeof value === 'number') return Number.isFinite(value);
-  if (!value || typeof value !== 'object' || seen.has(value)) return false;
-  seen.add(value);
-  const valid = Array.isArray(value)
-    ? value.every(item => isJsonValue(item, seen))
-    : Object.entries(value).every(([key, item]) => (
-      typeof key === 'string' && isJsonValue(item, seen)
-    ));
-  seen.delete(value);
-  return valid;
-}
-
-function isRecord(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }

@@ -68,7 +68,7 @@ You can install it globally, or run it directly without installing using `npx`:
 npm install --global actions-warden
 
 # Or use npx for a quick one-off run without installing:
-npx --yes actions-warden@0.5.0 audit --explain
+npx --yes actions-warden@0.6.0 audit --explain
 ```
 
 ### 2. Follow the 3-step security workflow
@@ -137,15 +137,21 @@ default-branch tree SHA. Only unchanged, error-free repository results are
 reused; changed and previously failed repositories are scanned again. Progress
 defaults to interactive terminals; use `--progress=plain` for redirected logs,
 `--progress=json` for JSON Lines events, or `--progress=none` to disable it.
-The older `always` and `never` spellings remain aliases.
 
 Compatible package upgrades reuse the same checkpoint. The producing package
 version is recorded as metadata, while an explicit analysis generation plus
 the rule catalog controls compatibility. A parser, discovery, or rule behavior
-change advances that generation and requires a fresh scan. Compatible older
-checkpoints are rewritten atomically on their first successful resume.
+change advances that generation and requires a fresh scan. The next checkpoint
+write records the current package version.
 
-Compare a fresh scan with a compatible previous JSON report:
+Each repository in an organization report lists every workflow file that was
+inspected, including clean ones, with its blob SHA, size, and status. Findings
+and errors carry a `permalink` pinned to the exact commit that was scanned, so
+a reviewer can open the evidence even after the default branch moves.
+
+Compare a fresh scan with a compatible previous JSON report (reports made by
+an earlier release must be regenerated once; they carry no commit or file
+inventory and are refused):
 
 ```sh
 actions-warden org-scan my-org \

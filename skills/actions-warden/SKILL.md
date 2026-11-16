@@ -33,26 +33,26 @@ Invoke `actions-warden` when the user:
 The package is on npm as `actions-warden`. Invoke the reviewed version exactly:
 
 ```sh
-npx --yes actions-warden@0.5.0 audit
-npx --yes actions-warden@0.5.0 audit --severity=high --explain
-npx --yes actions-warden@0.5.0 audit --create-baseline=.actions-warden-baseline.json
-npx --yes actions-warden@0.5.0 audit --baseline=.actions-warden-baseline.json
-npx --yes actions-warden@0.5.0 audit --format=sarif
-npx --yes actions-warden@0.5.0 audit --format=csv --output-path=actions-warden.csv
-npx --yes actions-warden@0.5.0 pin
-npx --yes actions-warden@0.5.0 pin --write
-npx --yes actions-warden@0.5.0 upgrade --mode=minor
-npx --yes actions-warden@0.5.0 upgrade --min-age=14 --write
-npx --yes actions-warden@0.5.0 verify
-npx --yes actions-warden@0.5.0 report --offline
-npx --yes actions-warden@0.5.0 org-scan my-org --severity=high
-npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --format=html --output-path=actions-warden-org.html
-npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --previous-report=previous.json --format=json
-npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --report-dir=reports/actions-warden-org
-npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --agent-mode
-npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --checkpoint=.actions-warden-org-checkpoint.json
-npx --yes actions-warden@0.5.0 org-scan my-org --severity=high --resume=.actions-warden-org-checkpoint.json
-npx --yes actions-warden@0.5.0 rules
+npx --yes actions-warden@0.6.0 audit
+npx --yes actions-warden@0.6.0 audit --severity=high --explain
+npx --yes actions-warden@0.6.0 audit --create-baseline=.actions-warden-baseline.json
+npx --yes actions-warden@0.6.0 audit --baseline=.actions-warden-baseline.json
+npx --yes actions-warden@0.6.0 audit --format=sarif
+npx --yes actions-warden@0.6.0 audit --format=csv --output-path=actions-warden.csv
+npx --yes actions-warden@0.6.0 pin
+npx --yes actions-warden@0.6.0 pin --write
+npx --yes actions-warden@0.6.0 upgrade --mode=minor
+npx --yes actions-warden@0.6.0 upgrade --min-age=14 --write
+npx --yes actions-warden@0.6.0 verify
+npx --yes actions-warden@0.6.0 report --offline
+npx --yes actions-warden@0.6.0 org-scan my-org --severity=high
+npx --yes actions-warden@0.6.0 org-scan my-org --severity=high --format=html --output-path=actions-warden-org.html
+npx --yes actions-warden@0.6.0 org-scan my-org --severity=high --previous-report=previous.json --format=json
+npx --yes actions-warden@0.6.0 org-scan my-org --severity=high --report-dir=reports/actions-warden-org
+npx --yes actions-warden@0.6.0 org-scan my-org --severity=high --agent-mode
+npx --yes actions-warden@0.6.0 org-scan my-org --severity=high --checkpoint=.actions-warden-org-checkpoint.json
+npx --yes actions-warden@0.6.0 org-scan my-org --severity=high --resume=.actions-warden-org-checkpoint.json
+npx --yes actions-warden@0.6.0 rules
 ```
 
 Useful shared command flags: `--workflow <path-or-glob>` (repeatable),
@@ -69,14 +69,13 @@ Organization scans accept `--repository <glob...>`, `--visibility`,
 `--concurrency`, `--checkpoint` or `--resume`, `--fresh`,
 `--no-auto-checkpoint`, `--previous-report <json-path>`, and
 `--report-dir <dedicated-directory>`, plus
-`--progress=auto|plain|json|none` (`always` and `never` remain aliases).
+`--progress=auto|plain|json|none`.
 Organization scans default to a scope-keyed JSON
 report, bounded receipt, and compatible automatic checkpoint/resume. Progress
 is stderr-only and never part of the selected report format. For an
 agent-initiated organization scan, pass
 `--agent-mode`; `ACTIONS_WARDEN_CONTEXT=agent` is the preferred
-integration-wide equivalent, while `ACTIONS_WARDEN_MODE=agent` is a legacy
-alias. The mode disables implicit progress and uses the agent receipt kind, but
+integration-wide equivalent. The mode disables implicit progress and uses the agent receipt kind, but
 shares normal `.actions-warden-org-scan.*` artifacts so resume survives context
 switches. Explicit output, format, progress, and checkpoint options take
 precedence.
@@ -153,7 +152,7 @@ authorized workflow mutation whenever the needed path information is known.
    agent-initiated broad scan must use the explicit agent mode:
 
    ```sh
-   npx --yes actions-warden@0.5.0 org-scan my-org \
+   npx --yes actions-warden@0.6.0 org-scan my-org \
      --agent-mode
    ```
 
@@ -188,7 +187,8 @@ authorized workflow mutation whenever the needed path information is known.
 9. **Use CSV/HTML as artifacts, not model context.** CSV is useful for flat
    spreadsheet or warehouse export, and self-contained HTML is useful for
    human review. Do not read either complete artifact into the conversation.
-   For change reporting, retain JSON and pass it with `--previous-report`.
+   For change reporting, retain JSON and pass it with `--previous-report`;
+   a report from an older analysis generation must be regenerated once.
    Report new, resolved, unchanged, and unknown counts; unmatched prior
    findings are unknown when current repository coverage failed or disappeared.
 
@@ -268,8 +268,11 @@ Other exports include `listRules`, `discoverWorkflows`, `parseWorkflowFile`,
 - Private organization scans require a token that can list repositories and
   read their contents. Organization scans never clone or execute repository
   code and treat incomplete remote reads as errors.
+- Organization reports list every inspected workflow file in each repository's
+  `fileDetails` and give each finding a `permalink` pinned to the scanned commit;
+  cite the permalink and treat an `unreadable` file as a coverage gap.
 - Organization checkpoints are atomic and contain redacted report data plus
-  tree revisions, not tokens or raw YAML. Resume requires matching scan/policy
+  tree revisions, not tokens, commits, links, or raw YAML. Resume requires matching scan/policy
   identity, rechecks fresh tree SHAs, reuses only unchanged error-free results,
   and retries changed or failed repositories. Repeating the same command or
   explicit `--checkpoint` path resumes automatically; use `--fresh` to replace

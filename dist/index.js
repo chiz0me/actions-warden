@@ -14596,6 +14596,97 @@ function collectImages(workflow) {
   return [...workflow.images];
 }
 
+;// CONCATENATED MODULE: ./src/lib/org-schema.js
+// @ts-check
+/**
+ * Shared definitions for organization scans, reports, checkpoints, and
+ * comparisons: identifier patterns, closed value sets, and small structural
+ * guards. Each definition lives here once so validators cannot drift apart.
+ */
+
+/** Pattern accepted for GitHub organization, owner, and repository names. */
+const NAME_RE = /^[A-Za-z0-9_.-]+$/;
+
+/** Pattern for a full 40-hex Git object ID. */
+const GIT_SHA_RE = /^[0-9a-f]{40}$/i;
+
+/** Finding severities ordered from lowest to highest. */
+const SEVERITY_LEVELS = Object.freeze(['low', 'medium', 'high', 'critical']);
+
+/** Finding severities as a set for membership checks. */
+const SEVERITIES = new Set(SEVERITY_LEVELS);
+
+/** Visibility values GitHub reports for a repository. */
+const REPOSITORY_VISIBILITIES = Object.freeze(['public', 'private', 'internal']);
+
+/** Visibility filters accepted for an organization scan. */
+const VISIBILITY_FILTERS = Object.freeze(['all', ...REPOSITORY_VISIBILITIES]);
+
+/** Visibility filters as a set for membership checks. */
+const VISIBILITIES = new Set(VISIBILITY_FILTERS);
+
+/**
+ * Return whether a value is a plain, non-array object.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Return whether a value is finite JSON data without cycles.
+ *
+ * @param {unknown} value
+ * @param {Set<object>} [seen]
+ * @returns {boolean}
+ */
+function isJsonValue(value, seen = new Set()) {
+  if (value === null || ['string', 'boolean'].includes(typeof value)) return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (!value || typeof value !== 'object' || seen.has(value)) return false;
+  seen.add(value);
+  const valid = Array.isArray(value)
+    ? value.every(item => isJsonValue(item, seen))
+    : Object.entries(value).every(([key, item]) => (
+      typeof key === 'string' && isJsonValue(item, seen)
+    ));
+  seen.delete(value);
+  return valid;
+}
+
+/**
+ * Validate repository filters and remove duplicates while keeping order.
+ *
+ * @param {unknown} patterns Undefined, or an array of non-empty strings.
+ * @returns {string[]}
+ */
+function normalizePatterns(patterns) {
+  if (patterns === undefined) return [];
+  if (
+    !Array.isArray(patterns)
+    || patterns.some(pattern => typeof pattern !== 'string' || !pattern)
+  ) throw new Error('repository filters must be non-empty strings');
+  return [...new Set(patterns)];
+}
+
+/** Scan outcomes recorded for each workflow file in a repository result. */
+const FILE_STATUSES = new Set(['scanned', 'parse-error', 'unreadable']);
+
+/**
+ * Compare repository paths by UTF-16 code unit so ordering does not depend on
+ * the runtime locale.
+ *
+ * @param {string} left
+ * @param {string} right
+ * @returns {number}
+ */
+function comparePaths(left, right) {
+  if (left < right) return -1;
+  return left > right ? 1 : 0;
+}
+
 ;// CONCATENATED MODULE: ./src/rules/unpinned-action.js
 /**
  * Rule: external action references must be pinned to a 40-character commit SHA.
@@ -14606,11 +14697,10 @@ function collectImages(workflow) {
 
 
 
+
 const id = 'unpinned-action';
 const severity = 'high';
 const description = 'External action or reusable workflow is not pinned to a full commit SHA.';
-
-const SHA_RE = /^[0-9a-f]{40}$/i;
 
 /**
  * @param {import('../lib/parser.js').WorkflowDoc} workflow
@@ -14620,7 +14710,7 @@ function check(workflow) {
   const findings = [];
   for (const { ref } of collectUses(workflow)) {
     if (ref.kind !== 'external' && ref.kind !== 'reusable-workflow') continue;
-    if (ref.ref && SHA_RE.test(ref.ref)) continue;
+    if (ref.ref && GIT_SHA_RE.test(ref.ref)) continue;
     findings.push({
       id,
       severity,
@@ -15594,6 +15684,8 @@ function workflow_run_artifact_execution_check(workflow) {
 }
 
 ;// CONCATENATED MODULE: ./src/rules/workflow-structure.js
+
+
 const workflow_structure_id = 'workflow-structure';
 const workflow_structure_severity = 'medium';
 const workflow_structure_description = 'Workflow or composite action contains invalid or ambiguous GitHub Actions syntax.';
@@ -15972,10 +16064,6 @@ function validRunnerSelector(value) {
   return groupValid || labelsValid;
 }
 
-function isRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
 function finding(line, issue, explain, job) {
   return {
     id: workflow_structure_id,
@@ -16059,6 +16147,17 @@ const TOKEN_PATTERNS = [
 const SENSITIVE_KEY = /(?:token|secret|password|api[_-]?key|auth[_-]?token|access[_-]?key|private[_-]?key)$/i;
 const KV_TOKEN_KEYS = /([\w-]*(?:token|secret|password|api[_-]?key|auth[_-]?token|access[_-]?key|private[_-]?key))(\s*[:=]\s*)["']?([^"'\s,]+)/gi;
 const HIGH_ENTROPY = /[A-Za-z0-9_+/-]{32,}={0,2}/g;
+// Source links the scanner itself builds: https://github.com/<owner>/<repo>/blob/<ref>/<path>
+// with an optional #L<line>. A commit SHA in the ref makes the whole link one long
+// high-entropy run, so these links are exempt from the entropy heuristic only; explicit
+// token patterns above still redact credential-shaped text inside them. The shape is exact
+// (encodeURIComponent characters only) so it cannot shelter arbitrary secret-like text.
+const URL_SEGMENT = "[A-Za-z0-9._~%!'()*-]+";
+const GITHUB_SOURCE_URL = new RegExp(
+  `https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/blob/${URL_SEGMENT}`
+  + `(?:/${URL_SEGMENT})+(?:#L\\d{1,9})?`,
+  'g',
+);
 // Public rule IDs and artifact kinds long enough to trip the generic entropy
 // heuristic. Keep the exceptions exact instead of weakening detection for
 // arbitrary kebab-case values, which may still be credentials or passphrases.
@@ -16083,10 +16182,23 @@ function redact(input) {
   let s = typeof input === 'string' ? input : String(input);
   for (const re of TOKEN_PATTERNS) s = s.replace(re, '<redacted>');
   s = s.replace(KV_TOKEN_KEYS, (_, key, separator) => `${key}${separator}<redacted>`);
-  s = s.replace(HIGH_ENTROPY, value => (
+  return redactHighEntropyOutsideSourceUrls(s);
+}
+
+function redactHighEntropyOutsideSourceUrls(input) {
+  let output = '';
+  let position = 0;
+  for (const match of input.matchAll(GITHUB_SOURCE_URL)) {
+    output += redactHighEntropy(input.slice(position, match.index)) + match[0];
+    position = match.index + match[0].length;
+  }
+  return output + redactHighEntropy(input.slice(position));
+}
+
+function redactHighEntropy(text) {
+  return text.replace(HIGH_ENTROPY, value => (
     shouldRedactHighEntropy(value) ? '<redacted>' : value
   ));
-  return s;
 }
 
 /**
@@ -16163,27 +16275,21 @@ function safeLogger(fn) {
   return (...args) => fn(...args.map(a => redactDeep(a)));
 }
 
-;// CONCATENATED MODULE: ./src/lib/formatter.js
+;// CONCATENATED MODULE: ./src/lib/formats/csv.js
+// @ts-check
 /**
- * Output formatter supporting TOON (Token-Oriented Object Notation), JSON,
- * plain text, CSV, SARIF, and self-contained HTML.
- *
- * TOON output rules:
- *   - One record per line: `LABEL: key=value key=value`
- *   - Values containing spaces or `=` are quoted: `msg="hello world"`
- *   - Empty/null values are omitted
- *   - Trailing `STATUS: OK` or `STATUS: FAIL` signal for machine consumers
+ * Deterministic RFC 4180-compatible CSV with an explicit status row.
  */
 
 
 
-const MAX_HTML_REPORT_BYTES = 32 * 1024 * 1024;
 const CSV_PREFERRED_COLUMNS = Object.freeze([
   'status',
   'organization',
   'repo',
   'repository',
   'file',
+  'path',
   'line',
   'id',
   'type',
@@ -16201,66 +16307,8 @@ const CSV_PREFERRED_COLUMNS = Object.freeze([
   'msg',
   'explain',
   'url',
+  'permalink',
 ]);
-
-/**
- * Severity ordering, lowest-to-highest.
- */
-const SEVERITY_ORDER = ['low', 'medium', 'high', 'critical'];
-
-/**
- * @param {string} value
- * @returns {string}
- */
-function quoteIfNeeded(value) {
-  if (value === '') return '""';
-  if (/[\s="\\]/.test(value) || [...value].some(char => char.charCodeAt(0) < 32)) {
-    return JSON.stringify(value);
-  }
-  return value;
-}
-
-/**
- * Serialize a record to a single TOON line.
- *
- * @param {string} label
- * @param {Record<string, unknown>} fields
- * @returns {string}
- */
-function toonLine(label, fields) {
-  const parts = [];
-  for (const [k, v] of Object.entries(fields)) {
-    if (v === null || v === undefined || v === '') continue;
-    const value = typeof v === 'string' ? v : String(v);
-    const key = redact(String(k)).replace(/[^a-zA-Z0-9_.-]/g, '_');
-    parts.push(`${key}=${quoteIfNeeded(redact(value))}`);
-  }
-  return parts.length === 0 ? `${label}:` : `${label}: ${parts.join(' ')}`;
-}
-
-/**
- * Render a TOON document.
- *
- * @param {Array<{label: string, fields: Record<string, unknown>}>} records
- * @param {{status?: 'OK'|'FAIL'}} [options]
- * @returns {string}
- */
-function renderToon(records, options = {}) {
-  const lines = records.map(r => toonLine(r.label, r.fields));
-  if (options.status) lines.push(`STATUS: ${options.status}`);
-  return lines.join('\n') + '\n';
-}
-
-/**
- * Render recursively redacted JSON with 2-space indentation. Object key order
- * follows the caller-provided value.
- *
- * @param {unknown} payload
- * @returns {string}
- */
-function renderJson(payload) {
-  return JSON.stringify(redactDeep(payload), null, 2) + '\n';
-}
 
 /**
  * Render records as deterministic RFC 4180-compatible CSV. The first column
@@ -16295,55 +16343,9 @@ function renderCsv(records, options = {}) {
 }
 
 /**
- * Render plain text (human-readable summary).
- *
- * @param {Array<{label: string, fields: Record<string, unknown>}>} records
- * @param {{status?: 'OK'|'FAIL'}} [options]
- * @returns {string}
+ * @param {unknown} records
+ * @returns {Array<{label: string, fields: Map<string, unknown>}>}
  */
-function renderText(records, options = {}) {
-  const lines = records.map(r => {
-    const kv = Object.entries(r.fields)
-      .filter(([, v]) => v !== null && v !== undefined && v !== '')
-      .map(([k, v]) => `${k}=${escapeText(redact(String(v)))}`)
-      .join(' ');
-    return `[${r.label}] ${kv}`;
-  });
-  if (options.status) lines.push(`==> ${options.status}`);
-  return lines.join('\n') + '\n';
-}
-
-function escapeText(value) {
-  return JSON.stringify(value).slice(1, -1);
-}
-
-/**
- * Format records into the requested output mode.
- *
- * @param {'toon'|'json'|'text'|'csv'|'sarif'|'html'} format
- * @param {Array<{label: string, fields: Record<string, unknown>}>} records
- * @param {{status?: 'OK'|'FAIL', json?: unknown, title?: string,
- *   metadata?: Record<string, unknown>}} [options]
- * @returns {string}
- */
-function formatter_format(format_, records, options = {}) {
-  switch (format_) {
-    case 'json':
-      return renderJson(options.json ?? recordsToJson(records, options));
-    case 'text':
-      return renderText(records, options);
-    case 'csv':
-      return renderCsv(records, options);
-    case 'sarif':
-      return renderSarif(records, options);
-    case 'html':
-      return renderHtml(records, options);
-    case 'toon':
-    default:
-      return renderToon(records, options);
-  }
-}
-
 function normalizeCsvRecords(records) {
   if (!Array.isArray(records)) return [];
   return records.map(record => {
@@ -16361,6 +16363,7 @@ function normalizeCsvRecords(records) {
   });
 }
 
+/** @param {unknown} value */
 function csvCell(value) {
   if (value === null || value === undefined) return '';
   const formulaSensitive = typeof value === 'string';
@@ -16380,6 +16383,7 @@ function csvCell(value) {
     : serialized;
 }
 
+/** @param {string} value */
 function escapeCsvControls(value) {
   let escaped = '';
   for (const character of value) {
@@ -16397,6 +16401,97 @@ function escapeCsvControls(value) {
   }
   return escaped;
 }
+
+;// CONCATENATED MODULE: ./src/lib/formats/html.js
+// @ts-check
+/**
+ * Self-contained, deterministic HTML report with client-side search and filters.
+ */
+
+
+
+/**
+ * @typedef {{label: string, fields: Record<string, string>}} HtmlRecord
+ * @typedef {{rule: string, severity: string, count: number}} RuleCount
+ */
+
+const MAX_HTML_REPORT_BYTES = 32 * 1024 * 1024;
+
+const HTML_STYLES = `    :root { color-scheme: light dark; --bg: #f6f8fa; --panel: #fff; --text: #1f2328; --muted: #59636e; --border: #d0d7de; --accent: #0969da; --ok: #1a7f37; --fail: #cf222e; --critical: #82071e; --high: #cf222e; --medium: #9a6700; --low: #0969da; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --panel: #161b22; --text: #e6edf3; --muted: #8d96a0; --border: #30363d; --accent: #58a6ff; --ok: #3fb950; --fail: #f85149; --critical: #ff7b72; --high: #f85149; --medium: #d29922; --low: #58a6ff; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { width: min(1600px, 100%); margin: 0 auto; padding: 24px; }
+    h1, h2, h3 { line-height: 1.25; }
+    h1 { margin: 0; font-size: clamp(24px, 4vw, 36px); }
+    h2 { margin: 0 0 16px; font-size: 20px; }
+    h3 { margin: 0 0 12px; font-size: 16px; }
+    .header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+    .eyebrow, .muted { color: var(--muted); }
+    .eyebrow { margin: 0 0 4px; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .panel { margin: 16px 0; padding: 18px; overflow: hidden; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 1px 0 rgb(31 35 40 / 4%); }
+    .status, .badge { display: inline-flex; align-items: center; border-radius: 999px; font-weight: 700; white-space: nowrap; }
+    .status { padding: 7px 12px; font-size: 13px; }
+    .badge { padding: 2px 8px; font-size: 12px; background: color-mix(in srgb, var(--muted) 14%, transparent); }
+    .status-ok, .badge-ok, .badge-resolved { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+    .status-fail, .badge-fail, .badge-new, .badge-unknown { color: var(--fail); background: color-mix(in srgb, var(--fail) 14%, transparent); }
+    .badge-critical { color: var(--critical); background: color-mix(in srgb, var(--critical) 14%, transparent); }
+    .badge-high { color: var(--high); background: color-mix(in srgb, var(--high) 14%, transparent); }
+    .badge-medium { color: var(--medium); background: color-mix(in srgb, var(--medium) 14%, transparent); }
+    .badge-low, .badge-unchanged { color: var(--low); background: color-mix(in srgb, var(--low) 14%, transparent); }
+    .callout { border-left: 4px solid var(--fail); }
+    .callout strong { display: block; margin-bottom: 4px; }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 10px; }
+    .metric { min-width: 0; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+    .metric-name { display: block; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; }
+    .metric-value { display: block; margin-top: 3px; overflow-wrap: anywhere; font-size: 20px; font-weight: 700; }
+    .filters { display: grid; grid-template-columns: minmax(220px, 2fr) repeat(3, minmax(140px, 1fr)); gap: 10px; }
+    label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; font-weight: 600; }
+    input, select { width: 100%; min-height: 38px; padding: 7px 9px; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; font: inherit; }
+    input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .filter-count { margin: 10px 0 0; color: var(--muted); }
+    .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 9px 11px; vertical-align: top; text-align: left; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+    th { position: sticky; top: 0; z-index: 1; color: var(--muted); background: var(--panel); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+    code { font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; white-space: pre-wrap; }
+    a { color: var(--accent); text-decoration-thickness: .08em; text-underline-offset: .15em; }
+    [hidden] { display: none !important; }
+    footer { margin: 24px 0 8px; color: var(--muted); font-size: 12px; text-align: center; }
+    @media (max-width: 800px) { main { padding: 14px; } .header { align-items: stretch; flex-direction: column; } .filters { grid-template-columns: 1fr; } }
+    @media print { :root { color-scheme: light; } body { background: #fff; color: #000; } main { width: 100%; padding: 0; } .filters-panel { display: none; } .panel { break-inside: avoid; box-shadow: none; } th { position: static; } }`;
+
+const HTML_SCRIPT = `    (() => {
+      const rows = [...document.querySelectorAll('[data-record]')];
+      const search = document.querySelector('#filter-search');
+      const label = document.querySelector('#filter-label');
+      const severity = document.querySelector('#filter-severity');
+      const repository = document.querySelector('#filter-repository');
+      const count = document.querySelector('#filter-count');
+      if (!search || !label || !severity || !repository || !count) return;
+      const apply = () => {
+        const query = search.value.trim().toLocaleLowerCase();
+        let visible = 0;
+        for (const row of rows) {
+          const matches = (!query || row.dataset.search.includes(query))
+            && (!label.value || row.dataset.label === label.value)
+            && (!severity.value || row.dataset.severity === severity.value)
+            && (!repository.value || row.dataset.repository === repository.value);
+          row.hidden = !matches;
+          if (matches) visible += 1;
+        }
+        for (const section of document.querySelectorAll('[data-record-section]')) {
+          section.hidden = !section.querySelector('[data-record]:not([hidden])');
+        }
+        count.textContent = String(visible) + ' of ' + String(rows.length) + ' records shown';
+      };
+      for (const control of [search, label, severity, repository]) {
+        control.addEventListener(control === search ? 'input' : 'change', apply);
+      }
+      apply();
+    })();`;
 
 /**
  * Render a deterministic, self-contained HTML report with client-side search
@@ -16446,51 +16541,7 @@ function renderHtml(records, options = {}) {
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
   <title>${escapeHtml(title)}</title>
   <style>
-    :root { color-scheme: light dark; --bg: #f6f8fa; --panel: #fff; --text: #1f2328; --muted: #59636e; --border: #d0d7de; --accent: #0969da; --ok: #1a7f37; --fail: #cf222e; --critical: #82071e; --high: #cf222e; --medium: #9a6700; --low: #0969da; }
-    @media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --panel: #161b22; --text: #e6edf3; --muted: #8d96a0; --border: #30363d; --accent: #58a6ff; --ok: #3fb950; --fail: #f85149; --critical: #ff7b72; --high: #f85149; --medium: #d29922; --low: #58a6ff; } }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    main { width: min(1600px, 100%); margin: 0 auto; padding: 24px; }
-    h1, h2, h3 { line-height: 1.25; }
-    h1 { margin: 0; font-size: clamp(24px, 4vw, 36px); }
-    h2 { margin: 0 0 16px; font-size: 20px; }
-    h3 { margin: 0 0 12px; font-size: 16px; }
-    .header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
-    .eyebrow, .muted { color: var(--muted); }
-    .eyebrow { margin: 0 0 4px; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
-    .panel { margin: 16px 0; padding: 18px; overflow: hidden; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 1px 0 rgb(31 35 40 / 4%); }
-    .status, .badge { display: inline-flex; align-items: center; border-radius: 999px; font-weight: 700; white-space: nowrap; }
-    .status { padding: 7px 12px; font-size: 13px; }
-    .badge { padding: 2px 8px; font-size: 12px; background: color-mix(in srgb, var(--muted) 14%, transparent); }
-    .status-ok, .badge-ok, .badge-resolved { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
-    .status-fail, .badge-fail, .badge-new, .badge-unknown { color: var(--fail); background: color-mix(in srgb, var(--fail) 14%, transparent); }
-    .badge-critical { color: var(--critical); background: color-mix(in srgb, var(--critical) 14%, transparent); }
-    .badge-high { color: var(--high); background: color-mix(in srgb, var(--high) 14%, transparent); }
-    .badge-medium { color: var(--medium); background: color-mix(in srgb, var(--medium) 14%, transparent); }
-    .badge-low, .badge-unchanged { color: var(--low); background: color-mix(in srgb, var(--low) 14%, transparent); }
-    .callout { border-left: 4px solid var(--fail); }
-    .callout strong { display: block; margin-bottom: 4px; }
-    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 10px; }
-    .metric { min-width: 0; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
-    .metric-name { display: block; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; }
-    .metric-value { display: block; margin-top: 3px; overflow-wrap: anywhere; font-size: 20px; font-weight: 700; }
-    .filters { display: grid; grid-template-columns: minmax(220px, 2fr) repeat(3, minmax(140px, 1fr)); gap: 10px; }
-    label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; font-weight: 600; }
-    input, select { width: 100%; min-height: 38px; padding: 7px 9px; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; font: inherit; }
-    input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-    .filter-count { margin: 10px 0 0; color: var(--muted); }
-    .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { padding: 9px 11px; vertical-align: top; text-align: left; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
-    th { position: sticky; top: 0; z-index: 1; color: var(--muted); background: var(--panel); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
-    tbody tr:last-child td { border-bottom: 0; }
-    tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
-    code { font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; white-space: pre-wrap; }
-    a { color: var(--accent); text-decoration-thickness: .08em; text-underline-offset: .15em; }
-    [hidden] { display: none !important; }
-    footer { margin: 24px 0 8px; color: var(--muted); font-size: 12px; text-align: center; }
-    @media (max-width: 800px) { main { padding: 14px; } .header { align-items: stretch; flex-direction: column; } .filters { grid-template-columns: 1fr; } }
-    @media print { :root { color-scheme: light; } body { background: #fff; color: #000; } main { width: 100%; padding: 0; } .filters-panel { display: none; } .panel { break-inside: avoid; box-shadow: none; } th { position: static; } }
+${HTML_STYLES}
   </style>
 </head>
 <body>
@@ -16508,35 +16559,7 @@ function renderHtml(records, options = {}) {
     <footer>Generated deterministically by actions-warden. The saved report may contain sensitive repository names, paths, and findings.</footer>
   </main>
   <script>
-    (() => {
-      const rows = [...document.querySelectorAll('[data-record]')];
-      const search = document.querySelector('#filter-search');
-      const label = document.querySelector('#filter-label');
-      const severity = document.querySelector('#filter-severity');
-      const repository = document.querySelector('#filter-repository');
-      const count = document.querySelector('#filter-count');
-      if (!search || !label || !severity || !repository || !count) return;
-      const apply = () => {
-        const query = search.value.trim().toLocaleLowerCase();
-        let visible = 0;
-        for (const row of rows) {
-          const matches = (!query || row.dataset.search.includes(query))
-            && (!label.value || row.dataset.label === label.value)
-            && (!severity.value || row.dataset.severity === severity.value)
-            && (!repository.value || row.dataset.repository === repository.value);
-          row.hidden = !matches;
-          if (matches) visible += 1;
-        }
-        for (const section of document.querySelectorAll('[data-record-section]')) {
-          section.hidden = !section.querySelector('[data-record]:not([hidden])');
-        }
-        count.textContent = String(visible) + ' of ' + String(rows.length) + ' records shown';
-      };
-      for (const control of [search, label, severity, repository]) {
-        control.addEventListener(control === search ? 'input' : 'change', apply);
-      }
-      apply();
-    })();
+${HTML_SCRIPT}
   </script>
 </body>
 </html>
@@ -16550,6 +16573,10 @@ function renderHtml(records, options = {}) {
   return document;
 }
 
+/**
+ * @param {unknown} records
+ * @returns {HtmlRecord[]}
+ */
 function normalizeHtmlRecords(records) {
   if (!Array.isArray(records)) return [];
   return records.map(record => ({
@@ -16558,6 +16585,10 @@ function normalizeHtmlRecords(records) {
   }));
 }
 
+/**
+ * @param {unknown} fields
+ * @returns {Record<string, string>}
+ */
 function normalizeFields(fields) {
   if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return {};
   return Object.fromEntries(Object.entries(fields)
@@ -16565,12 +16596,20 @@ function normalizeFields(fields) {
     .map(([key, value]) => [redact(String(key)), htmlValue(value)]));
 }
 
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
 function htmlValue(value) {
   if (typeof value === 'string') return redact(value);
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return redact(JSON.stringify(value));
 }
 
+/**
+ * @param {HtmlRecord[]} records
+ * @returns {Map<string, HtmlRecord[]>}
+ */
 function groupRecords(records) {
   const groups = new Map();
   for (const record of records) {
@@ -16580,6 +16619,10 @@ function groupRecords(records) {
   return groups;
 }
 
+/**
+ * @param {HtmlRecord[]} findings
+ * @returns {RuleCount[]}
+ */
 function summarizeHtmlRules(findings) {
   const counts = new Map();
   for (const finding of findings) {
@@ -16597,6 +16640,7 @@ function summarizeHtmlRules(findings) {
   ));
 }
 
+/** @param {Record<string, string>} metadata */
 function renderHtmlMetadata(metadata) {
   const entries = Object.entries(metadata);
   if (entries.length === 0) return '';
@@ -16605,6 +16649,7 @@ function renderHtmlMetadata(metadata) {
   )).join('')}</div></section>`;
 }
 
+/** @param {Record<string, string>|undefined} fields */
 function renderHtmlSummary(fields) {
   if (!fields || Object.keys(fields).length === 0) return '';
   return `<section class="panel"><h2>Summary</h2><div class="metrics">${Object.entries(fields)
@@ -16613,6 +16658,7 @@ function renderHtmlSummary(fields) {
     )).join('')}</div></section>`;
 }
 
+/** @param {RuleCount[]} rows */
 function renderHtmlRuleBreakdown(rows) {
   if (rows.length === 0) return '';
   return `<section class="panel"><h2>Rule breakdown</h2><div class="table-wrap"><table><thead><tr><th>Severity</th><th>Rule</th><th>Findings</th></tr></thead><tbody>${rows.map(row => (
@@ -16620,16 +16666,25 @@ function renderHtmlRuleBreakdown(rows) {
   )).join('')}</tbody></table></div></section>`;
 }
 
+/**
+ * @param {{labels: string[], severities: string[], repositories: string[],
+ *   total: number}} filters
+ */
 function renderHtmlFilters({ labels, severities, repositories, total }) {
   return `<section class="panel filters-panel"><h2>Filter records</h2><div class="filters"><label>Search<input id="filter-search" type="search" placeholder="Repository, rule, file, action, or message"></label><label>Record type<select id="filter-label"><option value="">All types</option>${optionMarkup(labels)}</select></label><label>Severity<select id="filter-severity"><option value="">All severities</option>${optionMarkup(severities)}</select></label><label>Repository<select id="filter-repository"><option value="">All repositories</option>${optionMarkup(repositories)}</select></label></div><p class="filter-count" id="filter-count">${total} of ${total} records shown</p></section>`;
 }
 
+/** @param {string[]} values */
 function optionMarkup(values) {
   return values.map(value => (
     `<option value="${escapeHtml(String(value).toLocaleLowerCase())}">${escapeHtml(value)}</option>`
   )).join('');
 }
 
+/**
+ * @param {string} label
+ * @param {HtmlRecord[]} records
+ */
 function renderHtmlGroup(label, records) {
   const columns = [...new Set(records.flatMap(record => Object.keys(record.fields)))];
   const rows = records.map(record => {
@@ -16644,9 +16699,11 @@ function renderHtmlGroup(label, records) {
   return `<section class="panel" data-record-section><h2>${escapeHtml(heading)}</h2><div class="table-wrap"><table><thead><tr>${columns.map(column => `<th>${escapeHtml(humanize(column))}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div></section>`;
 }
 
+/** @param {string} label */
 function recordGroupTitle(label) {
   const names = new Map([
     ['REPOSITORY', 'Repository breakdown'],
+    ['FILE', 'Scanned files'],
     ['FINDING', 'Findings'],
     ['ERROR', 'Operational errors'],
     ['WARNING', 'Warnings'],
@@ -16659,15 +16716,20 @@ function recordGroupTitle(label) {
   return names.get(label) ?? humanize(label);
 }
 
+/**
+ * @param {string} key
+ * @param {string|undefined} value
+ */
 function renderHtmlCell(key, value) {
   if (value === undefined) return '';
   if (['severity', 'sev', 'status', 'change'].includes(key)) return renderBadge(value);
-  if (key === 'url' && safeHttpsUrl(value)) {
+  if ((key === 'url' || key === 'permalink') && safeHttpsUrl(value)) {
     return `<a href="${escapeHtml(value)}" target="_blank" rel="noopener noreferrer">${escapeHtml(value)}</a>`;
   }
   return `<code>${escapeHtml(value)}</code>`;
 }
 
+/** @param {unknown} value */
 function renderBadge(value) {
   const text = String(value);
   const normalized = text.toLocaleLowerCase();
@@ -16679,11 +16741,13 @@ function renderBadge(value) {
   return `<span class="badge${className}">${escapeHtml(text)}</span>`;
 }
 
+/** @param {HtmlRecord} record */
 function recordRepository(record) {
   const explicit = record.fields.repo ?? record.fields.repository;
   return explicit ? String(explicit) : '';
 }
 
+/** @param {unknown} value */
 function safeHttpsUrl(value) {
   try {
     return new URL(String(value)).protocol === 'https:';
@@ -16692,12 +16756,17 @@ function safeHttpsUrl(value) {
   }
 }
 
+/** @param {string} status */
 function statusClass(status) {
   if (status.toLocaleLowerCase() === 'ok') return 'status-ok';
   if (status.toLocaleLowerCase() === 'fail') return 'status-fail';
   return '';
 }
 
+/**
+ * @param {unknown} left
+ * @param {unknown} right
+ */
 function severitySort(left, right) {
   const order = new Map([
     ['critical', 0],
@@ -16709,6 +16778,7 @@ function severitySort(left, right) {
     - (order.get(String(right).toLocaleLowerCase()) ?? 4);
 }
 
+/** @param {unknown} value */
 function humanize(value) {
   const source = String(value);
   return (/^[A-Z0-9_-]+$/.test(source) ? source.toLocaleLowerCase() : source)
@@ -16718,6 +16788,7 @@ function humanize(value) {
     .replace(/^./, first => first.toLocaleUpperCase());
 }
 
+/** @param {unknown} value */
 function escapeHtml(value) {
   return String(value)
     .replaceAll('&', '&amp;')
@@ -16727,116 +16798,399 @@ function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
+;// CONCATENATED MODULE: ./src/lib/formats/json.js
+// @ts-check
 /**
- * Render records as SARIF 2.1.0 for GitHub code scanning.
+ * Recursively redacted, 2-space-indented JSON serialization.
+ */
+
+
+
+/**
+ * Render recursively redacted JSON with 2-space indentation. Object key order
+ * follows the caller-provided value.
  *
- * @param {Array<{label: string, fields: Record<string, unknown>}>} records
+ * @param {unknown} payload
+ * @returns {string}
+ */
+function json_renderJson(payload) {
+  return JSON.stringify(redactDeep(payload), null, 2) + '\n';
+}
+
+;// CONCATENATED MODULE: ./src/lib/formats/sarif.js
+// @ts-check
+/**
+ * SARIF 2.1.0 serialization for GitHub code scanning.
+ *
+ * Local commands produce one run. An organization scan produces one run per
+ * repository, so each run's locations are repository-relative and its version
+ * control provenance names that repository's URL, commit, and branch.
+ */
+
+
+
+const SARIF_SCHEMA = 'https://json.schemastore.org/sarif-2.1.0.json';
+const RESULT_LABELS = new Set(['FINDING', 'ERROR', 'WARNING', 'PIN', 'UPGRADE']);
+
+// GitHub maps a score of over 9.0 to critical, 7.0-8.9 to high, 4.0-6.9 to medium,
+// and 0.1-3.9 to low, so critical uses 9.5 rather than the ambiguous boundary 9.0.
+const SECURITY_SEVERITY = new Map([
+  ['critical', '9.5'],
+  ['high', '7.0'],
+  ['medium', '4.0'],
+  ['low', '1.0'],
+]);
+
+/**
+ * @typedef {import('../types.js').ReportRecord} ReportRecord
+ * @typedef {{id: string, shortDescription: {text: string},
+ *   defaultConfiguration: {level: string}, properties?: Record<string, string>}} RuleDescriptor
+ */
+
+/**
+ * Render records as SARIF 2.1.0 for GitHub code scanning. Records that contain
+ * `REPOSITORY` entries yield one run per repository; otherwise there is one run.
+ * Every rule descriptor with a known severity carries `security-severity`.
+ *
+ * @param {ReportRecord[]} records
  * @param {{status?: string}} [options]
  */
 function renderSarif(records, options = {}) {
-  const ruleRecords = records.filter(record => record.label === 'RULE');
-  const resultRecords = records.filter(record => (
-    record.label === 'FINDING'
-    || record.label === 'ERROR'
-    || record.label === 'WARNING'
-    || record.label === 'PIN'
-    || record.label === 'UPGRADE'
-  ));
+  const catalog = catalogRules(records);
+  const groups = repositoryGroups(records);
+  const runs = groups.length > 0
+    ? groups.map(group => buildRun(catalog, group.records, options, group.repository))
+    : [buildRun(catalog, records, options, null)];
+  return json_renderJson({ $schema: SARIF_SCHEMA, version: '2.1.0', runs });
+}
+
+/**
+ * @param {ReportRecord[]} records
+ * @returns {Map<string, RuleDescriptor>}
+ */
+function catalogRules(records) {
   const rules = new Map();
-  for (const record of ruleRecords) {
+  for (const record of records) {
+    if (record.label !== 'RULE') continue;
     const id = String(record.fields.id ?? 'actions-warden');
-    rules.set(id, {
+    rules.set(id, ruleDescriptor({
       id,
-      shortDescription: {
-        text: String(record.fields.description ?? id),
-      },
-      defaultConfiguration: {
-        level: sarifLevel(String(record.fields.severity ?? 'low')),
-      },
-    });
+      text: String(record.fields.description ?? id),
+      level: sarifLevel(String(record.fields.severity ?? 'low')),
+      severity: String(record.fields.severity ?? ''),
+    }));
   }
+  return rules;
+}
 
-  const results = resultRecords.map(record => {
-    const fields = record.fields;
-    const ruleId = String(fields.type ?? `actions-warden/${record.label.toLowerCase()}`);
-    if (!rules.has(ruleId)) {
-      rules.set(ruleId, {
-        id: ruleId,
-        shortDescription: { text: ruleId },
-        defaultConfiguration: {
-          level: record.label === 'ERROR'
-            ? 'error'
-            : sarifLevel(String(fields.sev ?? 'low')),
-        },
-      });
+/**
+ * Split records into one group per `REPOSITORY` record, keeping everything that
+ * follows it until the next repository.
+ *
+ * @param {ReportRecord[]} records
+ * @returns {Array<{repository: Record<string, unknown>, records: ReportRecord[]}>}
+ */
+function repositoryGroups(records) {
+  /** @type {Array<{repository: Record<string, unknown>, records: ReportRecord[]}>} */
+  const groups = [];
+  for (const record of records) {
+    if (record.label === 'REPOSITORY') {
+      groups.push({ repository: record.fields, records: [] });
+    } else if (groups.length > 0) {
+      groups.at(-1)?.records.push(record);
     }
-    const file = fields.file ? String(fields.file) : null;
-    const line = Number(fields.line);
-    return {
-      ruleId,
-      level: record.label === 'ERROR'
-        ? 'error'
-        : record.label === 'WARNING'
-          ? 'warning'
-          : sarifLevel(String(fields.sev ?? (record.label === 'FINDING' ? 'warning' : 'low'))),
-      message: {
-        text: String(fields.explain ?? fields.msg ?? summarizeFields(record.label, fields)),
-      },
-      ...(file ? {
-        locations: [{
-          physicalLocation: {
-            artifactLocation: { uri: file.replace(/\\/g, '/') },
-            ...(Number.isInteger(line) && line > 0
-              ? { region: { startLine: line } }
-              : {}),
-          },
-        }],
-      } : {}),
-      ...(fields.id ? {
-        partialFingerprints: {
-          // GitHub code scanning recognizes this key and uses the suffix to
-          // distinguish multiple results with the same semantic fingerprint.
-          primaryLocationLineHash: `${fields.fingerprint ?? fields.id}:1`,
-          'actions-warden/id': String(fields.id),
-          ...(fields.fingerprint
-            ? { 'actions-warden/semantic': String(fields.fingerprint) }
-            : {}),
-        },
-      } : {}),
-    };
-  });
+  }
+  return groups;
+}
 
-  return renderJson({
-    $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
-    version: '2.1.0',
-    runs: [{
-      tool: {
-        driver: {
-          name: 'actions-warden',
-          informationUri: 'https://github.com/chiz0me/actions-warden',
-          rules: [...rules.values()],
-        },
+/**
+ * @param {Map<string, RuleDescriptor>} catalog
+ * @param {ReportRecord[]} records
+ * @param {{status?: string}} options
+ * @param {Record<string, unknown>|null} repository
+ */
+function buildRun(catalog, records, options, repository) {
+  const rules = new Map(catalog);
+  const results = [];
+  for (const record of records) {
+    if (!RESULT_LABELS.has(record.label)) continue;
+    const ruleId = String(record.fields.type ?? `actions-warden/${record.label.toLowerCase()}`);
+    if (!rules.has(ruleId)) rules.set(ruleId, syntheticRule(ruleId, record));
+    results.push(buildResult(record, ruleId, repository !== null));
+  }
+  return {
+    tool: {
+      driver: {
+        name: 'actions-warden',
+        informationUri: 'https://github.com/chiz0me/actions-warden',
+        rules: [...rules.values()],
       },
-      invocations: [{
-        executionSuccessful: options.status !== 'ERROR',
-      }],
-      results,
+    },
+    ...(repository ? versionControlProvenance(repository) : {}),
+    invocations: [{
+      executionSuccessful: options.status !== 'ERROR',
     }],
+    results,
+  };
+}
+
+/**
+ * @param {string} ruleId
+ * @param {ReportRecord} record
+ * @returns {RuleDescriptor}
+ */
+function syntheticRule(ruleId, record) {
+  const fields = record.fields;
+  return ruleDescriptor({
+    id: ruleId,
+    text: ruleId,
+    level: record.label === 'ERROR' ? 'error' : sarifLevel(String(fields.sev ?? 'low')),
+    // Only findings carry a security severity; operational errors, warnings, and
+    // change plans are not security alerts.
+    severity: record.label === 'FINDING' ? String(fields.sev ?? '') : '',
   });
 }
 
+/**
+ * @param {{id: string, text: string, level: string, severity: string}} descriptor
+ * @returns {RuleDescriptor}
+ */
+function ruleDescriptor({ id, text, level, severity }) {
+  const score = SECURITY_SEVERITY.get(severity);
+  return {
+    id,
+    shortDescription: { text },
+    defaultConfiguration: { level },
+    ...(score ? { properties: { 'security-severity': score } } : {}),
+  };
+}
+
+/**
+ * @param {ReportRecord} record
+ * @param {string} ruleId
+ * @param {boolean} repositoryRelative Use the repo-relative `path` for locations.
+ */
+function buildResult(record, ruleId, repositoryRelative) {
+  const fields = record.fields;
+  const location = repositoryRelative ? (fields.path ?? fields.file) : fields.file;
+  const file = location ? String(location) : null;
+  const line = Number(fields.line);
+  return {
+    ruleId,
+    level: resultLevel(record),
+    message: {
+      text: String(fields.explain ?? fields.msg ?? summarizeFields(record.label, fields)),
+    },
+    ...(file ? {
+      locations: [{
+        physicalLocation: {
+          artifactLocation: { uri: file.replace(/\\/g, '/') },
+          ...(Number.isInteger(line) && line > 0
+            ? { region: { startLine: line } }
+            : {}),
+        },
+      }],
+    } : {}),
+    ...(fields.id ? {
+      partialFingerprints: {
+        // GitHub code scanning recognizes this key and uses the suffix to
+        // distinguish multiple results with the same semantic fingerprint.
+        primaryLocationLineHash: `${fields.fingerprint ?? fields.id}:1`,
+        'actions-warden/id': String(fields.id),
+        ...(fields.fingerprint
+          ? { 'actions-warden/semantic': String(fields.fingerprint) }
+          : {}),
+      },
+    } : {}),
+  };
+}
+
+/** @param {ReportRecord} record */
+function resultLevel(record) {
+  if (record.label === 'ERROR') return 'error';
+  if (record.label === 'WARNING') return 'warning';
+  return sarifLevel(String(record.fields.sev ?? (record.label === 'FINDING' ? 'warning' : 'low')));
+}
+
+/**
+ * @param {Record<string, unknown>} repository The REPOSITORY record's fields.
+ * @returns {{versionControlProvenance?: Array<Record<string, string>>}}
+ */
+function versionControlProvenance(repository) {
+  if (!repository.url) return {};
+  return {
+    versionControlProvenance: [{
+      repositoryUri: String(repository.url),
+      ...(repository.commit ? { revisionId: String(repository.commit) } : {}),
+      ...(repository.branch ? { branch: String(repository.branch) } : {}),
+    }],
+  };
+}
+
+/** @param {string} severity */
 function sarifLevel(severity) {
   if (severity === 'critical' || severity === 'high' || severity === 'error') return 'error';
   if (severity === 'medium' || severity === 'warning') return 'warning';
   return 'note';
 }
 
+/**
+ * @param {string} label
+ * @param {Record<string, unknown>} fields
+ */
 function summarizeFields(label, fields) {
   const details = Object.entries(fields)
-    .filter(([key, value]) => !['id', 'file', 'line'].includes(key) && value != null && value !== '')
+    .filter(([key, value]) => (
+      !['id', 'file', 'line', 'path', 'permalink'].includes(key) && value != null && value !== ''
+    ))
     .map(([key, value]) => `${key}=${String(value)}`)
     .join(' ');
   return `${label}: ${details}`;
+}
+
+;// CONCATENATED MODULE: ./src/lib/formats/text.js
+// @ts-check
+/**
+ * Plain-text, one-record-per-line serialization for human-readable logs.
+ */
+
+
+
+/**
+ * Render plain text (human-readable summary).
+ *
+ * @param {Array<{label: string, fields: Record<string, unknown>}>} records
+ * @param {{status?: 'OK'|'FAIL'}} [options]
+ * @returns {string}
+ */
+function renderText(records, options = {}) {
+  const lines = records.map(r => {
+    const kv = Object.entries(r.fields)
+      .filter(([, v]) => v !== null && v !== undefined && v !== '')
+      .map(([k, v]) => `${k}=${escapeText(redact(String(v)))}`)
+      .join(' ');
+    return `[${r.label}] ${kv}`;
+  });
+  if (options.status) lines.push(`==> ${options.status}`);
+  return lines.join('\n') + '\n';
+}
+
+/** @param {string} value */
+function escapeText(value) {
+  return JSON.stringify(value).slice(1, -1);
+}
+
+;// CONCATENATED MODULE: ./src/lib/formats/toon.js
+// @ts-check
+/**
+ * Token-Oriented Object Notation: one labeled record per line,
+ * `LABEL: key=value key=value`, empty values omitted, trailing `STATUS:` line.
+ */
+
+
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function quoteIfNeeded(value) {
+  if (value === '') return '""';
+  if (/[\s="\\]/.test(value) || [...value].some(char => char.charCodeAt(0) < 32)) {
+    return JSON.stringify(value);
+  }
+  return value;
+}
+
+/**
+ * Serialize a record to a single TOON line.
+ *
+ * @param {string} label
+ * @param {Record<string, unknown>} fields
+ * @returns {string}
+ */
+function toonLine(label, fields) {
+  const parts = [];
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === null || v === undefined || v === '') continue;
+    const value = typeof v === 'string' ? v : String(v);
+    const key = redact(String(k)).replace(/[^a-zA-Z0-9_.-]/g, '_');
+    parts.push(`${key}=${quoteIfNeeded(redact(value))}`);
+  }
+  return parts.length === 0 ? `${label}:` : `${label}: ${parts.join(' ')}`;
+}
+
+/**
+ * Render a TOON document.
+ *
+ * @param {Array<{label: string, fields: Record<string, unknown>}>} records
+ * @param {{status?: 'OK'|'FAIL'}} [options]
+ * @returns {string}
+ */
+function renderToon(records, options = {}) {
+  const lines = records.map(r => toonLine(r.label, r.fields));
+  if (options.status) lines.push(`STATUS: ${options.status}`);
+  return lines.join('\n') + '\n';
+}
+
+;// CONCATENATED MODULE: ./src/lib/formatter.js
+/**
+ * Output formatter supporting TOON (Token-Oriented Object Notation), JSON,
+ * plain text, CSV, SARIF, and self-contained HTML. Each serializer lives under
+ * `src/lib/formats/`; this module dispatches by format name and re-exports the
+ * public renderers.
+ *
+ * TOON output rules:
+ *   - One record per line: `LABEL: key=value key=value`
+ *   - Values containing spaces or `=` are quoted: `msg="hello world"`
+ *   - Empty/null values are omitted
+ *   - Trailing `STATUS: OK` or `STATUS: FAIL` signal for machine consumers
+ */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/**
+ * Severity ordering, lowest-to-highest.
+ */
+const SEVERITY_ORDER = [...SEVERITY_LEVELS];
+
+/**
+ * Format records into the requested output mode.
+ *
+ * @param {'toon'|'json'|'text'|'csv'|'sarif'|'html'} format
+ * @param {Array<{label: string, fields: Record<string, unknown>}>} records
+ * @param {{status?: 'OK'|'FAIL', json?: unknown, title?: string,
+ *   metadata?: Record<string, unknown>}} [options]
+ * @returns {string}
+ */
+function formatter_format(format_, records, options = {}) {
+  switch (format_) {
+    case 'json':
+      return json_renderJson(options.json ?? recordsToJson(records, options));
+    case 'text':
+      return renderText(records, options);
+    case 'csv':
+      return renderCsv(records, options);
+    case 'sarif':
+      return renderSarif(records, options);
+    case 'html':
+      return renderHtml(records, options);
+    case 'toon':
+    default:
+      return renderToon(records, options);
+  }
 }
 
 /**
@@ -17091,6 +17445,23 @@ const DEFAULT_WORKFLOW_PATTERNS = [
 ];
 
 /**
+ * Return whether a path exists without following a final symbolic link. Errors other
+ * than a missing path are rethrown.
+ *
+ * @param {string} path
+ * @returns {Promise<boolean>}
+ */
+async function pathExists(path) {
+  try {
+    await (0,promises_namespaceObject.lstat)(path);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+/**
  * Reject path-traversal and absolute-escape attempts.
  *
  * @param {string} p
@@ -17233,8 +17604,8 @@ async function resolveTargets({ workflows, cwd }) {
 
 
 
+
 const CONFIG_NAMES = ['.actions-warden.yml', '.actions-warden.yaml'];
-const SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
 const TOP_LEVEL_KEYS = new Set([
   'version',
   'baseline',
@@ -17296,7 +17667,7 @@ async function loadConfig({
     throw new Error(`invalid actions-warden config: ${document.errors[0].message}`);
   }
   const raw = document.toJS() ?? {};
-  if (!config_isRecord(raw)) throw new Error('actions-warden config must be a mapping');
+  if (!isRecord(raw)) throw new Error('actions-warden config must be a mapping');
   rejectUnknownKeys(raw, TOP_LEVEL_KEYS, 'config');
   if (raw.version !== undefined && raw.version !== 1) {
     throw new Error('actions-warden config version must be 1');
@@ -17349,13 +17720,13 @@ async function resolveRepositoryFile(path, cwd = process.cwd()) {
 
 function validateRules(value, knownRules) {
   if (value === undefined) return {};
-  if (!config_isRecord(value)) throw new Error('config.rules must be a mapping');
+  if (!isRecord(value)) throw new Error('config.rules must be a mapping');
   const rules = {};
   for (const [ruleId, policy] of Object.entries(value)) {
     if (knownRules.size > 0 && !knownRules.has(ruleId)) {
       throw new Error(`unknown rule in config: ${ruleId}`);
     }
-    if (!config_isRecord(policy)) throw new Error(`config.rules.${ruleId} must be a mapping`);
+    if (!isRecord(policy)) throw new Error(`config.rules.${ruleId} must be a mapping`);
     rejectUnknownKeys(policy, new Set(['enabled', 'severity']), `config.rules.${ruleId}`);
     if (policy.enabled !== undefined && typeof policy.enabled !== 'boolean') {
       throw new Error(`config.rules.${ruleId}.enabled must be a boolean`);
@@ -17373,7 +17744,7 @@ function validateRules(value, knownRules) {
 
 function validateRunnerPolicy(value) {
   if (value === undefined) return { ...DEFAULT_CONFIG.runnerPolicy };
-  if (!config_isRecord(value)) throw new Error('config.runner-policy must be a mapping');
+  if (!isRecord(value)) throw new Error('config.runner-policy must be a mapping');
   rejectUnknownKeys(
     value,
     new Set(['trusted-groups', 'self-hosted-labels', 'flag-unknown-groups']),
@@ -17415,10 +17786,6 @@ function optionalString(value, label) {
   return value;
 }
 
-function config_isRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
 function config_isOutside(path) {
   return path === '..' || path.startsWith(`..${external_node_path_namespaceObject.sep}`) || (0,external_node_path_namespaceObject.isAbsolute)(path);
 }
@@ -17427,6 +17794,15 @@ function config_isOutside(path) {
 
 
 
+
+/**
+ * Create a baseline that suppresses nothing.
+ *
+ * @returns {{path: null, ids: Set<string>, fingerprints: Set<string>}}
+ */
+function emptyBaseline() {
+  return { path: null, ids: new Set(), fingerprints: new Set() };
+}
 
 /**
  * Load a versioned baseline and return its finding IDs and semantic
@@ -17552,16 +17928,7 @@ function stableValue(value) {
 
 
 
-/**
- * @typedef {object} Finding
- * @property {string} id           - unique id (sha1 short)
- * @property {string} ruleId
- * @property {string} severity
- * @property {string} file
- * @property {number} line
- * @property {Record<string, unknown>} fields
- * @property {string} explain
- */
+/** @typedef {import('../lib/types.js').Finding} Finding */
 
 /**
  * @param {object} opts
@@ -17759,20 +18126,12 @@ async function resolveBaselineData({ baseline, cwd }) {
     : emptyBaseline();
 }
 
-function emptyBaseline() {
-  return { path: null, ids: new Set(), fingerprints: new Set() };
-}
-
 function stripExplain(f) {
   const copy = { ...f };
   delete copy.explain;
   return copy;
 }
 
-/**
- * @param {string[]|undefined} workflows
- * @param {string} cwd
- */
 /**
  * @param {Finding[]} findings
  * @param {string|undefined} min
@@ -17785,10 +18144,6 @@ function filterBySeverity(findings, min) {
     f.ruleId === 'parse-error'
     || SEVERITY_ORDER.indexOf(f.severity) >= minIdx
   ));
-}
-
-function relPath(p, cwd) {
-  return identity_canonicalPath(p, cwd);
 }
 
 /**
@@ -17805,14 +18160,14 @@ function renderAudit(result, opts) {
       status: result.status,
       json: {
         schemaVersion: '1.0',
-        files: result.files.map(f => relPath(f, cwd)),
-        findings: result.findings.map(f => ({ ...f, file: relPath(f.file, cwd) })),
+        files: result.files.map(f => identity_canonicalPath(f, cwd)),
+        findings: result.findings.map(f => ({ ...f, file: identity_canonicalPath(f.file, cwd) })),
         summary: result.summary,
         baseline: {
           ...result.baseline,
-          path: result.baseline.path ? relPath(result.baseline.path, cwd) : null,
+          path: result.baseline.path ? identity_canonicalPath(result.baseline.path, cwd) : null,
         },
-        configPath: result.configPath ? relPath(result.configPath, cwd) : null,
+        configPath: result.configPath ? identity_canonicalPath(result.configPath, cwd) : null,
         status: result.status,
       },
     });
@@ -17832,7 +18187,7 @@ function renderAudit(result, opts) {
     }
   }
   for (const f of result.files) {
-    records.push({ label: 'SCAN', fields: { file: relPath(f, opts.cwd ?? process.cwd()) } });
+    records.push({ label: 'SCAN', fields: { file: identity_canonicalPath(f, opts.cwd ?? process.cwd()) } });
   }
   for (const finding of result.findings) {
     const fields = { id: finding.id, ...finding.fields, line: finding.line };
@@ -17847,8 +18202,8 @@ function renderAudit(result, opts) {
     status: result.status,
     title: 'Workflow security audit',
     metadata: {
-      config: result.configPath ? relPath(result.configPath, cwd) : 'built-in defaults',
-      baseline: result.baseline.path ? relPath(result.baseline.path, cwd) : 'none',
+      config: result.configPath ? identity_canonicalPath(result.configPath, cwd) : 'built-in defaults',
+      baseline: result.baseline.path ? identity_canonicalPath(result.baseline.path, cwd) : 'none',
     },
   });
 }
@@ -17977,9 +18332,9 @@ async function writeCache({
 
 
 
+
 const API = 'https://api.github.com';
 const IN_FLIGHT = new Map();
-const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
 
 /**
  * Resolve the API token. Precedence: explicit param > GITHUB_TOKEN > GH_TOKEN.
@@ -18214,7 +18569,7 @@ async function notifyResponse(onResponse, response) {
  */
 async function resolveRefToSha({ owner, repo, ref, token, cwd }) {
   // Already a full SHA?
-  if (COMMIT_SHA_RE.test(ref)) {
+  if (GIT_SHA_RE.test(ref)) {
     return { sha: ref.toLowerCase(), type: 'commit' };
   }
   // Try as tag.
@@ -18222,7 +18577,7 @@ async function resolveRefToSha({ owner, repo, ref, token, cwd }) {
   const tagRes = await ghFetch({ url: tagUrl, token, cwd });
   if (tagRes.status === 200 && tagRes.body && typeof tagRes.body === 'object') {
     const obj = tagRes.body.object;
-    if (obj && COMMIT_SHA_RE.test(String(obj.sha))) {
+    if (obj && GIT_SHA_RE.test(String(obj.sha))) {
       if (obj.type === 'tag') {
         const sha = await dereferenceTagToCommit({
           owner,
@@ -18245,14 +18600,14 @@ async function resolveRefToSha({ owner, repo, ref, token, cwd }) {
   if (
     branchRes.status === 200
     && branchRes.body?.object?.type === 'commit'
-    && COMMIT_SHA_RE.test(String(branchRes.body.object.sha))
+    && GIT_SHA_RE.test(String(branchRes.body.object.sha))
   ) {
     return { sha: String(branchRes.body.object.sha).toLowerCase(), type: 'branch' };
   }
   // Try as commit.
   const commitUrl = `${API}/repos/${owner}/${repo}/commits/${encodeURIComponent(ref)}`;
   const commitRes = await ghFetch({ url: commitUrl, token, cwd });
-  if (commitRes.status === 200 && COMMIT_SHA_RE.test(String(commitRes.body?.sha))) {
+  if (commitRes.status === 200 && GIT_SHA_RE.test(String(commitRes.body?.sha))) {
     return { sha: String(commitRes.body.sha).toLowerCase(), type: 'commit' };
   }
   throw new Error(`could not resolve ${owner}/${repo}@${ref}`);
@@ -18267,7 +18622,7 @@ async function dereferenceTagToCommit({ owner, repo, sha, token, cwd }) {
     if (
       response.status !== 200
       || !target
-      || !COMMIT_SHA_RE.test(String(target.sha))
+      || !GIT_SHA_RE.test(String(target.sha))
     ) {
       throw new Error(`could not dereference annotated tag ${owner}/${repo}@${sha}`);
     }
@@ -18285,7 +18640,7 @@ async function dereferenceTagToCommit({ owner, repo, sha, token, cwd }) {
  * commits API rather than merely looking like a SHA.
  */
 async function verifyCommitInRepo({ owner, repo, sha, token, cwd }) {
-  if (!COMMIT_SHA_RE.test(sha)) {
+  if (!GIT_SHA_RE.test(sha)) {
     throw new Error(`invalid commit SHA for ${owner}/${repo}`);
   }
   const url = `${API}/repos/${owner}/${repo}/commits/${encodeURIComponent(sha)}`;
@@ -18455,7 +18810,7 @@ function versionSpecificity(input) {
  * @param {string} [args.cwd]
  * @returns {Promise<WriteResult>}
  */
-async function writeFileGuarded({ path, content, dryRun = true, cwd = process.cwd() }) {
+async function writer_writeFileGuarded({ path, content, dryRun = true, cwd = process.cwd() }) {
   if (typeof path !== 'string' || path.includes('\0')) throw new Error('invalid path');
   const requestedRoot = (0,external_node_path_namespaceObject.resolve)(cwd);
   const requestedPath = (0,external_node_path_namespaceObject.resolve)(requestedRoot, path);
@@ -18776,7 +19131,6 @@ async function mapLimit(values, limit, worker) {
 
 
 
-const pin_SHA_RE = /^[0-9a-f]{40}$/i;
 
 /**
  * @typedef {object} PinChange
@@ -18827,7 +19181,7 @@ async function pin({ cwd = process.cwd(), workflows, dryRun = true, token, fix }
     const ignore = parseIgnoreDirectives(source);
     for (const { ref } of collectUses(doc)) {
       if (ref.kind !== 'external' && ref.kind !== 'reusable-workflow') continue;
-      if (!ref.ref || pin_SHA_RE.test(ref.ref)) continue;
+      if (!ref.ref || GIT_SHA_RE.test(ref.ref)) continue;
       if (isIgnored(ignore, ref.line, 'unpinned-action')) continue;
       const id = pinOccurrenceId({ file, cwd, ref });
       if (fix && fix !== id) continue;
@@ -18884,7 +19238,7 @@ async function pin({ cwd = process.cwd(), workflows, dryRun = true, token, fix }
       const newSource = patcher_applyPatches(source, patches);
       if (newSource !== source) {
         parseWorkflowSource(newSource, file);
-        await writeFileGuarded({ path: file, content: newSource, dryRun, cwd });
+        await writer_writeFileGuarded({ path: file, content: newSource, dryRun, cwd });
       }
       changes.push(...fileChanges);
     } catch (err) {
@@ -18986,7 +19340,6 @@ function rel(p, cwd) {
 
 
 
-const upgrade_SHA_RE = /^[0-9a-f]{40}$/i;
 
 /**
  * @typedef {object} UpgradeChange
@@ -19053,7 +19406,7 @@ async function upgrade({
       if (ref.kind !== 'external' && ref.kind !== 'reusable-workflow') continue;
       if (isIgnored(ignore, ref.line, 'unpinned-action')) continue;
       const inlineVersion = readVersionComment(source, ref);
-      const currentVersion = ref.ref && upgrade_SHA_RE.test(ref.ref) ? inlineVersion : ref.ref;
+      const currentVersion = ref.ref && GIT_SHA_RE.test(ref.ref) ? inlineVersion : ref.ref;
       if (!currentVersion) continue;
       const id = occurrenceId({
         kind: 'upgrade',
@@ -19134,7 +19487,7 @@ async function upgrade({
       const newSource = patcher_applyPatches(source, patches);
       if (newSource !== source) {
         parseWorkflowSource(newSource, file);
-        await writeFileGuarded({ path: file, content: newSource, dryRun, cwd });
+        await writer_writeFileGuarded({ path: file, content: newSource, dryRun, cwd });
       }
       changes.push(...fileChanges);
     } catch (err) {
@@ -19507,7 +19860,6 @@ function report_rel(p, cwd) {
 
 
 
-const verify_SHA_RE = /^[0-9a-f]{40}$/i;
 
 /**
  * Verify that external action references are full repository-owned commit
@@ -19550,7 +19902,7 @@ async function verify({ cwd = process.cwd(), workflows, token } = {}) {
         start: ref.start,
         subject: ref.raw,
       });
-      if (!ref.ref || !verify_SHA_RE.test(ref.ref)) {
+      if (!ref.ref || !GIT_SHA_RE.test(ref.ref)) {
         return { type: 'error', value: {
           id,
           file,
@@ -19722,9 +20074,11 @@ const external_node_util_namespaceObject = __WEBPACK_EXTERNAL_createRequire(impo
 
 
 
+
 const github_org_API = 'https://api.github.com';
-const NAME_RE = /^[A-Za-z0-9_.-]+$/;
-const github_org_SHA_RE = /^[0-9a-f]{40}$/i;
+
+/** HTTP status GitHub returns for Git requests against a repository with no commits. */
+const EMPTY_REPOSITORY_STATUS = 409;
 
 /** Maximum decoded bytes accepted for one remote workflow YAML blob. */
 const MAX_WORKFLOW_BYTES = 2 * 1024 * 1024;
@@ -19810,6 +20164,8 @@ async function listOrganizationRepositories({
 
 /**
  * Fetch and validate the workflow-bearing portion of a repository tree.
+ * The default-branch commit is resolved first and the tree is then read by that
+ * commit's tree SHA, so the evidence and its permalinks describe one revision.
  * The returned snapshot can be compared with a checkpoint before any blobs
  * are downloaded.
  */
@@ -19824,65 +20180,39 @@ async function fetchRepositoryWorkflowTree({
   if (includePath !== undefined && typeof includePath !== 'function') {
     throw new Error('includePath must be a function');
   }
-  if (!normalized.defaultBranch) {
-    return workflowTree(normalized, { entries: [], empty: true, treeSha: null });
-  }
-  const treeUrl = `${github_org_API}/repos/${encodeURIComponent(normalized.owner)}`
-    + `/${encodeURIComponent(normalized.name)}/git/trees/`
-    + `${encodeURIComponent(normalized.defaultBranch)}?recursive=1`;
+  const emptyTree = () => workflowTree(normalized, {
+    entries: [],
+    empty: true,
+    treeSha: null,
+    commitSha: null,
+  });
+  if (!normalized.defaultBranch) return emptyTree();
+  const commit = await fetchDefaultBranchCommit({ repository: normalized, token, cwd, onRetry });
+  if (commit === null) return emptyTree();
+
   const treeResponse = await ghFetch({
-    url: treeUrl,
+    url: `${repositoryApiUrl(normalized)}/git/trees/${commit.treeSha}?recursive=1`,
     token,
     cwd,
     useCache: false,
     onRetry,
   });
-  if (treeResponse.status === 409) {
-    return workflowTree(normalized, { entries: [], empty: true, treeSha: null });
-  }
   if (treeResponse.status !== 200) {
-    throw new Error(`could not read ${normalized.fullName}@${normalized.defaultBranch} tree (HTTP ${treeResponse.status})`);
-  }
-  if (!treeResponse.body || typeof treeResponse.body !== 'object' || !Array.isArray(treeResponse.body.tree)) {
-    throw new Error(`invalid tree response for ${normalized.fullName}`);
-  }
-  if (typeof treeResponse.body.truncated !== 'boolean') {
-    throw new Error(`invalid tree truncation state for ${normalized.fullName}`);
-  }
-  if (!github_org_SHA_RE.test(String(treeResponse.body.sha ?? ''))) {
-    throw new Error(`invalid tree SHA for ${normalized.fullName}`);
-  }
-  if (treeResponse.body.truncated === true) {
-    throw new Error(`tree response for ${normalized.fullName} was truncated; refusing an incomplete scan`);
-  }
-
-  const entries = treeResponse.body.tree
-    .filter(entry => (
-      entry?.type === 'blob'
-      && github_org_isWorkflowPath(entry.path)
-      && (includePath === undefined || includePath(entry.path))
-    ))
-    .sort((left, right) => left.path.localeCompare(right.path));
-  if (entries.length > MAX_WORKFLOW_FILES) {
     throw new Error(
-      `${normalized.fullName} has more than ${MAX_WORKFLOW_FILES} workflow files; refusing an unbounded scan`,
+      `could not read ${normalized.fullName}@${normalized.defaultBranch} tree`
+      + ` (HTTP ${treeResponse.status})`,
     );
   }
-  const declaredBytes = entries.reduce(
-    (total, entry) => total + (
-      Number.isSafeInteger(entry.size) && entry.size >= 0 ? entry.size : 0
-    ),
-    0,
-  );
-  if (declaredBytes > MAX_REPOSITORY_WORKFLOW_BYTES) {
-    throw new Error(
-      `${normalized.fullName} workflow sources exceed the ${MAX_REPOSITORY_WORKFLOW_BYTES}-byte repository limit`,
-    );
-  }
+  const entries = selectWorkflowEntries(treeResponse.body, {
+    repository: normalized,
+    expectedTreeSha: commit.treeSha,
+    includePath,
+  });
   return workflowTree(normalized, {
     entries,
     empty: false,
-    treeSha: String(treeResponse.body.sha).toLowerCase(),
+    treeSha: commit.treeSha,
+    commitSha: commit.commitSha,
   });
 }
 
@@ -19909,60 +20239,30 @@ async function fetchRepositoryWorkflows({
     onRetry,
   });
   validateWorkflowTree(tree, normalized);
-  if (tree.empty) {
-    return { sources: [], errors: [], empty: true, treeSha: tree.treeSha };
-  }
-
-  const sources = [];
-  const errors = [];
-  let sourceBytes = 0;
-  for (const entry of tree.entries) {
-    if (!github_org_SHA_RE.test(String(entry.sha ?? ''))) {
-      errors.push({ path: entry.path, error: 'workflow tree entry has an invalid blob SHA' });
-      continue;
-    }
-    if (
-      entry.size !== undefined
-      && (!Number.isSafeInteger(entry.size) || entry.size < 0)
-    ) {
-      errors.push({ path: entry.path, error: 'workflow tree entry has an invalid size' });
-      continue;
-    }
-    if (Number.isFinite(entry.size) && entry.size > MAX_WORKFLOW_BYTES) {
-      errors.push({
-        path: entry.path,
-        error: `workflow exceeds the ${MAX_WORKFLOW_BYTES}-byte scan limit`,
-      });
-      continue;
-    }
-    let source;
-    try {
-      source = await fetchBlobText({
-        owner: normalized.owner,
-        repo: normalized.name,
-        sha: entry.sha,
-        token,
-        cwd,
-        onRetry,
-      });
-    } catch (error) {
-      errors.push({ path: entry.path, error: String(error.message ?? error) });
-      continue;
-    }
-    sourceBytes += Buffer.byteLength(source);
-    if (sourceBytes > MAX_REPOSITORY_WORKFLOW_BYTES) {
-      throw new Error(
-        `${normalized.fullName} workflow sources exceed the ${MAX_REPOSITORY_WORKFLOW_BYTES}-byte repository limit`,
-      );
-    }
-    sources.push({ path: entry.path, source, sha: String(entry.sha).toLowerCase() });
-  }
-  return {
-    sources,
-    errors,
-    empty: false,
+  const result = {
+    sources: [],
+    errors: [],
+    entries: [],
+    empty: tree.empty,
     treeSha: tree.treeSha,
+    commitSha: tree.commitSha,
   };
+  if (tree.empty) return result;
+
+  let sourceBytes = 0;
+  const request = { owner: normalized.owner, repo: normalized.name, token, cwd, onRetry };
+  for (const entry of tree.entries) {
+    const outcome = await readWorkflowEntry(entry, request);
+    result.entries.push(outcome.detail);
+    if (outcome.error) {
+      result.errors.push({ path: entry.path, error: outcome.error });
+      continue;
+    }
+    sourceBytes += Buffer.byteLength(outcome.text);
+    if (sourceBytes > MAX_REPOSITORY_WORKFLOW_BYTES) throw repositoryLimitError(normalized);
+    result.sources.push({ path: entry.path, source: outcome.text, sha: outcome.detail.blobSha });
+  }
+  return result;
 }
 
 /**
@@ -20023,13 +20323,127 @@ async function fetchBlobText({ owner, repo, sha, token, cwd, onRetry }) {
     throw new Error(`workflow blob ${sha} size did not match its metadata`);
   }
   try {
-    return new external_node_util_namespaceObject.TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return { text: new external_node_util_namespaceObject.TextDecoder('utf-8', { fatal: true }).decode(bytes), bytes: bytes.length };
   } catch {
     throw new Error(`workflow blob ${sha} is not valid UTF-8`);
   }
 }
 
-function workflowTree(repository, { entries, empty, treeSha }) {
+async function readWorkflowEntry(entry, request) {
+  const blobSha = GIT_SHA_RE.test(String(entry.sha ?? ''))
+    ? String(entry.sha).toLowerCase()
+    : null;
+  const treeBytes = Number.isSafeInteger(entry.size) && entry.size >= 0 ? entry.size : null;
+  const unreadable = error => ({
+    detail: { path: entry.path, blobSha, bytes: treeBytes, readable: false },
+    error,
+  });
+  const failure = checkEntryReadable(entry);
+  if (failure) return unreadable(failure);
+  try {
+    const blob = await fetchBlobText({ ...request, sha: entry.sha });
+    return {
+      detail: { path: entry.path, blobSha, bytes: blob.bytes, readable: true },
+      text: blob.text,
+    };
+  } catch (error) {
+    return unreadable(String(error.message ?? error));
+  }
+}
+
+function repositoryLimitError(repository) {
+  return new Error(
+    `${repository.fullName} workflow sources exceed`
+    + ` the ${MAX_REPOSITORY_WORKFLOW_BYTES}-byte repository limit`,
+  );
+}
+
+async function fetchDefaultBranchCommit({ repository, token, cwd, onRetry }) {
+  const response = await ghFetch({
+    url: `${repositoryApiUrl(repository)}/commits/heads/`
+      + encodeURIComponent(repository.defaultBranch),
+    token,
+    cwd,
+    useCache: false,
+    onRetry,
+  });
+  if (response.status === EMPTY_REPOSITORY_STATUS) return null;
+  if (response.status !== 200) {
+    throw new Error(
+      `could not read ${repository.fullName}@${repository.defaultBranch} commit`
+      + ` (HTTP ${response.status})`,
+    );
+  }
+  const commitSha = String(response.body?.sha ?? '');
+  const treeSha = String(response.body?.commit?.tree?.sha ?? '');
+  if (!GIT_SHA_RE.test(commitSha) || !GIT_SHA_RE.test(treeSha)) {
+    throw new Error(`invalid commit response for ${repository.fullName}`);
+  }
+  return { commitSha: commitSha.toLowerCase(), treeSha: treeSha.toLowerCase() };
+}
+
+function selectWorkflowEntries(body, { repository, expectedTreeSha, includePath }) {
+  if (!body || typeof body !== 'object' || !Array.isArray(body.tree)) {
+    throw new Error(`invalid tree response for ${repository.fullName}`);
+  }
+  if (typeof body.truncated !== 'boolean') {
+    throw new Error(`invalid tree truncation state for ${repository.fullName}`);
+  }
+  if (!GIT_SHA_RE.test(String(body.sha ?? ''))) {
+    throw new Error(`invalid tree SHA for ${repository.fullName}`);
+  }
+  if (String(body.sha).toLowerCase() !== expectedTreeSha) {
+    throw new Error(`tree response for ${repository.fullName} did not match the commit`);
+  }
+  if (body.truncated === true) {
+    throw new Error(
+      `tree response for ${repository.fullName} was truncated; refusing an incomplete scan`,
+    );
+  }
+  const entries = body.tree
+    .filter(entry => (
+      entry?.type === 'blob'
+      && github_org_isWorkflowPath(entry.path)
+      && (includePath === undefined || includePath(entry.path))
+    ))
+    .sort((left, right) => left.path.localeCompare(right.path));
+  if (entries.length > MAX_WORKFLOW_FILES) {
+    throw new Error(
+      `${repository.fullName} has more than ${MAX_WORKFLOW_FILES} workflow files;`
+      + ' refusing an unbounded scan',
+    );
+  }
+  const declaredBytes = entries.reduce(
+    (total, entry) => total + (
+      Number.isSafeInteger(entry.size) && entry.size >= 0 ? entry.size : 0
+    ),
+    0,
+  );
+  if (declaredBytes > MAX_REPOSITORY_WORKFLOW_BYTES) {
+    throw repositoryLimitError(repository);
+  }
+  return entries;
+}
+
+function checkEntryReadable(entry) {
+  if (!GIT_SHA_RE.test(String(entry.sha ?? ''))) {
+    return 'workflow tree entry has an invalid blob SHA';
+  }
+  if (entry.size !== undefined && (!Number.isSafeInteger(entry.size) || entry.size < 0)) {
+    return 'workflow tree entry has an invalid size';
+  }
+  if (Number.isFinite(entry.size) && entry.size > MAX_WORKFLOW_BYTES) {
+    return `workflow exceeds the ${MAX_WORKFLOW_BYTES}-byte scan limit`;
+  }
+  return null;
+}
+
+function repositoryApiUrl(repository) {
+  return `${github_org_API}/repos/${encodeURIComponent(repository.owner)}`
+    + `/${encodeURIComponent(repository.name)}`;
+}
+
+function workflowTree(repository, { entries, empty, treeSha, commitSha }) {
   return {
     repository: repository.fullName,
     branch: repository.defaultBranch,
@@ -20041,6 +20455,7 @@ function workflowTree(repository, { entries, empty, treeSha }) {
     })),
     empty,
     treeSha,
+    commitSha,
   };
 }
 
@@ -20052,14 +20467,15 @@ function validateWorkflowTree(tree, repository) {
     || tree.branch !== repository.defaultBranch
     || typeof tree.empty !== 'boolean'
     || !Array.isArray(tree.entries)
-    || (tree.treeSha !== null && !github_org_SHA_RE.test(String(tree.treeSha)))
+    || (tree.treeSha !== null && !GIT_SHA_RE.test(String(tree.treeSha)))
+    || (tree.commitSha !== null && !GIT_SHA_RE.test(String(tree.commitSha)))
   ) {
     throw new Error(`invalid workflow tree snapshot for ${repository.fullName}`);
   }
   if (tree.empty && tree.entries.length > 0) {
     throw new Error(`invalid workflow tree snapshot for ${repository.fullName}`);
   }
-  if (!tree.empty && tree.treeSha === null) {
+  if (!tree.empty && (tree.treeSha === null || tree.commitSha === null)) {
     throw new Error(`invalid workflow tree snapshot for ${repository.fullName}`);
   }
   if (tree.entries.length > MAX_WORKFLOW_FILES) {
@@ -20096,7 +20512,7 @@ function normalizeRepository(raw, expectedOwner) {
   const defaultBranch = suppliedDefaultBranch == null
     ? null
     : validateRef(String(suppliedDefaultBranch));
-  const visibility = ['public', 'private', 'internal'].includes(raw.visibility)
+  const visibility = REPOSITORY_VISIBILITIES.includes(raw.visibility)
     ? raw.visibility
     : raw.private === true ? 'private' : 'public';
   return {
@@ -20129,10 +20545,51 @@ function validateRef(value) {
   return value;
 }
 
+;// CONCATENATED MODULE: ./src/lib/org-source-links.js
+/**
+ * Links from organization-scan evidence to the GitHub source that produced it.
+ */
+
+/**
+ * Link to a repo-relative path on the default branch. Falls back to the
+ * repository page when no default branch is known.
+ *
+ * @param {{htmlUrl: string, defaultBranch: string|null}} repository
+ * @param {string} path Repo-relative POSIX path.
+ * @param {number} [line]
+ * @returns {string}
+ */
+function sourceUrl(repository, path, line) {
+  if (!repository.defaultBranch) return repository.htmlUrl;
+  return blobUrl(repository, encodeURIComponent(repository.defaultBranch), path, line);
+}
+
+/**
+ * Link to a repo-relative path at an exact commit, so the evidence stays
+ * valid after the branch moves. Uses the default-branch link when the commit
+ * is unknown.
+ *
+ * @param {{htmlUrl: string, defaultBranch: string|null}} repository
+ * @param {string|null} commitSha Lowercase 40-hex commit ID, or null.
+ * @param {string} path Repo-relative POSIX path.
+ * @param {number} [line] Adds an `#L<line>` fragment when positive.
+ * @returns {string}
+ */
+function sourcePermalink(repository, commitSha, path, line) {
+  if (!commitSha) return sourceUrl(repository, path, line);
+  return blobUrl(repository, commitSha, path, line);
+}
+
+function blobUrl(repository, ref, path, line) {
+  const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+  const suffix = Number.isInteger(line) && line > 0 ? `#L${line}` : '';
+  return `${repository.htmlUrl}/blob/${ref}/${encodedPath}${suffix}`;
+}
+
 ;// CONCATENATED MODULE: ./src/version.js
 // Runtime version embedded in the GitHub Action bundle. The version-sync check
 // keeps this value aligned with package.json, the lockfile, and plugin metadata.
-const VERSION = '0.5.0';
+const version_VERSION = '0.6.0';
 
 ;// CONCATENATED MODULE: ./src/lib/org-checkpoint.js
 /**
@@ -20154,10 +20611,10 @@ const VERSION = '0.5.0';
 
 
 
+
+
 const CHECKPOINT_KIND = 'actions-warden-org-scan';
 const CHECKPOINT_SCHEMA_VERSION = '1.1';
-const LEGACY_CHECKPOINT_SCHEMA_VERSION = '1.0';
-const FIRST_ANALYSIS_GENERATION_TOOL_VERSION = '0.3.0';
 const TOOL_VERSION_RE = /^\d+\.\d+\.\d+$/;
 
 /**
@@ -20165,14 +20622,11 @@ const TOOL_VERSION_RE = /^\d+\.\d+\.\d+$/;
  * discovery, parsing, finding identity, rule evaluation, or persisted result
  * semantics change; compatible package releases keep the current value.
  */
-const ORGANIZATION_ANALYSIS_GENERATION = 2;
+const ORGANIZATION_ANALYSIS_GENERATION = 3;
 
 /** Maximum accepted or generated checkpoint size, in bytes. */
 const MAX_ORGANIZATION_CHECKPOINT_BYTES = 256 * 1024 * 1024;
-const org_checkpoint_NAME_RE = /^[A-Za-z0-9_.-]+$/;
-const org_checkpoint_SHA_RE = /^[0-9a-f]{40}$/i;
 const ID_RE = /^[0-9a-f]{16}$/;
-const org_checkpoint_SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
 const RULE_IDS = new Set(['parse-error', ...listRules().map(rule => rule.id)]);
 const RULES_HASH = org_checkpoint_digest(listRules());
 
@@ -20220,44 +20674,19 @@ function createOrganizationCheckpointIdentity({
 }
 
 /**
- * Create the stable key used by automatic organization-scan artifacts.
- *
- * Generation 1 deliberately retains the exact identity serialization used by
- * v0.3.0 so existing automatic checkpoints remain discoverable after an
- * upgrade. Later generations use the version-independent compatibility
- * identity directly.
+ * Create the stable key used by automatic organization-scan artifacts from
+ * the version-independent compatibility identity.
  */
 function createOrganizationCheckpointArtifactKey(identity) {
-  const compatibleIdentity = identity.analysisGeneration === 1
-    ? {
-        toolVersion: FIRST_ANALYSIS_GENERATION_TOOL_VERSION,
-        rulesHash: identity.rulesHash,
-        organization: identity.organization,
-        scope: {
-          repositories: identity.scope.repositories,
-          visibility: identity.scope.visibility,
-          includeArchived: identity.scope.includeArchived,
-          includeDisabled: identity.scope.includeDisabled,
-          includeForks: identity.scope.includeForks,
-          maxRepositories: identity.scope.maxRepositories,
-          severity: identity.scope.severity,
-          explain: identity.scope.explain,
-        },
-        configHash: identity.configHash,
-        baselineHash: identity.baselineHash,
-      }
-    : identity;
   return (0,external_node_crypto_namespaceObject.createHash)('sha256')
-    .update(identity.analysisGeneration === 1
-      ? JSON.stringify(compatibleIdentity)
-      : stableStringify(compatibleIdentity))
+    .update(stableStringify(identity))
     .digest('hex')
     .slice(0, 32);
 }
 
 /**
- * Load and fully validate a checkpoint, returning reusable repository results
- * plus whether a successful resume should migrate its metadata.
+ * Load and fully validate a checkpoint, returning its reusable repository
+ * results. Only the current schema version is accepted.
  */
 async function loadOrganizationCheckpoint({ path, cwd, identity }) {
   const resolvedPath = await resolveRepositoryFile(path, cwd);
@@ -20276,14 +20705,10 @@ async function loadOrganizationCheckpoint({ path, cwd, identity }) {
     if (error instanceof SyntaxError) throw new Error('organization checkpoint is not valid JSON');
     throw error;
   }
-  if (
-    !org_checkpoint_isRecord(checkpoint)
-    || ![CHECKPOINT_SCHEMA_VERSION, LEGACY_CHECKPOINT_SCHEMA_VERSION]
-      .includes(checkpoint.schemaVersion)
-  ) {
+  if (!isRecord(checkpoint) || checkpoint.schemaVersion !== CHECKPOINT_SCHEMA_VERSION) {
     throw new Error(
-      `organization checkpoint schemaVersion must be "${CHECKPOINT_SCHEMA_VERSION}"`
-      + ` or "${LEGACY_CHECKPOINT_SCHEMA_VERSION}"`,
+      `organization checkpoint schemaVersion must be "${CHECKPOINT_SCHEMA_VERSION}";`
+      + ' older checkpoints cannot be resumed, so start a fresh scan to replace it',
     );
   }
   if (checkpoint.kind !== CHECKPOINT_KIND) {
@@ -20302,17 +20727,12 @@ async function loadOrganizationCheckpoint({ path, cwd, identity }) {
     if (results.has(key)) throw new Error(`duplicate checkpoint repository: ${result.repository}`);
     results.set(key, result);
   }
-  return {
-    path: resolvedPath,
-    results,
-    migrationRequired: checkpoint.schemaVersion !== CHECKPOINT_SCHEMA_VERSION
-      || checkpoint.toolVersion !== VERSION,
-  };
+  return { path: resolvedPath, results };
 }
 
 /** Validate a checkpoint destination without creating or replacing a file. */
 async function validateOrganizationCheckpointPath({ path, cwd }) {
-  return writeFileGuarded({ path, content: '', cwd, dryRun: true });
+  return writer_writeFileGuarded({ path, content: '', cwd, dryRun: true });
 }
 
 /** Serialize, redact, size-check, and atomically replace a checkpoint. */
@@ -20328,7 +20748,7 @@ async function writeOrganizationCheckpoint({
   const content = `${JSON.stringify(redactDeep({
     schemaVersion: CHECKPOINT_SCHEMA_VERSION,
     kind: CHECKPOINT_KIND,
-    toolVersion: VERSION,
+    toolVersion: version_VERSION,
     identity,
     repositories,
   }), null, 2)}\n`;
@@ -20337,7 +20757,7 @@ async function writeOrganizationCheckpoint({
       `organization checkpoint exceeds ${MAX_ORGANIZATION_CHECKPOINT_BYTES} bytes`,
     );
   }
-  return writeFileGuarded({ path, content, cwd, dryRun: false });
+  return writer_writeFileGuarded({ path, content, cwd, dryRun: false });
 }
 
 /** Return whether a result is error-free and still matches the live revision. */
@@ -20349,25 +20769,40 @@ function canReuseCheckpointResult(result, repository, treeSha) {
     && !result.findings.some(finding => finding.ruleId === 'parse-error');
 }
 
-/** Rehydrate validated checkpoint data with local paths and live source URLs. */
-function restoreCheckpointResult(result, { repository, cwd, sourceUrl }) {
+/**
+ * Rehydrate validated checkpoint data with local paths and live source links.
+ * The live default-branch commit supplies every permalink and the revision's
+ * commit, so a resumed report matches a freshly scanned one.
+ */
+function restoreCheckpointResult(result, { repository, cwd, commitSha }) {
   const repositoryRoot = (0,external_node_path_namespaceObject.resolve)(cwd, repository.owner, repository.name);
+  const blobShas = new Map(result.fileDetails.map(detail => [detail.path, detail.blobSha]));
+  const link = (path, line) => sourcePermalink(repository, commitSha, path, line);
   const findings = result.findings.map(finding => ({
     ...finding,
     file: (0,external_node_path_namespaceObject.resolve)(repositoryRoot, ...finding.file.split('/')),
     repository: repository.fullName,
     branch: repository.defaultBranch,
     url: sourceUrl(repository, finding.file, finding.line),
+    path: finding.file,
+    blobSha: blobShas.get(finding.file) ?? null,
+    permalink: link(finding.file, finding.line),
   }));
   return {
     repository,
-    revision: { branch: repository.defaultBranch, treeSha: result.treeSha },
+    revision: {
+      branch: repository.defaultBranch,
+      treeSha: result.treeSha,
+      commitSha: commitSha ?? null,
+    },
     files: [...result.files],
+    fileDetails: result.fileDetails.map(detail => ({ ...detail, permalink: link(detail.path) })),
     findings,
     errors: result.errors.map(error => ({
       repository: repository.fullName,
       ...(error.path ? { path: error.path } : {}),
       error: error.error,
+      ...(error.path ? { permalink: link(error.path) } : {}),
     })),
     summary: { ...result.summary },
     status: result.status,
@@ -20381,11 +20816,18 @@ function serializeCheckpointResult(result, cwd) {
     branch: result.revision.branch,
     treeSha: result.revision.treeSha,
     files: [...result.files],
+    fileDetails: result.fileDetails.map(detail => ({
+      path: detail.path,
+      blobSha: detail.blobSha,
+      bytes: detail.bytes,
+      status: detail.status,
+      findings: detail.findings,
+    })),
     findings: result.findings.map(finding => {
       const copy = { ...finding, file: identity_canonicalPath(finding.file, repositoryRoot) };
-      delete copy.repository;
-      delete copy.branch;
-      delete copy.url;
+      for (const derived of ['repository', 'branch', 'url', 'path', 'blobSha', 'permalink']) {
+        delete copy[derived];
+      }
       return copy;
     }),
     errors: result.errors.map(error => ({
@@ -20398,7 +20840,7 @@ function serializeCheckpointResult(result, cwd) {
 }
 
 function validateIdentity(actual, expected) {
-  if (!org_checkpoint_isRecord(actual)) throw new Error('organization checkpoint identity is invalid');
+  if (!isRecord(actual)) throw new Error('organization checkpoint identity is invalid');
   for (const field of [
     'analysisGeneration',
     'rulesHash',
@@ -20414,33 +20856,17 @@ function validateIdentity(actual, expected) {
 }
 
 function normalizeCheckpointIdentity(checkpoint) {
-  if (!org_checkpoint_isRecord(checkpoint.identity)) {
+  if (!isRecord(checkpoint.identity)) {
     throw new Error('organization checkpoint identity is invalid');
   }
-  if (checkpoint.schemaVersion === CHECKPOINT_SCHEMA_VERSION) {
-    if (typeof checkpoint.toolVersion !== 'string' || !TOOL_VERSION_RE.test(checkpoint.toolVersion)) {
-      throw new Error('organization checkpoint toolVersion is invalid');
-    }
-    return checkpoint.identity;
+  if (typeof checkpoint.toolVersion !== 'string' || !TOOL_VERSION_RE.test(checkpoint.toolVersion)) {
+    throw new Error('organization checkpoint toolVersion is invalid');
   }
-  if (checkpoint.identity.toolVersion !== FIRST_ANALYSIS_GENERATION_TOOL_VERSION) {
-    throw new Error(
-      `organization checkpoint toolVersion ${String(checkpoint.identity.toolVersion)}`
-      + ' has no compatible analysis generation',
-    );
-  }
-  return {
-    analysisGeneration: 1,
-    rulesHash: checkpoint.identity.rulesHash,
-    organization: checkpoint.identity.organization,
-    scope: checkpoint.identity.scope,
-    configHash: checkpoint.identity.configHash,
-    baselineHash: checkpoint.identity.baselineHash,
-  };
+  return checkpoint.identity;
 }
 
 function validateCheckpointResult(value, identity) {
-  if (!org_checkpoint_isRecord(value)) throw new Error('organization checkpoint repository result is invalid');
+  if (!isRecord(value)) throw new Error('organization checkpoint repository result is invalid');
   const repository = validateFullName(value.repository);
   const branch = validateBranch(value.branch);
   const treeSha = value.treeSha === null ? null : validateSha(value.treeSha, repository);
@@ -20451,12 +20877,18 @@ function validateCheckpointResult(value, identity) {
     explain: identity.scope.explain,
   });
   const errors = validateErrors(value.errors, repository);
+  const fileDetails = validateFileDetails(value.fileDetails, {
+    repository,
+    files,
+    findings,
+    errors,
+  });
   const summary = validateSummary(value.summary, files, findings, repository);
   const status = findings.length === 0 && errors.length === 0 ? 'OK' : 'FAIL';
   if (value.status !== status) {
     throw new Error(`organization checkpoint status is inconsistent for ${repository}`);
   }
-  return { repository, branch, treeSha, files, findings, errors, summary, status };
+  return { repository, branch, treeSha, files, fileDetails, findings, errors, summary, status };
 }
 
 function validateFullName(value) {
@@ -20464,7 +20896,7 @@ function validateFullName(value) {
   const parts = value.split('/');
   if (
     parts.length !== 2
-    || parts.some(part => !org_checkpoint_NAME_RE.test(part) || part === '.' || part === '..')
+    || parts.some(part => !NAME_RE.test(part) || part === '.' || part === '..')
   ) throw new Error(`invalid checkpoint repository: ${value}`);
   return value;
 }
@@ -20482,7 +20914,7 @@ function validateBranch(value) {
 }
 
 function validateSha(value, repository) {
-  if (typeof value !== 'string' || !org_checkpoint_SHA_RE.test(value)) {
+  if (typeof value !== 'string' || !GIT_SHA_RE.test(value)) {
     throw new Error(`invalid checkpoint tree SHA for ${repository}`);
   }
   return value.toLowerCase();
@@ -20496,7 +20928,7 @@ function validateFiles(value, repository) {
   if (new Set(value).size !== value.length) {
     throw new Error(`duplicate checkpoint workflow path for ${repository}`);
   }
-  if (value.some((path, index) => index > 0 && value[index - 1].localeCompare(path) > 0)) {
+  if (value.some((path, index) => index > 0 && comparePaths(value[index - 1], path) > 0)) {
     throw new Error(`checkpoint workflow paths are not ordered for ${repository}`);
   }
   return [...value];
@@ -20506,17 +20938,17 @@ function validateFindings(value, { repository, files, explain }) {
   if (!Array.isArray(value)) throw new Error(`invalid checkpoint findings for ${repository}`);
   return value.map(finding => {
     if (
-      !org_checkpoint_isRecord(finding)
+      !isRecord(finding)
       || typeof finding.id !== 'string'
       || !ID_RE.test(finding.id)
       || typeof finding.fingerprint !== 'string'
       || !ID_RE.test(finding.fingerprint)
       || !RULE_IDS.has(finding.ruleId)
-      || !org_checkpoint_SEVERITIES.has(finding.severity)
+      || !SEVERITIES.has(finding.severity)
       || !files.has(finding.file)
       || !Number.isInteger(finding.line)
       || finding.line < 0
-      || !org_checkpoint_isRecord(finding.fields)
+      || !isRecord(finding.fields)
       || !isJsonValue(finding.fields)
       || finding.fields.file !== `${repository}/${finding.file}`
       || finding.fields.sev !== finding.severity
@@ -20541,7 +20973,7 @@ function validateErrors(value, repository) {
   if (!Array.isArray(value)) throw new Error(`invalid checkpoint errors for ${repository}`);
   return value.map(error => {
     if (
-      !org_checkpoint_isRecord(error)
+      !isRecord(error)
       || typeof error.error !== 'string'
       || (error.path !== undefined && !github_org_isWorkflowPath(error.path))
     ) throw new Error(`invalid checkpoint error for ${repository}`);
@@ -20552,8 +20984,66 @@ function validateErrors(value, repository) {
   });
 }
 
+const FILE_DETAIL_KEYS = ['blobSha', 'bytes', 'findings', 'path', 'status'];
+
+function validateFileDetails(value, { repository, files, findings, errors }) {
+  if (!Array.isArray(value)) throw new Error(`invalid checkpoint fileDetails for ${repository}`);
+  const details = value.map(detail => validateFileDetail(detail, repository));
+  for (let index = 1; index < details.length; index += 1) {
+    const order = comparePaths(details[index - 1].path, details[index].path);
+    if (order === 0) throw new Error(`duplicate checkpoint fileDetails path for ${repository}`);
+    if (order > 0) throw new Error(`checkpoint fileDetails are not ordered for ${repository}`);
+  }
+  assertFileDetailsMatchEvidence(details, { repository, files, findings, errors });
+  return details;
+}
+
+function validateFileDetail(detail, repository) {
+  if (
+    !isRecord(detail)
+    || Object.keys(detail).sort().join() !== FILE_DETAIL_KEYS.join()
+    || !github_org_isWorkflowPath(detail.path)
+    || !FILE_STATUSES.has(detail.status)
+    || (detail.blobSha !== null && !GIT_SHA_RE.test(String(detail.blobSha)))
+    || (detail.bytes !== null && !isCount(detail.bytes))
+    || !isCount(detail.findings)
+  ) throw new Error(`invalid checkpoint fileDetails entry for ${repository}`);
+  return {
+    path: detail.path,
+    blobSha: detail.blobSha === null ? null : detail.blobSha.toLowerCase(),
+    bytes: detail.bytes,
+    status: detail.status,
+    findings: detail.findings,
+  };
+}
+
+function assertFileDetailsMatchEvidence(details, { repository, files, findings, errors }) {
+  const readable = details
+    .filter(detail => detail.status !== 'unreadable')
+    .map(detail => detail.path);
+  const errorPaths = new Set(errors.map(error => error.path));
+  const inconsistent = (
+    readable.length !== files.length
+    || readable.some((path, index) => path !== files[index])
+    || details.some(detail => detail.status === 'unreadable' && !errorPaths.has(detail.path))
+    || details.some(detail => !fileDetailMatchesFindings(detail, findings))
+  );
+  if (inconsistent) throw new Error(`inconsistent checkpoint fileDetails for ${repository}`);
+}
+
+function fileDetailMatchesFindings(detail, findings) {
+  const own = findings.filter(finding => finding.file === detail.path);
+  const parseError = own.some(finding => finding.ruleId === 'parse-error');
+  return own.length === detail.findings
+    && (detail.status === 'parse-error') === parseError;
+}
+
+function isCount(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
 function validateSummary(value, files, findings, repository) {
-  if (!org_checkpoint_isRecord(value)) throw new Error(`invalid checkpoint summary for ${repository}`);
+  if (!isRecord(value)) throw new Error(`invalid checkpoint summary for ${repository}`);
   const fields = [
     'files',
     'findings',
@@ -20572,7 +21062,7 @@ function validateSummary(value, files, findings, repository) {
     value.files !== files.length
     || value.findings !== findings.length
     || value.totalFindings !== value.findings + value.suppressed
-    || [...org_checkpoint_SEVERITIES].some(severity => value[severity] !== counts[severity])
+    || [...SEVERITIES].some(severity => value[severity] !== counts[severity])
   ) throw new Error(`inconsistent checkpoint summary for ${repository}`);
   return Object.fromEntries(fields.map(field => [field, value[field]]));
 }
@@ -20587,7 +21077,7 @@ function stableStringify(value) {
 
 function org_checkpoint_stableValue(value) {
   if (Array.isArray(value)) return value.map(org_checkpoint_stableValue);
-  if (org_checkpoint_isRecord(value)) {
+  if (isRecord(value)) {
     return Object.fromEntries(
       Object.entries(value)
         .sort(([left], [right]) => left.localeCompare(right))
@@ -20597,22 +21087,229 @@ function org_checkpoint_stableValue(value) {
   return value;
 }
 
-function isJsonValue(value, seen = new Set()) {
-  if (value === null || ['string', 'boolean'].includes(typeof value)) return true;
-  if (typeof value === 'number') return Number.isFinite(value);
-  if (!value || typeof value !== 'object' || seen.has(value)) return false;
-  seen.add(value);
-  const valid = Array.isArray(value)
-    ? value.every(item => isJsonValue(item, seen))
-    : Object.entries(value).every(([key, item]) => (
-      typeof key === 'string' && isJsonValue(item, seen)
-    ));
-  seen.delete(value);
-  return valid;
+;// CONCATENATED MODULE: ./src/lib/org-report.js
+// @ts-check
+/**
+ * Canonical organization report document.
+ *
+ * The public JSON document is assembled once here. Every serialization,
+ * comparison, and report-directory artifact is derived from it so the formats
+ * cannot drift apart.
+ */
+
+
+
+
+
+/**
+ * Build the plain, credential-redacted public document for an organization
+ * scan result. Paths are repository-relative to `cwd` and the value is safe to
+ * serialize with `JSON.stringify`.
+ *
+ * @param {import('./types.js').OrganizationScanResult & {comparison?: Record<string, any>}} result
+ *   Value returned by `scanOrganization`.
+ * @param {{cwd?: string, comparison?: Record<string, any>}} [options]
+ * @returns {import('./types.js').OrganizationReport}
+ */
+function org_report_buildOrganizationReport(result, {
+  cwd = process.cwd(),
+  comparison = result.comparison,
+} = {}) {
+  const report = {
+    schemaVersion: '1.0',
+    organization: result.organization,
+    analysis: result.analysis,
+    scope: result.scope,
+    coverage: result.coverage,
+    repositories: result.repositories.map(repositoryResult => ({
+      repository: repositoryResult.repository,
+      revision: repositoryResult.revision,
+      files: repositoryResult.files,
+      fileDetails: repositoryResult.fileDetails,
+      findings: repositoryResult.findings.map(finding => normalizeFinding(finding, cwd)),
+      errors: repositoryResult.errors,
+      summary: repositoryResult.summary,
+      status: repositoryResult.status,
+    })),
+    findings: result.findings.map(finding => normalizeFinding(finding, cwd)),
+    errors: result.errors,
+    summary: result.summary,
+    baseline: {
+      ...result.baseline,
+      path: result.baseline.path ? identity_canonicalPath(result.baseline.path, cwd) : null,
+    },
+    configPath: result.configPath ? identity_canonicalPath(result.configPath, cwd) : null,
+    ...(comparison ? { comparison } : {}),
+    status: result.status,
+  };
+  return JSON.parse(JSON.stringify(redactDeep(report)));
 }
 
-function org_checkpoint_isRecord(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+/**
+ * Project a report document into the labeled records shared by the TOON, text,
+ * CSV, SARIF, and HTML renderers, together with the HTML title and metadata.
+ *
+ * @param {ReturnType<typeof buildOrganizationReport>} report
+ * @param {{format: 'toon'|'text'|'csv'|'sarif'|'html'}} options
+ * @returns {{records: Array<{label: string, fields: Record<string, unknown>}>,
+ *   title: string, metadata: Record<string, unknown>}}
+ */
+function organizationReportRecords(report, { format }) {
+  const records = [];
+  if (format === 'sarif') {
+    for (const rule of listRules()) records.push({ label: 'RULE', fields: rule });
+  }
+  for (const repositoryResult of report.repositories) {
+    appendRepositoryRecords(records, repositoryResult, format);
+  }
+  records.push({
+    label: 'COVERAGE',
+    fields: {
+      complete: report.coverage.complete,
+      enumerationComplete: report.coverage.enumerationComplete,
+      selectedRepositoriesComplete: report.coverage.selectedRepositoriesComplete,
+      eligibleRepositoriesComplete: report.coverage.eligibleRepositoriesComplete,
+      limitedByMaxRepositories: report.coverage.limitedByMaxRepositories,
+      repositoriesOmittedByLimit: report.coverage.repositoriesOmittedByLimit,
+      incompleteRepositories: report.coverage.incompleteRepositories.length,
+    },
+  });
+  if (report.comparison) appendComparisonRecords(records, report.comparison);
+  records.push({
+    label: 'SUMMARY',
+    fields: { organization: report.organization, ...report.summary },
+  });
+  return {
+    records,
+    title: `Organization scan: ${report.organization}`,
+    metadata: reportMetadata(report),
+  };
+}
+
+/**
+ * @param {import('./types.js').ReportRecord[]} records
+ * @param {import('./types.js').RepositoryResult} repositoryResult
+ * @param {string} format
+ */
+function appendRepositoryRecords(records, repositoryResult, format) {
+  records.push({
+    label: 'REPOSITORY',
+    fields: {
+      repo: repositoryResult.repository.fullName,
+      visibility: repositoryResult.repository.visibility,
+      branch: repositoryResult.revision.branch,
+      commit: repositoryResult.revision.commitSha,
+      files: repositoryResult.files.length,
+      findings: repositoryResult.findings.length,
+      errors: repositoryResult.errors.length,
+      status: repositoryResult.status,
+      ...(format === 'sarif' ? { url: repositoryResult.repository.htmlUrl } : {}),
+    },
+  });
+  for (const detail of repositoryResult.fileDetails) {
+    records.push({
+      label: 'FILE',
+      fields: {
+        repo: repositoryResult.repository.fullName,
+        path: detail.path,
+        status: detail.status,
+        findings: detail.findings,
+        blobSha: detail.blobSha,
+        bytes: detail.bytes,
+        permalink: detail.permalink,
+      },
+    });
+  }
+  for (const finding of repositoryResult.findings) {
+    records.push({
+      label: 'FINDING',
+      fields: {
+        id: finding.id,
+        ...finding.fields,
+        repo: finding.repository,
+        file: finding.file,
+        path: finding.path,
+        line: finding.line,
+        url: finding.url,
+        permalink: finding.permalink,
+        ...(finding.explain ? { explain: finding.explain } : {}),
+        ...(format === 'sarif' && finding.fingerprint
+          ? { fingerprint: finding.fingerprint }
+          : {}),
+      },
+    });
+  }
+  for (const error of repositoryResult.errors) {
+    records.push({
+      label: 'ERROR',
+      fields: {
+        repo: error.repository,
+        file: error.path ? `${error.repository}/${error.path}` : undefined,
+        path: error.path,
+        permalink: error.permalink,
+        msg: error.error,
+      },
+    });
+  }
+}
+
+/**
+ * @param {import('./types.js').ReportRecord[]} records
+ * @param {Record<string, any>} comparison
+ */
+function appendComparisonRecords(records, comparison) {
+  records.push({ label: 'COMPARISON', fields: comparison.summary });
+  for (const [change, findings] of Object.entries(comparison.findings)) {
+    for (const finding of findings) {
+      records.push({
+        label: `${change.toUpperCase()}_FINDING`,
+        fields: {
+          ...finding.fields,
+          id: finding.id,
+          change,
+          type: finding.ruleId,
+          sev: finding.severity,
+          repo: finding.repository,
+          file: finding.file,
+          path: finding.path,
+          line: finding.line,
+          url: finding.url,
+          permalink: finding.permalink,
+          explain: finding.explain,
+        },
+      });
+    }
+  }
+}
+
+/** @param {import('./types.js').OrganizationReport} report */
+function reportMetadata(report) {
+  return {
+    organization: report.organization,
+    analysisGeneration: report.analysis.generation,
+    visibility: report.scope.visibility,
+    repositoryFilters: report.scope.repositories.length > 0
+      ? report.scope.repositories.join(', ')
+      : 'all eligible repositories',
+    includeArchived: report.scope.includeArchived,
+    includeDisabled: report.scope.includeDisabled,
+    includeForks: report.scope.includeForks,
+    maxRepositories: report.scope.maxRepositories ?? 'none',
+    severity: report.scope.severity ?? 'all levels',
+    baseline: report.baseline.path ?? 'none',
+    coverageComplete: report.coverage.complete,
+  };
+}
+
+/**
+ * @param {import('./types.js').OrganizationFinding} finding
+ * @param {string} cwd
+ */
+function normalizeFinding(finding, cwd) {
+  return {
+    ...finding,
+    file: identity_canonicalPath(finding.file, cwd),
+  };
 }
 
 ;// CONCATENATED MODULE: ./src/lib/path-equality.js
@@ -20624,7 +21321,7 @@ function org_checkpoint_isRecord(value) {
  * parents. Existing entries are fully resolved so a control-file symlink is
  * compared with its target rather than only with the symlink name.
  */
-async function sameFilePath(left, right) {
+async function path_equality_sameFilePath(left, right) {
   const [leftPath, rightPath] = await Promise.all([
     path_equality_canonicalPath(left),
     path_equality_canonicalPath(right),
@@ -20668,8 +21365,8 @@ function comparablePath(path) {
 
 
 
-const VISIBILITIES = new Set(['all', 'public', 'private', 'internal']);
-const ORGANIZATION_RE = /^[A-Za-z0-9_.-]+$/;
+
+
 
 /**
  * @param {object} opts
@@ -20710,29 +21407,149 @@ async function scanOrganization({
   resume = false,
   onProgress,
 } = {}) {
+  const settings = validateScanOptions({
+    organization,
+    cwd,
+    token,
+    repositories,
+    visibility,
+    includeArchived,
+    includeDisabled,
+    includeForks,
+    maxRepositories,
+    concurrency,
+    severity,
+    explain,
+    configPath,
+    baseline,
+    checkpointPath,
+    resume,
+    onProgress,
+  });
+  const startedAt = Date.now();
+  await emitProgress(onProgress, { type: 'scan-started', organization });
+  const environment = await prepareScanEnvironment(settings);
+  const loadedCheckpoint = await loadResumeState(settings, environment);
+  const selection = await selectScanRepositories(settings, environment);
+  const checkpoint = await openCheckpoint(settings, environment, loadedCheckpoint, selection);
+  const state = { settings, environment, loadedCheckpoint, selection, checkpoint };
+  const counters = await scanSelectedRepositories(state);
+
+  const result = assembleOrganizationResult(state, counters.repositoryResults);
+  await emitProgress(onProgress, {
+    type: 'scan-completed',
+    organization,
+    status: result.status,
+    total: selection.selected.length,
+    completed: counters.completed,
+    reused: counters.reused,
+    findings: result.summary.findings,
+    errors: result.summary.errors,
+    elapsedMs: Date.now() - startedAt,
+  });
+  return result;
+}
+
+/**
+ * Render an organization scan result with repository-relative paths and the
+ * selected public serialization contract.
+ *
+ * @param {Awaited<ReturnType<typeof scanOrganization>>} result
+ * @param {{format: 'toon'|'json'|'text'|'csv'|'sarif'|'html', cwd?: string,
+ *   comparison?: object}} options
+ * @returns {string}
+ */
+function renderOrganizationScan(result, {
+  format: outputFormat,
+  cwd = process.cwd(),
+  comparison = result.comparison,
+}) {
+  const report = org_report_buildOrganizationReport(result, { cwd, comparison });
+  if (outputFormat === 'json') {
+    return formatter_format('json', [], { status: report.status, json: report });
+  }
+  const { records, title, metadata } = organizationReportRecords(report, {
+    format: outputFormat,
+  });
+  return formatter_format(outputFormat, records, { status: report.status, title, metadata });
+}
+
+function validateScanOptions(settings) {
+  assertOrganizationName(settings.organization);
+  if (!VISIBILITIES.has(settings.visibility)) {
+    throw new Error(`invalid visibility: ${settings.visibility}`);
+  }
+  assertConcurrency(settings.concurrency);
+  assertMaxRepositories(settings.maxRepositories);
+  assertCheckpointOptions(settings.checkpointPath, settings.resume);
+  if (settings.onProgress !== undefined && typeof settings.onProgress !== 'function') {
+    throw new Error('onProgress must be a function');
+  }
+  return settings;
+}
+
+function assertOrganizationName(organization) {
   if (
     typeof organization !== 'string'
-    || !ORGANIZATION_RE.test(organization)
+    || !NAME_RE.test(organization)
     || organization === '.'
     || organization === '..'
   ) throw new Error('invalid organization');
-  if (!VISIBILITIES.has(visibility)) throw new Error(`invalid visibility: ${visibility}`);
+}
+
+function assertConcurrency(concurrency) {
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16) {
     throw new Error('concurrency must be an integer from 1 to 16');
   }
-  if (maxRepositories !== undefined && (!Number.isInteger(maxRepositories) || maxRepositories < 1)) {
-    throw new Error('max repositories must be a positive integer');
-  }
+}
+
+function assertMaxRepositories(maxRepositories) {
+  if (
+    maxRepositories !== undefined
+    && (!Number.isInteger(maxRepositories) || maxRepositories < 1)
+  ) throw new Error('max repositories must be a positive integer');
+}
+
+function assertCheckpointOptions(checkpointPath, resume) {
   if (checkpointPath !== undefined && (typeof checkpointPath !== 'string' || !checkpointPath)) {
     throw new Error('checkpoint path must be a non-empty string');
   }
   if (typeof resume !== 'boolean') throw new Error('resume must be a boolean');
   if (resume && !checkpointPath) throw new Error('resume requires a checkpoint path');
-  if (onProgress !== undefined && typeof onProgress !== 'function') {
-    throw new Error('onProgress must be a function');
-  }
-  const startedAt = Date.now();
-  await emitProgress(onProgress, { type: 'scan-started', organization });
+}
+
+async function loadResumeState(settings, environment) {
+  const { cwd, checkpointPath, resume, onProgress } = settings;
+  if (!resume) return { results: new Map() };
+  const loadedCheckpoint = await loadOrganizationCheckpoint({
+    path: checkpointPath,
+    cwd,
+    identity: environment.checkpointIdentity,
+  });
+  await emitProgress(onProgress, {
+    type: 'checkpoint-loaded',
+    repositories: loadedCheckpoint.results.size,
+  });
+  return loadedCheckpoint;
+}
+
+async function prepareScanEnvironment(settings) {
+  const {
+    organization,
+    cwd,
+    token,
+    repositories,
+    visibility,
+    includeArchived,
+    includeDisabled,
+    includeForks,
+    maxRepositories,
+    severity,
+    explain,
+    configPath,
+    baseline,
+    checkpointPath,
+  } = settings;
   const patterns = normalizePatterns(repositories);
   const resolvedToken = resolveToken(token);
   const config = await loadConfig({
@@ -20743,7 +21560,7 @@ async function scanOrganization({
   const baselinePath = baseline ?? config.baseline;
   const baselineData = baselinePath
     ? await loadBaseline({ path: baselinePath, cwd })
-    : { path: null, ids: new Set(), fingerprints: new Set() };
+    : emptyBaseline();
   if (checkpointPath) {
     await validateOrganizationCheckpointPath({ path: checkpointPath, cwd });
     await assertCheckpointDoesNotReplaceControlFile(checkpointPath, cwd, [
@@ -20764,15 +21581,21 @@ async function scanOrganization({
     config,
     baselineData,
   });
-  const loadedCheckpoint = resume
-    ? await loadOrganizationCheckpoint({ path: checkpointPath, cwd, identity: checkpointIdentity })
-    : { results: new Map(), migrationRequired: false };
-  if (resume) {
-    await emitProgress(onProgress, {
-      type: 'checkpoint-loaded',
-      repositories: loadedCheckpoint.results.size,
-    });
-  }
+  return { patterns, resolvedToken, config, baselineData, checkpointIdentity };
+}
+
+async function selectScanRepositories(settings, environment) {
+  const {
+    organization,
+    cwd,
+    includeArchived,
+    includeDisabled,
+    includeForks,
+    maxRepositories,
+    visibility,
+    onProgress,
+  } = settings;
+  const { patterns, resolvedToken } = environment;
   await emitProgress(onProgress, { type: 'discovery-started', organization });
   const discovered = await listOrganizationRepositories({
     organization,
@@ -20809,174 +21632,288 @@ async function scanOrganization({
     eligible: eligible.length,
     selected: selected.length,
   });
+  return { discovered, eligible, selected };
+}
 
-  const checkpointResults = new Map();
-  for (const repository of selected) {
+async function openCheckpoint(settings, environment, loadedCheckpoint, selection) {
+  const { cwd, checkpointPath, resume, onProgress } = settings;
+  const results = new Map();
+  for (const repository of selection.selected) {
     const stored = loadedCheckpoint.results.get(repository.fullName.toLowerCase());
     if (!stored) continue;
-    checkpointResults.set(repository.fullName.toLowerCase(), restoreCheckpointResult(stored, {
+    results.set(repository.fullName.toLowerCase(), restoreCheckpointResult(stored, {
       repository,
       cwd,
-      sourceUrl,
+      commitSha: null,
     }));
   }
-  const persistCheckpoint = createCheckpointWriter({
+  const persist = createCheckpointWriter({
     path: checkpointPath,
     cwd,
-    identity: checkpointIdentity,
-    results: checkpointResults,
+    identity: environment.checkpointIdentity,
+    results,
   });
-  if (checkpointPath && (!resume || loadedCheckpoint.migrationRequired)) {
-    await persistCheckpoint();
-    if (!resume) await emitProgress(onProgress, { type: 'checkpoint-created' });
+  if (checkpointPath && !resume) {
+    await persist();
+    await emitProgress(onProgress, { type: 'checkpoint-created' });
   }
+  return { results, persist };
+}
 
-  let completed = 0;
-  let reused = 0;
-  let active = 0;
-  const repositoryResults = await mapLimit(selected, concurrency, async (repository, index) => {
-    active += 1;
-    await emitProgress(onProgress, {
-      type: 'repository-started',
-      repository: repository.fullName,
-      position: index + 1,
-      total: selected.length,
-      completed,
-      active,
-      concurrency,
-    });
-    const emitPhase = phase => emitProgress(onProgress, {
-      type: 'repository-phase',
-      repository: repository.fullName,
-      position: index + 1,
-      total: selected.length,
-      completed,
-      active,
-      concurrency,
-      phase,
-    });
-    let repositoryResult;
-    let wasReused = false;
-    try {
-      await emitPhase('reading default-branch tree');
-      const workflowTree = await fetchRepositoryWorkflowTree({
-        repository,
-        token: resolvedToken,
-        cwd,
-        includePath: path => filterIgnoredPaths([
-          virtualPath(cwd, repository, path),
-        ], config, cwd).length > 0,
-        onRetry: retry => emitRetryProgress(onProgress, retry, repository.fullName),
-      });
-      const stored = loadedCheckpoint.results.get(repository.fullName.toLowerCase());
-      await emitPhase('checking resumable evidence');
-      if (stored && canReuseCheckpointResult(stored, repository, workflowTree.treeSha)) {
-        repositoryResult = restoreCheckpointResult(stored, { repository, cwd, sourceUrl });
-        wasReused = true;
-      } else {
-        await emitPhase('downloading workflow YAML');
-        const fetched = await fetchRepositoryWorkflows({
-          repository,
-          token: resolvedToken,
-          cwd,
-          workflowTree,
-          onRetry: retry => emitRetryProgress(onProgress, retry, repository.fullName),
-        });
-        const sources = fetched.sources.map(item => ({
-          file: virtualPath(cwd, repository, item.path),
-          source: item.source,
-        }));
-        await emitPhase('auditing workflows');
-        const auditResult = await auditSources({
-          cwd,
-          sources,
-          severity,
-          explain,
-          config,
-          baselineData,
-        });
-        const errors = fetched.errors.map(error => ({
-          repository: repository.fullName,
-          path: error.path,
-          error: error.error,
-        }));
-        const findings = auditResult.findings.map(finding => ({
-          ...finding,
-          repository: repository.fullName,
-          branch: repository.defaultBranch,
-          url: sourceUrl(
-            repository,
-            identity_canonicalPath(finding.file, (0,external_node_path_namespaceObject.resolve)(cwd, repository.owner, repository.name)),
-            finding.line,
-          ),
-        }));
-        repositoryResult = {
-          repository,
-          revision: {
-            branch: repository.defaultBranch,
-            treeSha: fetched.treeSha,
-          },
-          files: auditResult.files.map(file => identity_canonicalPath(
-            file,
-            (0,external_node_path_namespaceObject.resolve)(cwd, repository.owner, repository.name),
-          )),
-          findings,
-          errors,
-          summary: auditResult.summary,
-          status: auditResult.status === 'FAIL' || errors.length > 0 ? 'FAIL' : 'OK',
-        };
-      }
-    } catch (error) {
-      if (error instanceof ProgressCallbackError) throw error;
-      repositoryResult = {
-        repository,
-        revision: { branch: repository.defaultBranch, treeSha: null },
-        files: [],
-        findings: [],
-        errors: [{
-          repository: repository.fullName,
-          error: String(error.message ?? error),
-        }],
-        summary: emptySummary(),
-        status: 'FAIL',
-      };
-    }
-    if (checkpointPath) {
-      await emitPhase('writing checkpoint');
-      checkpointResults.set(repository.fullName.toLowerCase(), repositoryResult);
-      const durableRepositories = await persistCheckpoint();
-      await emitProgress(onProgress, {
-        type: 'checkpoint-written',
-        repository: repository.fullName,
-        position: index + 1,
-        total: selected.length,
-        repositories: durableRepositories,
-      });
-    }
-    completed += 1;
-    if (wasReused) reused += 1;
-    active -= 1;
-    await emitProgress(onProgress, {
-      type: 'repository-completed',
-      repository: repository.fullName,
-      position: index + 1,
-      total: selected.length,
-      completed,
-      reused: wasReused,
-      status: repositoryResult.status,
-      files: repositoryResult.files.length,
-      findings: repositoryResult.findings.length,
-      errors: repositoryResult.errors.length,
-      active,
-      concurrency,
-    });
-    return repositoryResult;
+async function scanSelectedRepositories(state) {
+  const { settings, selection } = state;
+  const counters = { completed: 0, reused: 0, active: 0 };
+  const repositoryResults = await mapLimit(
+    selection.selected,
+    settings.concurrency,
+    (repository, index) => processRepository(state, counters, repository, index),
+  );
+  return { ...counters, repositoryResults };
+}
+
+async function processRepository(state, counters, repository, index) {
+  const { settings, selection, checkpoint } = state;
+  const { onProgress, checkpointPath, concurrency } = settings;
+  const total = selection.selected.length;
+  counters.active += 1;
+  await emitProgress(onProgress, {
+    type: 'repository-started',
+    repository: repository.fullName,
+    position: index + 1,
+    total,
+    completed: counters.completed,
+    active: counters.active,
+    concurrency,
   });
+  const emitPhase = phase => emitProgress(onProgress, {
+    type: 'repository-phase',
+    repository: repository.fullName,
+    position: index + 1,
+    total,
+    completed: counters.completed,
+    active: counters.active,
+    concurrency,
+    phase,
+  });
+  const { repositoryResult, wasReused } = await scanRepository(state, repository, emitPhase);
+  if (checkpointPath) {
+    await emitPhase('writing checkpoint');
+    checkpoint.results.set(repository.fullName.toLowerCase(), repositoryResult);
+    const durableRepositories = await checkpoint.persist();
+    await emitProgress(onProgress, {
+      type: 'checkpoint-written',
+      repository: repository.fullName,
+      position: index + 1,
+      total,
+      repositories: durableRepositories,
+    });
+  }
+  counters.completed += 1;
+  if (wasReused) counters.reused += 1;
+  counters.active -= 1;
+  await emitProgress(onProgress, {
+    type: 'repository-completed',
+    repository: repository.fullName,
+    position: index + 1,
+    total,
+    completed: counters.completed,
+    reused: wasReused,
+    status: repositoryResult.status,
+    files: repositoryResult.files.length,
+    findings: repositoryResult.findings.length,
+    errors: repositoryResult.errors.length,
+    active: counters.active,
+    concurrency,
+  });
+  return repositoryResult;
+}
 
+async function scanRepository(state, repository, emitPhase) {
+  try {
+    return await readOrReuseRepository(state, repository, emitPhase);
+  } catch (error) {
+    if (error instanceof ProgressCallbackError) throw error;
+    return {
+      repositoryResult: failedRepositoryResult(repository, error),
+      wasReused: false,
+    };
+  }
+}
+
+async function readOrReuseRepository(state, repository, emitPhase) {
+  const { settings, environment, loadedCheckpoint } = state;
+  const { cwd, onProgress } = settings;
+  const { config, resolvedToken } = environment;
+  await emitPhase('reading default-branch tree');
+  const workflowTree = await fetchRepositoryWorkflowTree({
+    repository,
+    token: resolvedToken,
+    cwd,
+    includePath: path => filterIgnoredPaths([
+      virtualPath(cwd, repository, path),
+    ], config, cwd).length > 0,
+    onRetry: retry => emitRetryProgress(onProgress, retry, repository.fullName),
+  });
+  const stored = loadedCheckpoint.results.get(repository.fullName.toLowerCase());
+  await emitPhase('checking resumable evidence');
+  if (stored && canReuseCheckpointResult(stored, repository, workflowTree.treeSha)) {
+    return {
+      repositoryResult: restoreCheckpointResult(stored, {
+        repository,
+        cwd,
+        commitSha: workflowTree.commitSha,
+      }),
+      wasReused: true,
+    };
+  }
+  await emitPhase('downloading workflow YAML');
+  const fetched = await fetchRepositoryWorkflows({
+    repository,
+    token: resolvedToken,
+    cwd,
+    workflowTree,
+    onRetry: retry => emitRetryProgress(onProgress, retry, repository.fullName),
+  });
+  await emitPhase('auditing workflows');
+  return {
+    repositoryResult: await auditRepositoryResult(state, repository, fetched),
+    wasReused: false,
+  };
+}
+
+async function auditRepositoryResult(state, repository, fetched) {
+  const { cwd, severity, explain } = state.settings;
+  const { config, baselineData } = state.environment;
+  const repositoryRoot = (0,external_node_path_namespaceObject.resolve)(cwd, repository.owner, repository.name);
+  const sources = fetched.sources.map(item => ({
+    file: virtualPath(cwd, repository, item.path),
+    source: item.source,
+  }));
+  const auditResult = await auditSources({
+    cwd,
+    sources,
+    severity,
+    explain,
+    config,
+    baselineData,
+  });
+  const blobShas = new Map(fetched.entries.map(entry => [entry.path, entry.blobSha]));
+  const link = (path, line) => sourcePermalink(repository, fetched.commitSha, path, line);
+  const errors = fetched.errors.map(error => ({
+    repository: repository.fullName,
+    path: error.path,
+    error: error.error,
+    permalink: link(error.path),
+  }));
+  const findings = auditResult.findings.map(finding => {
+    const path = identity_canonicalPath(finding.file, repositoryRoot);
+    return {
+      ...finding,
+      repository: repository.fullName,
+      branch: repository.defaultBranch,
+      url: sourceUrl(repository, path, finding.line),
+      path,
+      blobSha: blobShas.get(path) ?? null,
+      permalink: link(path, finding.line),
+    };
+  });
+  return {
+    repository,
+    revision: {
+      branch: repository.defaultBranch,
+      treeSha: fetched.treeSha,
+      commitSha: fetched.commitSha,
+    },
+    files: auditResult.files.map(file => identity_canonicalPath(file, repositoryRoot)),
+    fileDetails: buildFileDetails(fetched.entries, findings, link),
+    findings,
+    errors,
+    summary: auditResult.summary,
+    status: auditResult.status === 'FAIL' || errors.length > 0 ? 'FAIL' : 'OK',
+  };
+}
+
+function buildFileDetails(entries, findings, link) {
+  const counts = new Map();
+  const parseErrors = new Set();
+  for (const finding of findings) {
+    counts.set(finding.path, (counts.get(finding.path) ?? 0) + 1);
+    if (finding.ruleId === 'parse-error') parseErrors.add(finding.path);
+  }
+  return entries
+    .map(entry => ({
+      path: entry.path,
+      blobSha: entry.blobSha,
+      bytes: entry.bytes,
+      status: fileStatus(entry, parseErrors),
+      findings: counts.get(entry.path) ?? 0,
+      permalink: link(entry.path),
+    }))
+    .sort((left, right) => comparePaths(left.path, right.path));
+}
+
+function fileStatus(entry, parseErrors) {
+  if (!entry.readable) return 'unreadable';
+  return parseErrors.has(entry.path) ? 'parse-error' : 'scanned';
+}
+
+function failedRepositoryResult(repository, error) {
+  return {
+    repository,
+    revision: { branch: repository.defaultBranch, treeSha: null, commitSha: null },
+    files: [],
+    fileDetails: [],
+    findings: [],
+    errors: [{
+      repository: repository.fullName,
+      error: String(error.message ?? error),
+    }],
+    summary: emptySummary(),
+    status: 'FAIL',
+  };
+}
+
+function assembleOrganizationResult(state, repositoryResults) {
+  const { settings, environment, selection } = state;
+  const { checkpointIdentity, patterns, baselineData, config } = environment;
   const findings = repositoryResults.flatMap(result => result.findings);
   const errors = repositoryResults.flatMap(result => result.errors);
-  const counts = summarize(findings);
-  const summary = {
+  const summary = summarizeRepositoryResults(selection, repositoryResults, findings, errors);
+  return {
+    organization: settings.organization,
+    analysis: {
+      generation: checkpointIdentity.analysisGeneration,
+      identity: (0,external_node_crypto_namespaceObject.createHash)('sha256')
+        .update(createOrganizationCheckpointArtifactKey(checkpointIdentity))
+        .digest('hex'),
+    },
+    scope: {
+      repositories: patterns,
+      visibility: settings.visibility,
+      includeArchived: settings.includeArchived,
+      includeDisabled: settings.includeDisabled,
+      includeForks: settings.includeForks,
+      maxRepositories: settings.maxRepositories ?? null,
+      concurrency: settings.concurrency,
+      severity: settings.severity ?? null,
+    },
+    coverage: describeCoverage(selection, repositoryResults),
+    repositories: repositoryResults,
+    findings,
+    errors,
+    summary,
+    baseline: {
+      path: baselineData.path,
+      suppressed: summary.suppressed,
+    },
+    configPath: config.path,
+    status: findings.length === 0 && errors.length === 0 ? 'OK' : 'FAIL',
+  };
+}
+
+function summarizeRepositoryResults(selection, repositoryResults, findings, errors) {
+  const { discovered, eligible, selected } = selection;
+  return {
     repositoriesDiscovered: discovered.length,
     repositoriesEligible: eligible.length,
     repositoriesSelected: selected.length,
@@ -20993,15 +21930,19 @@ async function scanOrganization({
     ),
     suppressed: repositoryResults.reduce((total, result) => total + result.summary.suppressed, 0),
     errors: errors.length,
-    ...counts,
+    ...summarize(findings),
   };
+}
+
+function describeCoverage(selection, repositoryResults) {
+  const { eligible, selected } = selection;
   const incompleteRepositories = repositoryResults
     .filter(repositoryResult => !repositoryCoverageComplete(repositoryResult))
     .map(repositoryResult => repositoryResult.repository.fullName)
     .sort((left, right) => left.localeCompare(right));
   const selectedRepositoriesComplete = incompleteRepositories.length === 0;
   const limitedByMaxRepositories = selected.length < eligible.length;
-  const coverage = {
+  return {
     complete: selectedRepositoriesComplete && !limitedByMaxRepositories,
     enumerationComplete: true,
     selectedRepositoriesComplete,
@@ -21010,200 +21951,6 @@ async function scanOrganization({
     repositoriesOmittedByLimit: eligible.length - selected.length,
     incompleteRepositories,
   };
-  const result = {
-    organization,
-    analysis: {
-      generation: checkpointIdentity.analysisGeneration,
-      identity: (0,external_node_crypto_namespaceObject.createHash)('sha256')
-        .update(createOrganizationCheckpointArtifactKey(checkpointIdentity))
-        .digest('hex'),
-    },
-    scope: {
-      repositories: patterns,
-      visibility,
-      includeArchived,
-      includeDisabled,
-      includeForks,
-      maxRepositories: maxRepositories ?? null,
-      concurrency,
-      severity: severity ?? null,
-    },
-    coverage,
-    repositories: repositoryResults,
-    findings,
-    errors,
-    summary,
-    baseline: {
-      path: baselineData.path,
-      suppressed: summary.suppressed,
-    },
-    configPath: config.path,
-    status: findings.length === 0 && errors.length === 0 ? 'OK' : 'FAIL',
-  };
-  await emitProgress(onProgress, {
-    type: 'scan-completed',
-    organization,
-    status: result.status,
-    total: selected.length,
-    completed,
-    reused,
-    findings: summary.findings,
-    errors: summary.errors,
-    elapsedMs: Date.now() - startedAt,
-  });
-  return result;
-}
-
-/**
- * Render an organization scan result with repository-relative paths and the
- * selected public serialization contract.
- *
- * @param {Awaited<ReturnType<typeof scanOrganization>>} result
- * @param {{format: 'toon'|'json'|'text'|'csv'|'sarif'|'html', cwd?: string,
- *   comparison?: object}} options
- * @returns {string}
- */
-function renderOrganizationScan(result, {
-  format: outputFormat,
-  cwd = process.cwd(),
-  comparison = result.comparison,
-}) {
-  if (outputFormat === 'json') {
-    return formatter_format('json', [], {
-      status: result.status,
-      json: {
-        schemaVersion: '1.0',
-        organization: result.organization,
-        analysis: result.analysis,
-        scope: result.scope,
-        coverage: result.coverage,
-        repositories: result.repositories.map(repositoryResult => ({
-          repository: repositoryResult.repository,
-          revision: repositoryResult.revision,
-          files: repositoryResult.files,
-          findings: repositoryResult.findings.map(finding => normalizeFinding(finding, cwd)),
-          errors: repositoryResult.errors,
-          summary: repositoryResult.summary,
-          status: repositoryResult.status,
-        })),
-        findings: result.findings.map(finding => normalizeFinding(finding, cwd)),
-        errors: result.errors,
-        summary: result.summary,
-        baseline: {
-          ...result.baseline,
-          path: result.baseline.path ? identity_canonicalPath(result.baseline.path, cwd) : null,
-        },
-        configPath: result.configPath ? identity_canonicalPath(result.configPath, cwd) : null,
-        ...(comparison ? { comparison } : {}),
-        status: result.status,
-      },
-    });
-  }
-
-  const records = [];
-  if (outputFormat === 'sarif') {
-    for (const rule of listRules()) records.push({ label: 'RULE', fields: rule });
-  }
-  for (const repositoryResult of result.repositories) {
-    records.push({
-      label: 'REPOSITORY',
-      fields: {
-        repo: repositoryResult.repository.fullName,
-        visibility: repositoryResult.repository.visibility,
-        branch: repositoryResult.revision.branch,
-        files: repositoryResult.files.length,
-        findings: repositoryResult.findings.length,
-        errors: repositoryResult.errors.length,
-        status: repositoryResult.status,
-      },
-    });
-    for (const finding of repositoryResult.findings) {
-      records.push({
-        label: 'FINDING',
-        fields: {
-          id: finding.id,
-          ...finding.fields,
-          repo: finding.repository,
-          file: identity_canonicalPath(finding.file, cwd),
-          line: finding.line,
-          url: finding.url,
-          ...(finding.explain ? { explain: finding.explain } : {}),
-          ...(outputFormat === 'sarif' && finding.fingerprint
-            ? { fingerprint: finding.fingerprint }
-            : {}),
-        },
-      });
-    }
-    for (const error of repositoryResult.errors) {
-      records.push({
-        label: 'ERROR',
-        fields: {
-          repo: error.repository,
-          file: error.path ? `${error.repository}/${error.path}` : undefined,
-          msg: error.error,
-        },
-      });
-    }
-  }
-  records.push({
-    label: 'COVERAGE',
-    fields: {
-      complete: result.coverage.complete,
-      enumerationComplete: result.coverage.enumerationComplete,
-      selectedRepositoriesComplete: result.coverage.selectedRepositoriesComplete,
-      eligibleRepositoriesComplete: result.coverage.eligibleRepositoriesComplete,
-      limitedByMaxRepositories: result.coverage.limitedByMaxRepositories,
-      repositoriesOmittedByLimit: result.coverage.repositoriesOmittedByLimit,
-      incompleteRepositories: result.coverage.incompleteRepositories.length,
-    },
-  });
-  if (comparison) appendComparisonRecords(records, comparison);
-  records.push({
-    label: 'SUMMARY',
-    fields: { organization: result.organization, ...result.summary },
-  });
-  return formatter_format(outputFormat, records, {
-    status: result.status,
-    title: `Organization scan: ${result.organization}`,
-    metadata: {
-      organization: result.organization,
-      analysisGeneration: result.analysis.generation,
-      visibility: result.scope.visibility,
-      repositoryFilters: result.scope.repositories.length > 0
-        ? result.scope.repositories.join(', ')
-        : 'all eligible repositories',
-      includeArchived: result.scope.includeArchived,
-      includeDisabled: result.scope.includeDisabled,
-      includeForks: result.scope.includeForks,
-      maxRepositories: result.scope.maxRepositories ?? 'none',
-      severity: result.scope.severity ?? 'all levels',
-      baseline: result.baseline.path ? identity_canonicalPath(result.baseline.path, cwd) : 'none',
-      coverageComplete: result.coverage.complete,
-    },
-  });
-}
-
-function appendComparisonRecords(records, comparison) {
-  records.push({ label: 'COMPARISON', fields: comparison.summary });
-  for (const [change, findings] of Object.entries(comparison.findings)) {
-    for (const finding of findings) {
-      records.push({
-        label: `${change.toUpperCase()}_FINDING`,
-        fields: {
-          ...finding.fields,
-          id: finding.id,
-          change,
-          type: finding.ruleId,
-          sev: finding.severity,
-          repo: finding.repository,
-          file: finding.file,
-          line: finding.line,
-          url: finding.url,
-          explain: finding.explain,
-        },
-      });
-    }
-  }
 }
 
 function selectRepositories(repositories, options) {
@@ -21219,29 +21966,6 @@ function selectRepositories(repositories, options) {
     ) return false;
     return true;
   });
-}
-
-function normalizePatterns(patterns) {
-  if (patterns === undefined) return [];
-  if (!Array.isArray(patterns) || patterns.some(pattern => typeof pattern !== 'string' || !pattern)) {
-    throw new Error('repository filters must be non-empty strings');
-  }
-  return [...new Set(patterns)];
-}
-
-function normalizeFinding(finding, cwd) {
-  return {
-    ...finding,
-    file: identity_canonicalPath(finding.file, cwd),
-  };
-}
-
-function sourceUrl(repository, path, line) {
-  if (!repository.defaultBranch) return repository.htmlUrl;
-  const encodedPath = path.split('/').map(encodeURIComponent).join('/');
-  const encodedBranch = encodeURIComponent(repository.defaultBranch);
-  const suffix = Number.isInteger(line) && line > 0 ? `#L${line}` : '';
-  return `${repository.htmlUrl}/blob/${encodedBranch}/${encodedPath}${suffix}`;
 }
 
 function virtualPath(cwd, repository, path) {
@@ -21273,7 +21997,7 @@ function repositoryCoverageComplete(repositoryResult) {
 async function assertCheckpointDoesNotReplaceControlFile(path, cwd, controlFiles) {
   const requested = (0,external_node_path_namespaceObject.resolve)(cwd, path);
   for (const controlFile of controlFiles) {
-    if (controlFile && await sameFilePath(requested, (0,external_node_path_namespaceObject.resolve)(controlFile))) {
+    if (controlFile && await path_equality_sameFilePath(requested, (0,external_node_path_namespaceObject.resolve)(controlFile))) {
       throw new Error('checkpoint path cannot replace the active config or baseline');
     }
   }
@@ -21362,6 +22086,18 @@ function hasOperationalFailure(command, result) {
 
 
 const ORGANIZATION_PROGRESS_CONTEXTS = new Set(['agent', 'auto', 'ci', 'interactive']);
+const REPORTED_SCAN_FAILURES = new WeakSet();
+
+/**
+ * Return whether a structured JSON progress channel already reported this
+ * error as a terminal `scan-failed` event, so callers do not report it twice.
+ *
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function isScanFailureReported(error) {
+  return Boolean(error) && typeof error === 'object' && REPORTED_SCAN_FAILURES.has(error);
+}
 
 /** Public organization progress modes accepted by the CLI. */
 const ORGANIZATION_PROGRESS_MODES = Object.freeze([
@@ -21369,19 +22105,7 @@ const ORGANIZATION_PROGRESS_MODES = Object.freeze([
   'plain',
   'json',
   'none',
-  'always',
-  'never',
 ]);
-
-/** Normalize compatibility aliases to the canonical progress modes. */
-function normalizeOrganizationProgressMode(mode = 'auto') {
-  if (!ORGANIZATION_PROGRESS_MODES.includes(mode)) {
-    throw new Error('progress must be auto, plain, json, none, always, or never');
-  }
-  if (mode === 'always') return 'plain';
-  if (mode === 'never') return 'none';
-  return mode;
-}
 
 /**
  * Resolve an implicit progress mode for an explicit execution context.
@@ -21392,11 +22116,13 @@ function resolveOrganizationProgressMode({
   context = 'auto',
   isTTY = false,
 } = {}) {
-  const normalized = normalizeOrganizationProgressMode(mode);
+  if (!ORGANIZATION_PROGRESS_MODES.includes(mode)) {
+    throw new Error('progress must be auto, plain, json, or none');
+  }
   if (!ORGANIZATION_PROGRESS_CONTEXTS.has(context)) {
     throw new Error('progress context must be agent, auto, ci, or interactive');
   }
-  if (normalized !== 'auto') return normalized;
+  if (mode !== 'auto') return mode;
   if (context === 'agent') return 'none';
   if (context === 'ci') return 'plain';
   if (context === 'interactive') return 'plain';
@@ -21493,8 +22219,16 @@ function createOrganizationProgressReporter({
     scheduleCleanup();
   }
 
+  function failScan(organization, error) {
+    emit({ type: 'scan-failed', organization, error: String(error?.message ?? error) });
+    if (resolvedMode === 'json' && error && typeof error === 'object') {
+      REPORTED_SCAN_FAILURES.add(error);
+    }
+  }
+
   return {
     emit,
+    failScan,
     close,
     mode: resolvedMode,
     requestedMode: mode,
@@ -21579,6 +22313,316 @@ function count(value, noun) {
   return `${value} ${noun}${value === 1 ? '' : 's'}`;
 }
 
+;// CONCATENATED MODULE: ./src/lib/destination.js
+/**
+ * Shared destination and control-file collision validation.
+ */
+
+
+
+
+
+const DEFAULT_CONFIG_PATHS = ['.actions-warden.yml', '.actions-warden.yaml'];
+
+/**
+ * Check if a path corresponds to a default workflow or composite-action path.
+ *
+ * @param {string} path
+ * @param {string} cwd
+ * @returns {boolean}
+ */
+function isDefaultWorkflowPath(path, cwd) {
+  const localPath = (0,external_node_path_namespaceObject.relative)((0,external_node_path_namespaceObject.resolve)(cwd), path).split(external_node_path_namespaceObject.sep).join('/');
+  return /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(localPath)
+    || /(^|\/)action\.ya?ml$/i.test(localPath);
+}
+
+/**
+ * Ensure destination paths cannot replace reserved config paths or default workflow paths.
+ *
+ * @param {Array<{label?: string, option?: string, path: string}>} destinations
+ * @param {string} cwd
+ */
+async function assertDestinationsUseSafeNames(destinations, cwd) {
+  await assertDestinationsDoNotReplaceControls(
+    destinations,
+    DEFAULT_CONFIG_PATHS.map(path => ({ label: 'reserved config path', path: (0,external_node_path_namespaceObject.resolve)(cwd, path) })),
+  );
+  for (const destination of destinations) {
+    if (isDefaultWorkflowPath(destination.path, cwd)) {
+      const name = destination.option || destination.label || 'destination';
+      throw new Error(`${name} cannot use a default workflow discovery path`);
+    }
+  }
+}
+
+/**
+ * Ensure destination paths do not collide with control files.
+ *
+ * @param {Array<{label?: string, option?: string, path: string}>} destinations
+ * @param {Array<{label: string, path: string|null|undefined}>} controls
+ */
+async function assertDestinationsDoNotReplaceControls(destinations, controls) {
+  for (const destination of destinations) {
+    if (!destination.path) continue;
+    for (const control of controls) {
+      if (control.path && await path_equality_sameFilePath(destination.path, (0,external_node_path_namespaceObject.resolve)(control.path))) {
+        const name = destination.option || destination.label || 'destination';
+        throw new Error(`${name} cannot replace the ${control.label}`);
+      }
+    }
+  }
+}
+
+/**
+ * Ensure multiple write destinations are distinct from each other.
+ *
+ * @param {Array<{label?: string, option?: string, path: string}>} destinations
+ */
+async function assertDestinationsAreDistinct(destinations) {
+  for (let left = 0; left < destinations.length; left += 1) {
+    for (let right = left + 1; right < destinations.length; right += 1) {
+      if (await sameFilePath(destinations[left].path, destinations[right].path)) {
+        const leftName = destinations[left].option || destinations[left].label || 'destination';
+        const rightName = destinations[right].option || destinations[right].label || 'destination';
+        throw new Error(`${leftName} and ${rightName} must use different paths`);
+      }
+    }
+  }
+}
+
+/**
+ * Validate that a write destination can be created safely.
+ *
+ * @param {{option?: string, label?: string, path: string, cwd: string}} options
+ * @returns {Promise<{option?: string, label?: string, path: string}>}
+ */
+async function validateWriteDestination({ option, label, path, cwd }) {
+  const name = option || label || 'destination';
+  if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) {
+    throw new Error(`${name} must be a non-empty path`);
+  }
+  try {
+    await writer_writeFileGuarded({ path, content: '', dryRun: true, cwd });
+    return { option, label, path: (0,external_node_path_namespaceObject.resolve)(cwd, path) };
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+      throw new Error(`parent directory for ${name} must exist`);
+    }
+    throw error;
+  }
+}
+
+;// CONCATENATED MODULE: ./src/lib/org-artifacts.js
+/**
+ * Safe organization-scan artifact defaults.
+ *
+ * There is no reliable cross-agent runtime signal, so callers select an
+ * execution context explicitly. Context controls presentation defaults only;
+ * automatic organization artifacts always derive from the same scan identity.
+ */
+
+
+
+
+
+
+
+
+
+
+
+/** Preferred execution-context environment variable. */
+const EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_CONTEXT';
+
+const EXECUTION_CONTEXTS = new Set(['agent', 'auto', 'ci', 'interactive']);
+
+const REPORT_EXTENSIONS = Object.freeze({
+  csv: 'csv',
+  html: 'html',
+  json: 'json',
+  sarif: 'sarif',
+  text: 'txt',
+  toon: 'toon',
+});
+const ARTIFACT_PREFIX = '.actions-warden-org-scan';
+
+/**
+ * Resolve CLI flag precedence over the ACTIONS_WARDEN_CONTEXT environment
+ * variable. Returns `auto` when neither selects a context.
+ */
+function resolveExecutionContext({
+  optionValue,
+  optionSource,
+  environmentValue,
+} = {}) {
+  if (optionSource === 'cli') return optionValue ? 'agent' : 'auto';
+  if (environmentValue !== undefined && String(environmentValue).trim() !== '') {
+    const context = String(environmentValue).trim().toLowerCase();
+    if (!EXECUTION_CONTEXTS.has(context)) {
+      throw new Error(
+        `${EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE} must be agent, auto, ci, or interactive`,
+      );
+    }
+    return context;
+  }
+  return 'auto';
+}
+
+/**
+ * Build stable, scope-specific paths for an organization scan.
+ *
+ * @param {object} options
+ * @param {string} options.organization
+ * @param {string} options.cwd
+ * @param {string[]} [options.repositories]
+ * @param {'all'|'public'|'private'|'internal'} options.visibility
+ * @param {boolean} options.includeArchived
+ * @param {boolean} options.includeDisabled
+ * @param {boolean} options.includeForks
+ * @param {number} [options.maxRepositories]
+ * @param {'low'|'medium'|'high'|'critical'} [options.severity]
+ * @param {boolean} options.explain
+ * @param {string|false} [options.configPath]
+ * @param {string} [options.baseline]
+ * @param {'toon'|'json'|'text'|'csv'|'sarif'|'html'} options.reportFormat
+ */
+async function createOrganizationScanArtifacts({
+  organization,
+  cwd,
+  repositories,
+  visibility,
+  includeArchived,
+  includeDisabled,
+  includeForks,
+  maxRepositories,
+  severity,
+  explain,
+  configPath,
+  baseline,
+  reportFormat,
+}) {
+  validateOrganization(organization);
+  const patterns = normalizePatterns(repositories);
+  const config = await loadConfig({
+    cwd,
+    path: configPath,
+    ruleIds: RULES.map(rule => rule.id),
+  });
+  const baselinePath = baseline ?? config.baseline;
+  const baselineData = baselinePath
+    ? await loadBaseline({ path: baselinePath, cwd })
+    : emptyBaseline();
+  const identity = createOrganizationCheckpointIdentity({
+    organization,
+    repositories: patterns,
+    visibility,
+    includeArchived,
+    includeDisabled,
+    includeForks,
+    maxRepositories,
+    severity,
+    explain,
+    config,
+    baselineData,
+  });
+  const key = createOrganizationCheckpointArtifactKey(identity);
+  const groupedKey = key.match(/.{8}/g).join('.');
+  const checkpointPath = `${ARTIFACT_PREFIX}.${groupedKey}.checkpoint.json`;
+  const reportExtension = REPORT_EXTENSIONS[reportFormat];
+  if (!reportExtension) throw new Error(`invalid organization report format: ${reportFormat}`);
+  const reportPath = `${ARTIFACT_PREFIX}.${groupedKey}.report.${reportExtension}`;
+
+  return {
+    checkpointPath,
+    reportPath,
+    resume: await pathExists((0,external_node_path_namespaceObject.resolve)(cwd, checkpointPath)),
+    configPath: config.path,
+    baselinePath: baselineData.path,
+  };
+}
+
+/**
+ * Render the bounded stdout contract emitted after an organization file report.
+ * Run provenance (tool version and timing) appears only here, never in the
+ * deterministic report, aggregate, or manifest.
+ *
+ * @param {object} options
+ * @param {Date} options.startedAt When the run began.
+ * @param {Date} options.finishedAt When the report was written.
+ */
+function renderOrganizationScanReceipt({
+  result,
+  startedAt,
+  finishedAt,
+  reportPath,
+  reportFormat,
+  checkpointPath,
+  resumed,
+  repositoriesReused = 0,
+  reportLayout = 'single',
+  reportDirectory,
+  manifestPath,
+  kind = 'actions-warden-org-scan-receipt',
+}) {
+  return format('json', [], {
+    status: result.status,
+    json: {
+      schemaVersion: '1.0',
+      kind,
+      command: 'org-scan',
+      organization: result.organization,
+      tool: { name: 'actions-warden', version: VERSION },
+      run: {
+        startedAt: startedAt.toISOString(),
+        finishedAt: finishedAt.toISOString(),
+        durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+      },
+      status: result.status,
+      summary: result.summary,
+      report: {
+        path: reportPath,
+        format: reportFormat,
+        layout: reportLayout,
+        ...(reportDirectory ? { directory: reportDirectory } : {}),
+        ...(manifestPath ? { manifest: manifestPath } : {}),
+      },
+      checkpoint: {
+        path: checkpointPath,
+        resumed,
+        repositoriesReused,
+      },
+      coverage: compactCoverage(result.coverage),
+      ...(result.comparison ? { comparison: result.comparison.summary } : {}),
+    },
+  });
+}
+
+function compactCoverage(coverage = {}) {
+  return {
+    complete: coverage.complete === true,
+    enumerationComplete: coverage.enumerationComplete === true,
+    selectedRepositoriesComplete: coverage.selectedRepositoriesComplete === true,
+    eligibleRepositoriesComplete: coverage.eligibleRepositoriesComplete === true,
+    limitedByMaxRepositories: coverage.limitedByMaxRepositories === true,
+    repositoriesOmittedByLimit: Number.isSafeInteger(coverage.repositoriesOmittedByLimit)
+      ? coverage.repositoriesOmittedByLimit
+      : 0,
+    incompleteRepositories: Array.isArray(coverage.incompleteRepositories)
+      ? coverage.incompleteRepositories.length
+      : 0,
+  };
+}
+
+function validateOrganization(organization) {
+  if (
+    typeof organization !== 'string'
+    || !NAME_RE.test(organization)
+    || organization === '.'
+    || organization === '..'
+  ) throw new Error('invalid organization');
+}
+
 ;// CONCATENATED MODULE: ./src/lib/org-report-comparison.js
 /**
  * Deterministic comparison of complete organization JSON reports.
@@ -21591,12 +22635,10 @@ function count(value, noun) {
 
 
 
+
 const MAX_ORGANIZATION_REPORT_BYTES = 256 * 1024 * 1024;
 const ANALYSIS_ID_RE = /^[0-9a-f]{64}$/;
 const FINDING_ID_RE = /^[0-9a-f]{16}$/;
-const org_report_comparison_NAME_RE = /^[A-Za-z0-9_.-]+$/;
-const org_report_comparison_SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
-const org_report_comparison_VISIBILITIES = new Set(['all', 'public', 'private', 'internal']);
 
 /**
  * Load and validate an organization JSON report from inside the working
@@ -21720,14 +22762,14 @@ function compareOrganizationReports({ previous, current }) {
 }
 
 function validateOrganizationReport(report, label) {
-  if (!org_report_comparison_isRecord(report) || report.schemaVersion !== '1.0') {
+  if (!isRecord(report) || report.schemaVersion !== '1.0') {
     throw new Error(`${label} organization report schemaVersion must be "1.0"`);
   }
   if (typeof report.organization !== 'string' || !report.organization) {
     throw new Error(`${label} organization report organization is invalid`);
   }
   if (
-    !org_report_comparison_isRecord(report.analysis)
+    !isRecord(report.analysis)
     || !Number.isSafeInteger(report.analysis.generation)
     || report.analysis.generation < 1
     || typeof report.analysis.identity !== 'string'
@@ -21744,7 +22786,7 @@ function validateOrganizationReport(report, label) {
   if (!Array.isArray(report.errors)) {
     throw new Error(`${label} organization report errors must be an array`);
   }
-  if (!org_report_comparison_isRecord(report.summary)) {
+  if (!isRecord(report.summary)) {
     throw new Error(`${label} organization report summary is invalid`);
   }
   if (!['OK', 'FAIL'].includes(report.status)) {
@@ -21781,13 +22823,13 @@ function validateOrganizationReport(report, label) {
 }
 
 function validateScope(scope, label) {
-  if (!org_report_comparison_isRecord(scope)) {
+  if (!isRecord(scope)) {
     throw new Error(`${label} organization report scope is invalid`);
   }
   if (!Array.isArray(scope.repositories) || scope.repositories.some(r => typeof r !== 'string')) {
     throw new Error(`${label} organization report scope repositories is invalid`);
   }
-  if (!org_report_comparison_VISIBILITIES.has(scope.visibility)) {
+  if (!VISIBILITIES.has(scope.visibility)) {
     throw new Error(`${label} organization report scope visibility is invalid`);
   }
   for (const flag of ['includeArchived', 'includeDisabled', 'includeForks']) {
@@ -21801,7 +22843,7 @@ function validateScope(scope, label) {
   ) {
     throw new Error(`${label} organization report scope maxRepositories is invalid`);
   }
-  if (scope.severity !== null && !org_report_comparison_SEVERITIES.has(scope.severity)) {
+  if (scope.severity !== null && !SEVERITIES.has(scope.severity)) {
     throw new Error(`${label} organization report scope severity is invalid`);
   }
   if (scope.explain !== undefined && typeof scope.explain !== 'boolean') {
@@ -21816,7 +22858,7 @@ function validateScope(scope, label) {
 }
 
 function validateCoverage(coverage, label, repositories) {
-  if (!org_report_comparison_isRecord(coverage)) {
+  if (!isRecord(coverage)) {
     throw new Error(`${label} organization report coverage is invalid`);
   }
   for (const flag of [
@@ -21866,7 +22908,7 @@ function validateCoverage(coverage, label, repositories) {
 }
 
 function validateBaselineAndConfig(report, label) {
-  if (!org_report_comparison_isRecord(report.baseline)) {
+  if (!isRecord(report.baseline)) {
     throw new Error(`${label} organization report baseline is invalid`);
   }
   if (report.baseline.path !== null && typeof report.baseline.path !== 'string') {
@@ -21883,22 +22925,22 @@ function validateBaselineAndConfig(report, label) {
 function repositoryMap(repositories, label) {
   const mapped = new Map();
   for (const result of repositories) {
-    if (!org_report_comparison_isRecord(result)) {
+    if (!isRecord(result)) {
       throw new Error(`${label} organization report contains an invalid repository result`);
     }
     const repoInfo = result.repository;
-    if (!org_report_comparison_isRecord(repoInfo) || typeof repoInfo.fullName !== 'string') {
+    if (!isRecord(repoInfo) || typeof repoInfo.fullName !== 'string') {
       throw new Error(`${label} organization report contains an invalid repository result`);
     }
     const name = repoInfo.fullName;
     const parts = name.split('/');
     if (
       parts.length !== 2
-      || parts.some(part => !org_report_comparison_NAME_RE.test(part) || part === '.' || part === '..')
+      || parts.some(part => !NAME_RE.test(part) || part === '.' || part === '..')
       || !Array.isArray(result.errors)
       || !Array.isArray(result.findings)
       || !Array.isArray(result.files)
-      || !org_report_comparison_isRecord(result.summary)
+      || !isRecord(result.summary)
       || !['OK', 'FAIL'].includes(result.status)
     ) {
       throw new Error(`${label} organization report contains an invalid repository result`);
@@ -21977,8 +23019,8 @@ function validateReportEvidence({ report, repositories, findings, label }) {
 
 function validateReportError(error, { label, expectedRepository } = {}) {
   if (
-    !org_report_comparison_isRecord(error)
-    || !org_report_comparison_isJsonValue(error)
+    !isRecord(error)
+    || !isJsonValue(error)
     || typeof error.repository !== 'string'
     || !error.repository
     || typeof error.error !== 'string'
@@ -22044,8 +23086,8 @@ function findingMap(findings, label, context = '') {
   const mapped = new Map();
   for (const finding of findings) {
     if (
-      !org_report_comparison_isRecord(finding)
-      || !org_report_comparison_isJsonValue(finding)
+      !isRecord(finding)
+      || !isJsonValue(finding)
       || typeof finding.repository !== 'string'
       || typeof finding.id !== 'string'
       || !FINDING_ID_RE.test(finding.id)
@@ -22054,11 +23096,11 @@ function findingMap(findings, label, context = '') {
           || !FINDING_ID_RE.test(finding.fingerprint)))
       || typeof finding.ruleId !== 'string'
       || !finding.ruleId
-      || !org_report_comparison_SEVERITIES.has(finding.severity)
+      || !SEVERITIES.has(finding.severity)
       || typeof finding.file !== 'string'
       || !Number.isSafeInteger(finding.line)
       || (finding.fields !== undefined
-        && (!org_report_comparison_isRecord(finding.fields) || !org_report_comparison_isJsonValue(finding.fields)))
+        && (!isRecord(finding.fields) || !isJsonValue(finding.fields)))
     ) {
       throw new Error(`${label} organization report${context} contains an invalid finding`);
     }
@@ -22082,31 +23124,13 @@ function compareFindings(left, right) {
     || left.id.localeCompare(right.id);
 }
 
-function org_report_comparison_isRecord(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function org_report_comparison_isJsonValue(value, seen = new Set()) {
-  if (value === null || ['string', 'boolean'].includes(typeof value)) return true;
-  if (typeof value === 'number') return Number.isFinite(value);
-  if (!value || typeof value !== 'object' || seen.has(value)) return false;
-  seen.add(value);
-  const valid = Array.isArray(value)
-    ? value.every(item => org_report_comparison_isJsonValue(item, seen))
-    : Object.entries(value).every(([key, item]) => (
-      typeof key === 'string' && org_report_comparison_isJsonValue(item, seen)
-    ));
-  seen.delete(value);
-  return valid;
-}
-
-;// CONCATENATED MODULE: ./src/lib/agent-mode.js
+;// CONCATENATED MODULE: ./src/lib/org-report-directory.js
 /**
- * Safe organization-scan artifact defaults.
+ * Guarded directory layout for large organization JSON reports.
  *
- * There is no reliable cross-agent runtime signal, so callers select an
- * execution context explicitly. Context controls presentation defaults only;
- * automatic organization artifacts always derive from the same scan identity.
+ * The aggregate is intentionally compact. Complete repository evidence is
+ * stored in independently hashed JSON files, and a manifest written last makes
+ * the current artifact set explicit. Existing unrelated files are preserved.
  */
 
 
@@ -22117,329 +23141,542 @@ function org_report_comparison_isJsonValue(value, seen = new Set()) {
 
 
 
-/** Legacy agent-mode environment opt-in retained for compatibility. */
-const AGENT_MODE_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_MODE';
-
-/** Preferred execution-context environment variable. */
-const EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_CONTEXT';
-
-const EXECUTION_CONTEXTS = new Set(['agent', 'auto', 'ci', 'interactive']);
-
-const agent_mode_ORGANIZATION_RE = /^[A-Za-z0-9_.-]+$/;
-const REPORT_EXTENSIONS = Object.freeze({
-  csv: 'csv',
-  html: 'html',
-  json: 'json',
-  sarif: 'sarif',
-  text: 'txt',
-  toon: 'toon',
-});
-const ARTIFACT_PREFIXES = Object.freeze({
-  agent: '.actions-warden-agent',
-  'org-scan': '.actions-warden-org-scan',
-});
+const AGGREGATE_FILENAME = 'organization-report.json';
+const COMPARISON_FILENAME = 'organization-comparison.json';
+const MANIFEST_FILENAME = 'manifest.json';
+const REPOSITORIES_DIRECTORY = 'repositories';
 
 /**
- * Resolve explicit CLI precedence over the environment opt-in.
- *
- * @param {object} options
- * @param {boolean} [options.optionValue]
- * @param {string} [options.optionSource]
- * @param {string} [options.environmentValue]
+ * Validate a future organization report directory without creating it.
+ * Existing path components and owned entries must be real directories/files,
+ * never symbolic links.
  */
-function resolveAgentMode({ optionValue, optionSource, environmentValue } = {}) {
-  if (optionSource === 'cli') return Boolean(optionValue);
-  if (environmentValue === undefined || environmentValue === '') return false;
-  if (environmentValue !== 'agent') {
-    throw new Error(`${AGENT_MODE_ENVIRONMENT_VARIABLE} must be "agent" when set`);
-  }
-  return true;
+async function validateOrganizationReportDirectory({ path, cwd = process.cwd() }) {
+  const directory = await resolveGuardedDirectory({ path, cwd, create: false });
+  await validateExistingLayout(directory);
+  return directory;
 }
 
 /**
- * Resolve CLI flag precedence over the preferred context environment variable
- * and the legacy ACTIONS_WARDEN_MODE=agent alias.
+ * Write a compact aggregate, complete per-repository JSON artifacts, optional
+ * comparison evidence, and a final integrity manifest.
  */
-function resolveExecutionContext({
-  optionValue,
-  optionSource,
-  environmentValue,
-  legacyEnvironmentValue,
-} = {}) {
-  if (optionSource === 'cli') return optionValue ? 'agent' : 'auto';
-  if (environmentValue !== undefined && String(environmentValue).trim() !== '') {
-    const context = String(environmentValue).trim().toLowerCase();
-    if (!EXECUTION_CONTEXTS.has(context)) {
-      throw new Error(
-        `${EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE} must be agent, auto, ci, or interactive`,
-      );
-    }
-    return context;
-  }
-  return resolveAgentMode({ environmentValue: legacyEnvironmentValue }) ? 'agent' : 'auto';
-}
-
-/**
- * Build stable, scope-specific paths for an organization scan.
- *
- * @param {object} options
- * @param {string} options.organization
- * @param {string} options.cwd
- * @param {string[]} [options.repositories]
- * @param {'all'|'public'|'private'|'internal'} options.visibility
- * @param {boolean} options.includeArchived
- * @param {boolean} options.includeDisabled
- * @param {boolean} options.includeForks
- * @param {number} [options.maxRepositories]
- * @param {'low'|'medium'|'high'|'critical'} [options.severity]
- * @param {boolean} options.explain
- * @param {string|false} [options.configPath]
- * @param {string} [options.baseline]
- * @param {'toon'|'json'|'text'|'csv'|'sarif'|'html'} options.reportFormat
- * @param {'agent'|'org-scan'} [options.artifactNamespace]
- */
-async function createOrganizationScanArtifacts({
-  organization,
-  cwd,
-  repositories,
-  visibility,
-  includeArchived,
-  includeDisabled,
-  includeForks,
-  maxRepositories,
-  severity,
-  explain,
-  configPath,
-  baseline,
-  reportFormat,
-  artifactNamespace = 'org-scan',
-}) {
-  validateOrganization(organization);
-  const patterns = agent_mode_normalizePatterns(repositories);
-  const config = await loadConfig({
-    cwd,
-    path: configPath,
-    ruleIds: RULES.map(rule => rule.id),
-  });
-  const baselinePath = baseline ?? config.baseline;
-  const baselineData = baselinePath
-    ? await loadBaseline({ path: baselinePath, cwd })
-    : { path: null, ids: new Set(), fingerprints: new Set() };
-  const identity = createOrganizationCheckpointIdentity({
-    organization,
-    repositories: patterns,
-    visibility,
-    includeArchived,
-    includeDisabled,
-    includeForks,
-    maxRepositories,
-    severity,
-    explain,
-    config,
-    baselineData,
-  });
-  const key = createOrganizationCheckpointArtifactKey(identity);
-  const groupedKey = key.match(/.{8}/g).join('.');
-  const prefix = ARTIFACT_PREFIXES[artifactNamespace];
-  if (!prefix) throw new Error(`invalid organization artifact namespace: ${artifactNamespace}`);
-  const checkpointPath = `${prefix}.${groupedKey}.checkpoint.json`;
-  const reportExtension = REPORT_EXTENSIONS[reportFormat];
-  if (!reportExtension) throw new Error(`invalid organization report format: ${reportFormat}`);
-  const reportPath = `${prefix}.${groupedKey}.report.${reportExtension}`;
-
-  return {
-    checkpointPath,
-    reportPath,
-    resume: await pathExists((0,external_node_path_namespaceObject.resolve)(cwd, checkpointPath)),
-    configPath: config.path,
-    baselinePath: baselineData.path,
-    identity,
-  };
-}
-
-/**
- * Render the bounded stdout contract emitted after an organization file report.
- */
-function renderOrganizationScanReceipt({
+async function writeOrganizationReportDirectory({
   result,
-  reportPath,
-  reportFormat,
-  checkpointPath,
-  resumed,
-  repositoriesReused = 0,
-  reportLayout = 'single',
-  reportDirectory,
-  manifestPath,
-  kind = 'actions-warden-org-scan-receipt',
+  path,
+  cwd = process.cwd(),
 }) {
-  return format('json', [], {
-    status: result.status,
-    json: {
-      schemaVersion: '1.0',
-      kind,
-      command: 'org-scan',
-      organization: result.organization,
-      status: result.status,
-      summary: result.summary,
-      report: {
-        path: reportPath,
-        format: reportFormat,
-        layout: reportLayout,
-        ...(reportDirectory ? { directory: reportDirectory } : {}),
-        ...(manifestPath ? { manifest: manifestPath } : {}),
-      },
-      checkpoint: {
-        path: checkpointPath,
-        resumed,
-        repositoriesReused,
-      },
-      coverage: compactCoverage(result.coverage),
-      ...(result.comparison ? { comparison: result.comparison.summary } : {}),
-    },
-  });
-}
+  const directory = await resolveGuardedDirectory({ path, cwd, create: true });
+  await validateExistingLayout(directory);
+  const repositoriesDirectory = join(directory, REPOSITORIES_DIRECTORY);
+  await ensureDirectory(repositoriesDirectory);
 
-function compactCoverage(coverage = {}) {
+  const complete = buildOrganizationReport(result, { cwd });
+  const repositoryArtifacts = [];
+  const compactRepositories = [];
+  for (const repositoryResult of complete.repositories) {
+    const artifactName = repositoryArtifactName(repositoryResult.repository);
+    const artifactPath = join(repositoriesDirectory, artifactName);
+    const relativePath = `${REPOSITORIES_DIRECTORY}/${artifactName}`;
+    const content = renderJson({
+      schemaVersion: '1.0',
+      kind: 'actions-warden-org-scan-repository',
+      organization: complete.organization,
+      analysis: complete.analysis,
+      scope: complete.scope,
+      repository: repositoryResult,
+      status: repositoryResult.status,
+    });
+    await writeFileGuarded({ path: artifactPath, content, dryRun: false, cwd });
+    const artifact = integrity(relativePath, content);
+    repositoryArtifacts.push({
+      repository: repositoryResult.repository.fullName,
+      ...artifact,
+    });
+    compactRepositories.push({
+      repository: repositoryResult.repository,
+      revision: repositoryResult.revision,
+      summary: repositoryResult.summary,
+      status: repositoryResult.status,
+      files: repositoryResult.files.length,
+      findings: repositoryResult.findings.length,
+      errors: repositoryResult.errors.length,
+      artifact,
+    });
+  }
+
+  let comparisonArtifact;
+  if (complete.comparison) {
+    const content = renderJson(complete.comparison);
+    await writeFileGuarded({
+      path: join(directory, COMPARISON_FILENAME),
+      content,
+      dryRun: false,
+      cwd,
+    });
+    comparisonArtifact = integrity(COMPARISON_FILENAME, content);
+  }
+
+  const aggregate = {
+    schemaVersion: '1.0',
+    kind: 'actions-warden-org-scan-directory',
+    organization: complete.organization,
+    analysis: complete.analysis,
+    scope: complete.scope,
+    coverage: complete.coverage,
+    repositories: compactRepositories,
+    summary: complete.summary,
+    baseline: complete.baseline,
+    configPath: complete.configPath,
+    ...(complete.comparison ? {
+      comparison: {
+        summary: complete.comparison.summary,
+        artifact: comparisonArtifact,
+      },
+    } : {}),
+    status: complete.status,
+  };
+  const aggregateContent = renderJson(aggregate);
+  await writeFileGuarded({
+    path: join(directory, AGGREGATE_FILENAME),
+    content: aggregateContent,
+    dryRun: false,
+    cwd,
+  });
+  const aggregateArtifact = integrity(AGGREGATE_FILENAME, aggregateContent);
+  const manifest = {
+    schemaVersion: '1.0',
+    kind: 'actions-warden-org-scan-manifest',
+    organization: complete.organization,
+    analysis: complete.analysis,
+    report: aggregateArtifact,
+    repositories: repositoryArtifacts,
+    ...(comparisonArtifact ? { comparison: comparisonArtifact } : {}),
+    status: complete.status,
+  };
+  await writeFileGuarded({
+    path: join(directory, MANIFEST_FILENAME),
+    content: renderJson(manifest),
+    dryRun: false,
+    cwd,
+  });
+
   return {
-    complete: coverage.complete === true,
-    enumerationComplete: coverage.enumerationComplete === true,
-    selectedRepositoriesComplete: coverage.selectedRepositoriesComplete === true,
-    eligibleRepositoriesComplete: coverage.eligibleRepositoriesComplete === true,
-    limitedByMaxRepositories: coverage.limitedByMaxRepositories === true,
-    repositoriesOmittedByLimit: Number.isSafeInteger(coverage.repositoriesOmittedByLimit)
-      ? coverage.repositoriesOmittedByLimit
-      : 0,
-    incompleteRepositories: Array.isArray(coverage.incompleteRepositories)
-      ? coverage.incompleteRepositories.length
-      : 0,
+    directory: canonicalPath(directory, cwd),
+    reportPath: canonicalPath(join(directory, AGGREGATE_FILENAME), cwd),
+    manifestPath: canonicalPath(join(directory, MANIFEST_FILENAME), cwd),
+    repositories: repositoryArtifacts.length,
   };
 }
 
-function validateOrganization(organization) {
-  if (
-    typeof organization !== 'string'
-    || !agent_mode_ORGANIZATION_RE.test(organization)
-    || organization === '.'
-    || organization === '..'
-  ) throw new Error('invalid organization');
-}
-
-function agent_mode_normalizePatterns(patterns) {
-  if (patterns === undefined) return [];
-  if (!Array.isArray(patterns) || patterns.some(pattern => typeof pattern !== 'string' || !pattern)) {
-    throw new Error('repository filters must be non-empty strings');
+async function resolveGuardedDirectory({ path, cwd, create }) {
+  if (typeof path !== 'string' || !path || path.includes('\0')) {
+    throw new Error('--report-dir must be a non-empty path');
   }
-  return [...new Set(patterns)];
+  const requestedRoot = (0,external_node_path_namespaceObject.resolve)(cwd);
+  const requested = (0,external_node_path_namespaceObject.resolve)(requestedRoot, path);
+  if (!(0,external_node_path_namespaceObject.isAbsolute)(path) && org_report_directory_isOutside((0,external_node_path_namespaceObject.relative)(requestedRoot, requested))) {
+    throw new Error(`refusing to write outside working directory: ${path}`);
+  }
+  const root = await (0,promises_namespaceObject.realpath)(requestedRoot);
+  const lexicalRelative = (0,external_node_path_namespaceObject.relative)(requestedRoot, requested);
+  if (org_report_directory_isOutside(lexicalRelative)) {
+    throw new Error(`refusing to write outside working directory: ${path}`);
+  }
+  if (lexicalRelative === '') {
+    throw new Error('--report-dir must be a dedicated subdirectory inside the working directory');
+  }
+  let cursor = root;
+  for (const segment of lexicalRelative.split(external_node_path_namespaceObject.sep).filter(Boolean)) {
+    cursor = (0,external_node_path_namespaceObject.join)(cursor, segment);
+    try {
+      const metadata = await (0,promises_namespaceObject.lstat)(cursor);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+        throw new Error(`organization report path is not a regular directory: ${cursor}`);
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      if (create) await (0,promises_namespaceObject.mkdir)(cursor, { mode: 0o700 });
+    }
+  }
+  // Keep the caller's lexical root for stable workspace-relative receipt
+  // paths. Every component above was still checked through the real root.
+  return requested;
 }
 
-async function pathExists(path) {
+async function validateExistingLayout(directory) {
   try {
-    await (0,promises_namespaceObject.lstat)(path);
-    return true;
+    const metadata = await (0,promises_namespaceObject.lstat)(directory);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error(`organization report path is not a regular directory: ${directory}`);
+    }
   } catch (error) {
-    if (error.code === 'ENOENT') return false;
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  for (const name of [AGGREGATE_FILENAME, COMPARISON_FILENAME, MANIFEST_FILENAME]) {
+    await validateOptionalFile((0,external_node_path_namespaceObject.join)(directory, name));
+  }
+  const repositoriesDirectory = (0,external_node_path_namespaceObject.join)(directory, REPOSITORIES_DIRECTORY);
+  try {
+    const metadata = await (0,promises_namespaceObject.lstat)(repositoriesDirectory);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error(`organization report repositories path is unsafe: ${repositoriesDirectory}`);
+    }
+    const entries = await (0,promises_namespaceObject.readdir)(repositoriesDirectory, { withFileTypes: true });
+    if (entries.some(entry => entry.isSymbolicLink() || !entry.isFile())) {
+      throw new Error(`organization report repositories contain an unsafe entry: ${repositoriesDirectory}`);
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
+async function validateOptionalFile(path) {
+  try {
+    const metadata = await (0,promises_namespaceObject.lstat)(path);
+    if (metadata.isSymbolicLink() || !metadata.isFile()) {
+      throw new Error(`organization report artifact is not a regular file: ${path}`);
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
+async function ensureDirectory(path) {
+  try {
+    const metadata = await lstat(path);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error(`organization report path is not a regular directory: ${path}`);
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    await mkdir(path, { mode: 0o700 });
+  }
+}
+
+function repositoryArtifactName(repository) {
+  const name = String(repository?.name ?? 'repository').toLowerCase();
+  const safeName = /^[a-z0-9_.-]+$/.test(name) ? name : 'repository';
+  const hash = createHash('sha256')
+    .update(String(repository?.fullName ?? '').toLowerCase())
+    .digest('hex')
+    .slice(0, 16);
+  return `${safeName}.${hash}.json`;
+}
+
+function integrity(path, content) {
+  return {
+    path,
+    bytes: Buffer.byteLength(content),
+    sha256: createHash('sha256').update(content).digest('hex'),
+  };
+}
+
+function org_report_directory_isOutside(value) {
+  return value === '..' || value.startsWith(`..${external_node_path_namespaceObject.sep}`) || (0,external_node_path_namespaceObject.isAbsolute)(value);
+}
+
+;// CONCATENATED MODULE: ./src/lib/org-run.js
+// @ts-check
+/**
+ * Organization scan runner shared by the CLI and the GitHub Action.
+ *
+ * The runner owns everything between parsed adapter options and a finished
+ * scan: automatic artifact names, checkpoint selection, every destination and
+ * control-file check (all before the first network request), previous-report
+ * loading, the scan, reused-repository counting, and comparison. Adapters keep
+ * input parsing and output.
+ */
+
+
+
+
+
+
+
+
+
+
+/**
+ * @typedef {Awaited<ReturnType<typeof createOrganizationScanArtifacts>>} ScanArtifacts
+ * @typedef {{option?: string, label?: string, path: string}} Destination
+ * @typedef {{directory: string|null, outputPath: string|undefined,
+ *   destination: Destination|null}} ReportDestination
+ * @typedef {{path: string|undefined, resume: boolean,
+ *   destination: Destination|null}} CheckpointSelection
+ * @typedef {{emit: (event: import('./types.js').ScanProgressEvent) => unknown,
+ *   failScan: (organization: string, error: unknown) => void}} ProgressChannel
+ */
+
+/**
+ * @typedef {object} OrganizationRunOptions
+ * @property {Omit<import('./types.js').OrganizationScanOptions,
+ *   'checkpointPath'|'resume'|'onProgress'>} scan Options for `scanOrganization`; the
+ *   runner supplies the checkpoint, resume flag, and progress callback.
+ * @property {(options: import('./types.js').OrganizationScanOptions) =>
+ *   Promise<import('./types.js').OrganizationScanResult>} scanOrganization The scan
+ *   implementation. Callers inject it so this library module does not depend on
+ *   `src/commands/`.
+ * @property {'toon'|'json'|'text'|'csv'|'sarif'|'html'} format Report format.
+ * @property {'file'|'stdout'} output Whether the report is saved or printed.
+ * @property {string} [outputPath] Explicit report path; defaults to the automatic one.
+ * @property {string} [reportDirectory] Dedicated report directory, instead of one file.
+ * @property {string} [checkpointPath] Explicit checkpoint to create or resume.
+ * @property {string} [resumePath] Explicit checkpoint that must be resumed.
+ * @property {boolean} [fresh] Replace rather than resume the selected checkpoint.
+ * @property {boolean} [autoCheckpoint] Use the scope-keyed automatic checkpoint (default true).
+ * @property {string} [previousReportPath] Prior organization JSON report to compare against.
+ * @property {{output: string, checkpoint: string, resume: string}} labels Option names
+ *   used in destination error messages, such as `--checkpoint` or `checkpoint-path`.
+ * @property {() => ProgressChannel} openProgress Called once, after preflight and
+ *   before the scan, to obtain the progress reporter.
+ */
+
+/**
+ * Run a guarded organization scan: resolve artifacts, validate every
+ * destination, load any previous report, scan, and attach the comparison.
+ *
+ * @param {OrganizationRunOptions} options
+ * @returns {Promise<{result: object, reportPath: string|undefined,
+ *   checkpointPath: string|null, resumed: boolean, repositoriesReused: number,
+ *   outputDestination: object|null, checkpointDestination: object|null,
+ *   reportDirectory: string|null}>}
+ */
+async function runOrganizationScan(options) {
+  const { scan, format } = options;
+  const artifacts = await createOrganizationScanArtifacts({ ...scan, reportFormat: format });
+  const report = await selectReportDestination(options, artifacts);
+  const checkpoint = await selectCheckpoint(options, artifacts);
+  const previousPath = options.previousReportPath
+    ? (0,external_node_path_namespaceObject.resolve)(scan.cwd, options.previousReportPath)
+    : null;
+  await assertNoDestinationCollisions({ artifacts, report, checkpoint, previousPath, scan });
+  const previousReport = options.previousReportPath
+    ? await loadOrganizationReport({ path: options.previousReportPath, cwd: scan.cwd })
+    : null;
+
+  const progress = options.openProgress();
+  const { result, repositoriesReused } = await scanWithProgress(options, checkpoint, progress);
+  await assertDestinationsDoNotReplaceControls(
+    report.destination ? [report.destination] : [],
+    [
+      { label: 'active config', path: result.configPath },
+      { label: 'active baseline', path: result.baseline.path },
+      { label: 'previous report', path: previousPath },
+    ],
+  );
+  if (previousReport) {
+    result.comparison = compareOrganizationReports({
+      previous: previousReport,
+      current: org_report_buildOrganizationReport(result, { cwd: scan.cwd }),
+    });
+  }
+  return {
+    result,
+    reportPath: report.outputPath,
+    checkpointPath: checkpoint.path ?? null,
+    resumed: checkpoint.resume,
+    repositoriesReused,
+    outputDestination: report.destination,
+    checkpointDestination: checkpoint.destination,
+    reportDirectory: report.directory,
+  };
+}
+
+/**
+ * @param {OrganizationRunOptions} options
+ * @param {ScanArtifacts} artifacts
+ * @returns {Promise<ReportDestination>}
+ */
+async function selectReportDestination(options, artifacts) {
+  const { cwd } = options.scan;
+  if (options.reportDirectory) {
+    const directory = await validateOrganizationReportDirectory({
+      path: options.reportDirectory,
+      cwd,
+    });
+    assertSafeReportDirectoryName(directory, cwd);
+    return { directory, outputPath: undefined, destination: null };
+  }
+  if (options.output !== 'file') {
+    return { directory: null, outputPath: undefined, destination: null };
+  }
+  const outputPath = options.outputPath ?? artifacts.reportPath;
+  const destination = await validateWriteDestination({
+    label: options.labels.output,
+    path: outputPath,
+    cwd,
+  });
+  await assertDestinationsUseSafeNames([destination], cwd);
+  return { directory: null, outputPath, destination };
+}
+
+/**
+ * @param {OrganizationRunOptions} options
+ * @param {ScanArtifacts} artifacts
+ * @returns {Promise<CheckpointSelection>}
+ */
+async function selectCheckpoint(options, artifacts) {
+  const { cwd } = options.scan;
+  const selection = await chooseCheckpoint(options, artifacts);
+  if (!selection) return { path: undefined, resume: false, destination: null };
+  const destination = await validateWriteDestination({
+    label: selection.label,
+    path: selection.path,
+    cwd,
+  });
+  await assertDestinationsUseSafeNames([destination], cwd);
+  return { ...selection, destination };
+}
+
+/**
+ * @param {OrganizationRunOptions} options
+ * @param {ScanArtifacts} artifacts
+ * @returns {Promise<{path: string, resume: boolean, label: string}|null>}
+ */
+async function chooseCheckpoint(options, artifacts) {
+  const { labels, fresh, resumePath, checkpointPath, autoCheckpoint = true } = options;
+  if (resumePath) return { path: resumePath, resume: true, label: labels.resume };
+  if (checkpointPath) {
+    const exists = await pathExists((0,external_node_path_namespaceObject.resolve)(options.scan.cwd, checkpointPath));
+    return { path: checkpointPath, resume: !fresh && exists, label: labels.checkpoint };
+  }
+  if (!autoCheckpoint) return null;
+  return {
+    path: artifacts.checkpointPath,
+    resume: !fresh && artifacts.resume,
+    label: labels.checkpoint,
+  };
+}
+
+/**
+ * @param {{artifacts: ScanArtifacts, report: ReportDestination,
+ *   checkpoint: CheckpointSelection, previousPath: string|null,
+ *   scan: OrganizationRunOptions['scan']}} state
+ */
+async function assertNoDestinationCollisions({
+  artifacts,
+  report,
+  checkpoint,
+  previousPath,
+  scan,
+}) {
+  const output = report.destination;
+  const saved = checkpoint.destination;
+  await assertDifferentPaths(
+    saved?.path,
+    output?.path,
+    'checkpoint and report output paths must be different',
+  );
+  await assertDifferentPaths(
+    previousPath,
+    saved?.path,
+    'checkpoint and previous report paths must be different',
+  );
+  await assertDifferentPaths(
+    previousPath,
+    output?.path,
+    'output and previous report paths must be different',
+  );
+  const controls = [
+    { label: 'active config', path: artifacts.configPath },
+    { label: 'active baseline', path: artifacts.baselinePath },
+  ];
+  const destinations = [];
+  if (output) destinations.push(output);
+  if (saved) destinations.push(saved);
+  await assertDestinationsDoNotReplaceControls(destinations, controls);
+  if (report.directory) {
+    assertDirectoryDoesNotOverlapControls(report.directory, [
+      { label: 'checkpoint', path: saved?.path },
+      ...controls,
+      { label: 'previous report', path: previousPath },
+      ...DEFAULT_CONFIG_PATHS.map(path => ({
+        label: 'reserved config path',
+        path: (0,external_node_path_namespaceObject.resolve)(scan.cwd, path),
+      })),
+    ]);
+  }
+}
+
+/**
+ * @param {string|null|undefined} left
+ * @param {string|null|undefined} right
+ * @param {string} message
+ */
+async function assertDifferentPaths(left, right, message) {
+  if (left && right && await path_equality_sameFilePath(left, right)) throw new Error(message);
+}
+
+/**
+ * @param {OrganizationRunOptions} options
+ * @param {CheckpointSelection} checkpoint
+ * @param {ProgressChannel} progress
+ * @returns {Promise<{result: import('./types.js').OrganizationScanResult,
+ *   repositoriesReused: number}>}
+ */
+async function scanWithProgress(options, checkpoint, progress) {
+  let repositoriesReused = 0;
+  try {
+    const result = await options.scanOrganization({
+      ...options.scan,
+      checkpointPath: checkpoint.path,
+      resume: checkpoint.resume,
+      onProgress: event => {
+        if (event.type === 'repository-completed' && event.reused) repositoriesReused += 1;
+        progress.emit(event);
+      },
+    });
+    return { result, repositoriesReused };
+  } catch (error) {
+    progress.failScan(options.scan.organization, error);
     throw error;
   }
 }
 
-;// CONCATENATED MODULE: ./src/lib/destination.js
 /**
- * Shared destination and control-file collision validation.
- */
-
-
-
-
-
-const DEFAULT_CONFIG_PATHS = ['.actions-warden.yml', '.actions-warden.yaml'];
-
-/**
- * Check if a path corresponds to a default workflow or composite-action path.
- *
  * @param {string} path
  * @param {string} cwd
- * @returns {boolean}
  */
-function isDefaultWorkflowPath(path, cwd) {
+function assertSafeReportDirectoryName(path, cwd) {
   const localPath = (0,external_node_path_namespaceObject.relative)((0,external_node_path_namespaceObject.resolve)(cwd), path).split(external_node_path_namespaceObject.sep).join('/');
-  return /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(localPath)
-    || /(^|\/)action\.ya?ml$/i.test(localPath);
-}
-
-/**
- * Ensure destination paths cannot replace reserved config paths or default workflow paths.
- *
- * @param {Array<{label?: string, option?: string, path: string}>} destinations
- * @param {string} cwd
- */
-async function assertDestinationsUseSafeNames(destinations, cwd) {
-  await assertDestinationsDoNotReplaceControls(
-    destinations,
-    DEFAULT_CONFIG_PATHS.map(path => ({ label: 'reserved config path', path: (0,external_node_path_namespaceObject.resolve)(cwd, path) })),
-  );
-  for (const destination of destinations) {
-    if (isDefaultWorkflowPath(destination.path, cwd)) {
-      const name = destination.option || destination.label || 'destination';
-      throw new Error(`${name} cannot use a default workflow discovery path`);
-    }
+  if (
+    localPath === '.github/workflows'
+    || localPath.startsWith('.github/workflows/')
+    || localPath === '.github/actions'
+    || localPath.startsWith('.github/actions/')
+    || /(^|\/)action\.ya?ml(?:\/|$)/i.test(localPath)
+  ) {
+    throw new Error('--report-dir cannot use a workflow discovery path');
   }
 }
 
 /**
- * Ensure destination paths do not collide with control files.
- *
- * @param {Array<{label?: string, option?: string, path: string}>} destinations
+ * @param {string} directory
  * @param {Array<{label: string, path: string|null|undefined}>} controls
  */
-async function assertDestinationsDoNotReplaceControls(destinations, controls) {
-  for (const destination of destinations) {
-    if (!destination.path) continue;
-    for (const control of controls) {
-      if (control.path && await sameFilePath(destination.path, (0,external_node_path_namespaceObject.resolve)(control.path))) {
-        const name = destination.option || destination.label || 'destination';
-        throw new Error(`${name} cannot replace the ${control.label}`);
-      }
+function assertDirectoryDoesNotOverlapControls(directory, controls) {
+  for (const control of controls) {
+    if (!control.path) continue;
+    const directoryPath = (0,external_node_path_namespaceObject.resolve)(directory);
+    const controlPath = (0,external_node_path_namespaceObject.resolve)(control.path);
+    const controlFromDirectory = (0,external_node_path_namespaceObject.relative)(directoryPath, controlPath);
+    const directoryFromControl = (0,external_node_path_namespaceObject.relative)(controlPath, directoryPath);
+    if (isInsideOrSame(controlFromDirectory) || isInsideOrSame(directoryFromControl)) {
+      throw new Error(`--report-dir cannot overlap the ${control.label}`);
     }
   }
 }
 
-/**
- * Ensure multiple write destinations are distinct from each other.
- *
- * @param {Array<{label?: string, option?: string, path: string}>} destinations
- */
-async function assertDestinationsAreDistinct(destinations) {
-  for (let left = 0; left < destinations.length; left += 1) {
-    for (let right = left + 1; right < destinations.length; right += 1) {
-      if (await sameFilePath(destinations[left].path, destinations[right].path)) {
-        const leftName = destinations[left].option || destinations[left].label || 'destination';
-        const rightName = destinations[right].option || destinations[right].label || 'destination';
-        throw new Error(`${leftName} and ${rightName} must use different paths`);
-      }
-    }
-  }
+/** @param {string} path */
+function isInsideOrSame(path) {
+  return path === '' || (!isOutsidePath(path) && !(0,external_node_path_namespaceObject.isAbsolute)(path));
 }
 
-/**
- * Validate that a write destination can be created safely.
- *
- * @param {{option?: string, label?: string, path: string, cwd: string}} options
- * @returns {Promise<{option?: string, label?: string, path: string}>}
- */
-async function validateWriteDestination({ option, label, path, cwd }) {
-  const name = option || label || 'destination';
-  if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) {
-    throw new Error(`${name} must be a non-empty path`);
-  }
-  try {
-    await writeFileGuarded({ path, content: '', dryRun: true, cwd });
-    return { option, label, path: (0,external_node_path_namespaceObject.resolve)(cwd, path) };
-  } catch (error) {
-    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
-      throw new Error(`parent directory for ${name} must exist`);
-    }
-    throw error;
-  }
+/** @param {string} path */
+function isOutsidePath(path) {
+  return path === '..' || path.startsWith(`..${external_node_path_namespaceObject.sep}`);
 }
 
 ;// CONCATENATED MODULE: ./src/lib/action-summary.js
@@ -22456,8 +23693,11 @@ async function validateWriteDestination({ option, label, path, cwd }) {
 
 
 
-const action_summary_SEVERITIES = ['critical', 'high', 'medium', 'low'];
-const action_summary_SEVERITY_ORDER = new Map(action_summary_SEVERITIES.map((severity, index) => [severity, index]));
+
+const SEVERITIES_DESCENDING = [...SEVERITY_LEVELS].reverse();
+const action_summary_SEVERITY_ORDER = new Map(
+  SEVERITIES_DESCENDING.map((severity, index) => [severity, index]),
+);
 const MAX_ROWS_PER_SECTION = 10;
 const MAX_CELL_LENGTH = 240;
 
@@ -23070,7 +24310,7 @@ function normalizeSeverity(value) {
 }
 
 function severityRank(value) {
-  return action_summary_SEVERITY_ORDER.get(value) ?? action_summary_SEVERITIES.length;
+  return action_summary_SEVERITY_ORDER.get(value) ?? SEVERITIES_DESCENDING.length;
 }
 
 function array(value) {
@@ -23109,17 +24349,15 @@ function truncate(value, maxLength) {
 
 
 
+
 const LEVEL_ORDER = new Map([
   ['error', 0],
   ['warning', 1],
   ['notice', 2],
 ]);
-const annotations_SEVERITY_ORDER = new Map([
-  ['critical', 0],
-  ['high', 1],
-  ['medium', 2],
-  ['low', 3],
-]);
+const annotations_SEVERITY_ORDER = new Map(
+  [...SEVERITY_LEVELS].reverse().map((severity, index) => [severity, index]),
+);
 const annotations_RULE_DESCRIPTIONS = new Map(
   listRules().map(rule => [rule.id, rule.description]),
 );
@@ -23374,49 +24612,71 @@ function annotations_truncate(value, maxLength) {
 
 
 
-
 const FORMATS = new Set(['toon', 'json', 'text', 'csv', 'sarif', 'html']);
 const MODES = new Set(['major', 'minor', 'patch']);
-const action_SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
-const action_VISIBILITIES = new Set(['all', 'public', 'private', 'internal']);
 
 async function main() {
+  const inputs = readInputs();
+  assertInputCombinations(inputs);
+  const outcome = await runCommand(inputs);
+  await publishOutcome(inputs, outcome);
+}
+
+function readInputs() {
   const command = input('command') || 'audit';
   const requestedFormat = input('format') || 'auto';
   const format = requestedFormat === 'auto'
     ? (command === 'org-scan' ? 'json' : 'toon')
     : requestedFormat;
-  const cwd = (0,external_node_path_namespaceObject.resolve)(input('working-directory') || process.env.GITHUB_WORKSPACE || process.cwd());
-  const workflows = parseStringList(input('workflow'), 'workflow');
-  const token = input('token') || undefined;
-  const severity = optionalChoice(input('severity'), action_SEVERITIES, 'severity');
-  const mode = choice(input('mode') || 'minor', MODES, 'mode');
-  const minAgeDays = nonNegativeInteger(input('min-age') || '7', 'min-age');
-  const explain = booleanInput('explain', false);
-  const offline = booleanInput('offline', false);
-  const write = booleanInput('write', false);
-  const failOnFindings = booleanInput('fail-on-findings', true);
-  const annotationsEnabled = booleanInput('annotations', true);
-  const fix = input('fix') || undefined;
-  const configPath = input('config') || undefined;
-  const ignoreConfig = booleanInput('ignore-config', false);
-  const baseline = input('baseline') || undefined;
-  const organization = input('organization') || undefined;
-  const repositories = parseStringList(input('repository'), 'repository');
-  const visibility = choice(input('visibility') || 'all', action_VISIBILITIES, 'visibility');
-  const includeArchived = booleanInput('include-archived', false);
-  const includeDisabled = booleanInput('include-disabled', false);
-  const includeForks = booleanInput('include-forks', false);
-  const maxRepositories = optionalPositiveInteger(input('max-repos'), 'max-repos');
-  const concurrency = action_positiveInteger(input('concurrency') || '4', 'concurrency');
-  const configuredCheckpointPath = input('checkpoint-path') || undefined;
-  const resumeFrom = input('resume-from') || undefined;
-  const previousReportPath = input('previous-report') || undefined;
-  const progress = booleanInput('progress', true);
-  const fresh = booleanInput('fresh', false);
-  const autoCheckpoint = booleanInput('auto-checkpoint', true);
-  let requestedOutput = input('output-path') || undefined;
+  return {
+    command,
+    format,
+    ...readRepositoryInputs(),
+    ...readOrganizationInputs(),
+    requestedOutput: input('output-path') || undefined,
+  };
+}
 
+function readRepositoryInputs() {
+  return {
+    cwd: (0,external_node_path_namespaceObject.resolve)(input('working-directory') || process.env.GITHUB_WORKSPACE || process.cwd()),
+    workflows: parseStringList(input('workflow'), 'workflow'),
+    token: input('token') || undefined,
+    severity: optionalChoice(input('severity'), SEVERITIES, 'severity'),
+    mode: choice(input('mode') || 'minor', MODES, 'mode'),
+    minAgeDays: nonNegativeInteger(input('min-age') || '7', 'min-age'),
+    explain: booleanInput('explain', false),
+    offline: booleanInput('offline', false),
+    write: booleanInput('write', false),
+    failOnFindings: booleanInput('fail-on-findings', true),
+    annotationsEnabled: booleanInput('annotations', true),
+    fix: input('fix') || undefined,
+    configPath: input('config') || undefined,
+    ignoreConfig: booleanInput('ignore-config', false),
+    baseline: input('baseline') || undefined,
+  };
+}
+
+function readOrganizationInputs() {
+  return {
+    organization: input('organization') || undefined,
+    repositories: parseStringList(input('repository'), 'repository'),
+    visibility: choice(input('visibility') || 'all', VISIBILITIES, 'visibility'),
+    includeArchived: booleanInput('include-archived', false),
+    includeDisabled: booleanInput('include-disabled', false),
+    includeForks: booleanInput('include-forks', false),
+    maxRepositories: optionalPositiveInteger(input('max-repos'), 'max-repos'),
+    concurrency: action_positiveInteger(input('concurrency') || '4', 'concurrency'),
+    checkpointPath: input('checkpoint-path') || undefined,
+    resumeFrom: input('resume-from') || undefined,
+    previousReportPath: input('previous-report') || undefined,
+    progress: booleanInput('progress', true),
+    fresh: booleanInput('fresh', false),
+    autoCheckpoint: booleanInput('auto-checkpoint', true),
+  };
+}
+
+function assertInputCombinations({ command, format, requestedOutput, previousReportPath }) {
   if (!FORMATS.has(format)) throw new Error(`invalid format: ${format}`);
   if (command !== 'org-scan' && ['csv', 'html'].includes(format) && !requestedOutput) {
     throw new Error(`output-path is required when format is ${format}`);
@@ -23427,276 +24687,236 @@ async function main() {
   if (previousReportPath && format === 'sarif') {
     throw new Error('previous-report cannot be used with format sarif');
   }
+}
 
-  let result;
-  let payload;
-  let reportPath = '';
-  let activeCheckpointPath = '';
-  let checkpointResumed = false;
-  let repositoriesReused = 0;
+const COMMAND_RUNNERS = new Map([
+  ['audit', runAuditCommand],
+  ['pin', runPinCommand],
+  ['upgrade', runUpgradeCommand],
+  ['report', runReportCommand],
+  ['verify', runVerifyCommand],
+  ['org-scan', runOrganizationCommand],
+  ['rules', runRulesCommand],
+]);
 
-  if (requestedOutput && command !== 'org-scan') {
-    const outputDestination = await validateWriteDestination({
-      label: 'output-path',
-      path: requestedOutput,
-      cwd,
-    });
-    reportPath = outputDestination.path;
-    await assertDestinationsUseSafeNames([outputDestination], cwd);
-    const config = await loadConfig({
-      cwd,
-      path: ignoreConfig ? false : configPath,
-      ruleIds: listRules().map(rule => rule.id),
-    });
-    const baselinePath = baseline ?? config.baseline;
-    const baselineData = baselinePath
-      ? await loadBaseline({ path: baselinePath, cwd })
-      : { path: null };
-    await assertDestinationsDoNotReplaceControls(
-      [outputDestination],
-      [
-        { label: 'active config', path: config.path },
-        { label: 'active baseline', path: baselineData.path },
-        ...workflows.map(wf => ({ label: 'workflow file', path: (0,external_node_path_namespaceObject.resolve)(cwd, wf) })),
-      ],
-    );
+async function runCommand(inputs) {
+  const reportPath = inputs.command === 'org-scan' ? '' : await guardRepositoryOutput(inputs);
+  const runner = COMMAND_RUNNERS.get(inputs.command);
+  if (!runner) throw new Error(`unknown command: ${inputs.command}`);
+  return {
+    reportPath,
+    requestedOutput: inputs.requestedOutput,
+    checkpointPath: '',
+    checkpointResumed: false,
+    repositoriesReused: 0,
+    ...await runner(inputs),
+  };
+}
+
+async function guardRepositoryOutput({
+  requestedOutput,
+  cwd,
+  ignoreConfig,
+  configPath,
+  baseline,
+  workflows,
+}) {
+  if (!requestedOutput) return '';
+  const outputDestination = await validateWriteDestination({
+    label: 'output-path',
+    path: requestedOutput,
+    cwd,
+  });
+  await assertDestinationsUseSafeNames([outputDestination], cwd);
+  const config = await loadConfig({
+    cwd,
+    path: ignoreConfig ? false : configPath,
+    ruleIds: listRules().map(rule => rule.id),
+  });
+  const baselinePath = baseline ?? config.baseline;
+  const baselineData = baselinePath
+    ? await loadBaseline({ path: baselinePath, cwd })
+    : { path: null };
+  await assertDestinationsDoNotReplaceControls(
+    [outputDestination],
+    [
+      { label: 'active config', path: config.path },
+      { label: 'active baseline', path: baselineData.path },
+      ...workflows.map(wf => ({ label: 'workflow file', path: (0,external_node_path_namespaceObject.resolve)(cwd, wf) })),
+    ],
+  );
+  return outputDestination.path;
+}
+
+async function runAuditCommand(inputs) {
+  const { cwd, workflows, severity, explain, baseline, format } = inputs;
+  const result = await audit({
+    cwd,
+    workflows,
+    severity,
+    explain,
+    configPath: inputs.ignoreConfig ? false : inputs.configPath,
+    baseline,
+  });
+  return { result, payload: renderAudit(result, { format, explain, cwd }) };
+}
+
+async function runPinCommand({ cwd, workflows, write, token, fix, format }) {
+  const result = await pin({ cwd, workflows, dryRun: !write, token, fix });
+  return { result, payload: renderPin(result, { format, dryRun: !write, cwd }) };
+}
+
+async function runUpgradeCommand(inputs) {
+  const { cwd, workflows, write, token, mode, minAgeDays, fix, format } = inputs;
+  const result = await upgrade({
+    cwd,
+    workflows,
+    dryRun: !write,
+    token,
+    mode,
+    minAgeDays,
+    fix,
+  });
+  return { result, payload: renderUpgrade(result, { format, dryRun: !write, mode, cwd }) };
+}
+
+async function runReportCommand(inputs) {
+  const { cwd, workflows, token, mode, severity, explain, offline, minAgeDays } = inputs;
+  const result = await report({
+    cwd,
+    workflows,
+    token,
+    mode,
+    severity,
+    explain,
+    skipResolve: offline,
+    minAgeDays,
+    configPath: inputs.ignoreConfig ? false : inputs.configPath,
+    baseline: inputs.baseline,
+  });
+  return { result, payload: renderReport(result, { format: inputs.format, mode, cwd }) };
+}
+
+async function runVerifyCommand({ cwd, workflows, token, format }) {
+  const result = await verify({ cwd, workflows, token });
+  return { result, payload: renderVerify(result, { format, cwd }) };
+}
+
+function runRulesCommand({ format }) {
+  const rules = listRules();
+  return {
+    result: { status: 'OK' },
+    payload: formatter_format(
+      format,
+      rules.map(rule => ({ label: 'RULE', fields: rule })),
+      {
+        status: 'OK',
+        title: 'Audit rule catalog',
+        json: { schemaVersion: '1.0', rules, status: 'OK' },
+      },
+    ),
+  };
+}
+
+async function runOrganizationCommand(inputs) {
+  const { organization, cwd, format } = inputs;
+  if (!organization) throw new Error('organization is required for org-scan');
+  if (inputs.checkpointPath && inputs.resumeFrom) {
+    throw new Error('checkpoint-path and resume-from cannot be used together');
   }
-
-  switch (command) {
-    case 'audit':
-      result = await audit({
-        cwd,
-        workflows,
-        severity,
-        explain,
-        configPath: ignoreConfig ? false : configPath,
-        baseline,
-      });
-      payload = renderAudit(result, { format, explain, cwd });
-      break;
-    case 'pin':
-      result = await pin({ cwd, workflows, dryRun: !write, token, fix });
-      payload = renderPin(result, { format, dryRun: !write, cwd });
-      break;
-    case 'upgrade':
-      result = await upgrade({
-        cwd,
-        workflows,
-        dryRun: !write,
-        token,
-        mode,
-        minAgeDays,
-        fix,
-      });
-      payload = renderUpgrade(result, { format, dryRun: !write, mode, cwd });
-      break;
-    case 'report':
-      result = await report({
-        cwd,
-        workflows,
-        token,
-        mode,
-        severity,
-        explain,
-        skipResolve: offline,
-        minAgeDays,
-        configPath: ignoreConfig ? false : configPath,
-        baseline,
-      });
-      payload = renderReport(result, { format, mode, cwd });
-      break;
-    case 'verify':
-      result = await verify({ cwd, workflows, token });
-      payload = renderVerify(result, { format, cwd });
-      break;
-    case 'org-scan': {
-      if (!organization) throw new Error('organization is required for org-scan');
-      if (configuredCheckpointPath && resumeFrom) {
-        throw new Error('checkpoint-path and resume-from cannot be used together');
-      }
-      if (fresh && resumeFrom) {
-        throw new Error('fresh and resume-from cannot be used together');
-      }
-      const needsGeneratedCheckpoint = (
-        !configuredCheckpointPath
-        && !resumeFrom
-        && autoCheckpoint
-      );
-      const artifacts = await createOrganizationScanArtifacts({
+  if (inputs.fresh && inputs.resumeFrom) {
+    throw new Error('fresh and resume-from cannot be used together');
+  }
+  let progressReporter;
+  try {
+    const run = await runOrganizationScan({
+      scan: {
         organization,
         cwd,
-        repositories,
-        visibility,
-        includeArchived,
-        includeDisabled,
-        includeForks,
-        maxRepositories,
-        severity,
-        explain,
-        configPath: ignoreConfig ? false : configPath,
-        baseline,
-        reportFormat: format,
-      });
-      requestedOutput ??= artifacts.reportPath;
-      const outputDestination = await validateWriteDestination({
-        label: 'output-path',
-        path: requestedOutput,
-        cwd,
-      });
-      reportPath = outputDestination.path;
-      const selectedCheckpointPath = resumeFrom
-        ?? configuredCheckpointPath
-        ?? (needsGeneratedCheckpoint ? artifacts.checkpointPath : undefined);
-      checkpointResumed = Boolean(resumeFrom);
-      if (selectedCheckpointPath && !resumeFrom) {
-        checkpointResumed = !fresh && await action_pathExists((0,external_node_path_namespaceObject.resolve)(cwd, selectedCheckpointPath));
-      }
-      const checkpointDestination = selectedCheckpointPath
-        ? await validateWriteDestination({
-            label: resumeFrom ? 'resume-from' : 'checkpoint-path',
-            path: selectedCheckpointPath,
-            cwd,
-          })
-        : null;
-      activeCheckpointPath = checkpointDestination?.path ?? '';
-      const destinations = [outputDestination, checkpointDestination].filter(Boolean);
-      await assertDestinationsAreDistinct(destinations);
-      await assertDestinationsUseSafeNames(destinations, cwd);
-      await assertDestinationsDoNotReplaceControls(
-        destinations,
-        [
-          { label: 'active config', path: artifacts.configPath },
-          { label: 'active baseline', path: artifacts.baselinePath },
-        ],
-      );
-      if (
-        activeCheckpointPath
-        && await sameFilePath(activeCheckpointPath, reportPath)
-      ) throw new Error('checkpoint and report output paths must be different');
-      if (
-        previousReportPath
-        && activeCheckpointPath
-        && await sameFilePath(
-          (0,external_node_path_namespaceObject.resolve)(cwd, previousReportPath),
-          activeCheckpointPath,
-        )
-      ) throw new Error('checkpoint and previous report paths must be different');
-      if (
-        previousReportPath
-        && await sameFilePath(
-          (0,external_node_path_namespaceObject.resolve)(cwd, previousReportPath),
-          reportPath,
-        )
-      ) throw new Error('output and previous report paths must be different');
-      const previousReport = previousReportPath
-        ? await loadOrganizationReport({ path: previousReportPath, cwd })
-        : null;
-      const progressReporter = createOrganizationProgressReporter({
-        mode: progress ? 'plain' : 'none',
-        context: 'ci',
-        stream: process.stderr,
-      });
-      try {
-        result = await scanOrganization({
-          organization,
-          cwd,
-          token,
-          repositories,
-          visibility,
-          includeArchived,
-          includeDisabled,
-          includeForks,
-          maxRepositories,
-          concurrency,
-          severity,
-          explain,
-          configPath: ignoreConfig ? false : configPath,
-          baseline,
-          checkpointPath: activeCheckpointPath || undefined,
-          resume: checkpointResumed,
-          onProgress: event => {
-            if (event.type === 'repository-completed' && event.reused) {
-              repositoriesReused += 1;
-            }
-            progressReporter.emit(event);
-          },
+        token: inputs.token,
+        repositories: inputs.repositories,
+        visibility: inputs.visibility,
+        includeArchived: inputs.includeArchived,
+        includeDisabled: inputs.includeDisabled,
+        includeForks: inputs.includeForks,
+        maxRepositories: inputs.maxRepositories,
+        concurrency: inputs.concurrency,
+        severity: inputs.severity,
+        explain: inputs.explain,
+        configPath: inputs.ignoreConfig ? false : inputs.configPath,
+        baseline: inputs.baseline,
+      },
+      scanOrganization: scanOrganization,
+      format,
+      output: 'file',
+      outputPath: inputs.requestedOutput,
+      checkpointPath: inputs.checkpointPath,
+      resumePath: inputs.resumeFrom,
+      fresh: inputs.fresh,
+      autoCheckpoint: inputs.autoCheckpoint,
+      previousReportPath: inputs.previousReportPath,
+      labels: { output: 'output-path', checkpoint: 'checkpoint-path', resume: 'resume-from' },
+      openProgress: () => {
+        progressReporter = createOrganizationProgressReporter({
+          mode: inputs.progress ? 'plain' : 'none',
+          context: 'ci',
+          stream: process.stderr,
         });
-      } catch (error) {
-        progressReporter.emit({
-          type: 'scan-failed',
-          organization,
-          error: String(error?.message ?? error),
-        });
-        throw error;
-      } finally {
-        progressReporter.close();
-      }
-      if (previousReport) {
-        const currentReport = JSON.parse(renderOrganizationScan(result, {
-          format: 'json',
-          cwd,
-        }));
-        result.comparison = compareOrganizationReports({
-          previous: previousReport,
-          current: currentReport,
-        });
-      }
-      payload = renderOrganizationScan(result, { format, cwd });
-      await assertDestinationsDoNotReplaceControls(
-        [{ label: 'report output', path: reportPath }],
-        [
-          { label: 'active config', path: result.configPath },
-          { label: 'active baseline', path: result.baseline.path },
-        ],
-      );
-      break;
-    }
-    case 'rules': {
-      const rules = listRules();
-      result = { status: 'OK' };
-      payload = formatter_format(
-        format,
-        rules.map(rule => ({ label: 'RULE', fields: rule })),
-        {
-          status: 'OK',
-          title: 'Audit rule catalog',
-          json: { schemaVersion: '1.0', rules, status: 'OK' },
-        },
-      );
-      break;
-    }
-    default:
-      throw new Error(`unknown command: ${command}`);
+        return progressReporter;
+      },
+    });
+    return {
+      result: run.result,
+      payload: renderOrganizationScan(run.result, { format, cwd }),
+      reportPath: run.outputDestination.path,
+      requestedOutput: run.reportPath,
+      checkpointPath: run.checkpointDestination?.path ?? '',
+      checkpointResumed: run.resumed,
+      repositoriesReused: run.repositoriesReused,
+    };
+  } finally {
+    progressReporter?.close();
   }
+}
 
+async function publishOutcome(inputs, outcome) {
+  const { command, format, cwd } = inputs;
+  const { result, payload, requestedOutput } = outcome;
   if (command !== 'org-scan' && (!['csv', 'html'].includes(format) || !requestedOutput)) {
     process.stdout.write(payload);
   }
-  const annotationResult = annotationsEnabled
+  const annotationResult = inputs.annotationsEnabled
     ? limitAnnotations(collectAnnotations({ command, result, cwd }))
     : { emitted: [], omitted: 0 };
   const annotationCommands = renderAnnotationCommands(annotationResult.emitted);
   if (annotationCommands) process.stdout.write(annotationCommands);
-
-  if (requestedOutput) {
-    reportPath ||= (0,external_node_path_namespaceObject.resolve)(cwd, requestedOutput);
-    await writeFileGuarded({
-      path: reportPath,
-      content: payload,
-      dryRun: false,
-      cwd,
-    });
-    if (command === 'org-scan') {
-      process.stdout.write(
-        `Organization ${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
-      );
-    } else if (['csv', 'html'].includes(format)) {
-      process.stdout.write(
-        `${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
-      );
-    }
+  const reportPath = await writeReportOutput(inputs, outcome);
+  await publishActionOutputs(inputs, { ...outcome, reportPath }, annotationResult);
+  if (shouldFailAction({ command, result, failOnFindings: inputs.failOnFindings })) {
+    process.exitCode = 1;
   }
+}
 
+async function writeReportOutput({ command, format, cwd }, outcome) {
+  const { requestedOutput, payload } = outcome;
+  if (!requestedOutput) return outcome.reportPath;
+  const reportPath = outcome.reportPath || (0,external_node_path_namespaceObject.resolve)(cwd, requestedOutput);
+  await writer_writeFileGuarded({ path: reportPath, content: payload, dryRun: false, cwd });
+  if (command === 'org-scan') {
+    process.stdout.write(
+      `Organization ${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
+    );
+  } else if (['csv', 'html'].includes(format)) {
+    process.stdout.write(
+      `${format.toUpperCase()} report written to ${actionLogText(requestedOutput)}\n`,
+    );
+  }
+  return reportPath;
+}
+
+async function publishActionOutputs(inputs, outcome, annotationResult) {
+  const { command, cwd, write } = inputs;
+  const { result, reportPath, checkpointPath, checkpointResumed, repositoriesReused } = outcome;
   const metrics = collectActionMetrics({ command, result, repositoriesReused });
   await setOutput('status', result.status);
   await setNumericOutputs(metrics);
@@ -23707,7 +24927,7 @@ async function main() {
   await setOutput('annotations', String(annotationResult.emitted.length));
   await setOutput('annotations-skipped', String(annotationResult.omitted));
   await setOutput('report-path', reportPath);
-  await setOutput('checkpoint-path', activeCheckpointPath);
+  await setOutput('checkpoint-path', checkpointPath);
   await appendSummary(renderActionSummary({
     command,
     result,
@@ -23716,15 +24936,11 @@ async function main() {
     annotations: annotationResult.emitted.length,
     annotationsSkipped: annotationResult.omitted,
     reportPath,
-    checkpointPath: activeCheckpointPath,
+    checkpointPath,
     checkpointResumed,
     repositoriesReused,
     write,
   }));
-
-  if (shouldFailAction({ command, result, failOnFindings })) {
-    process.exitCode = 1;
-  }
 }
 
 function input(name) {
@@ -23801,16 +25017,6 @@ async function appendSummary(markdown) {
     markdown,
     'utf8',
   );
-}
-
-async function action_pathExists(path) {
-  try {
-    await (0,promises_namespaceObject.lstat)(path);
-    return true;
-  } catch (error) {
-    if (error.code === 'ENOENT') return false;
-    throw error;
-  }
 }
 
 /** Redact and visibly escape control bytes before writing ordinary Action logs. */

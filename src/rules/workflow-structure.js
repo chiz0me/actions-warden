@@ -1,3 +1,5 @@
+import { isRecord } from '../lib/org-schema.js';
+
 export const id = 'workflow-structure';
 export const severity = 'medium';
 export const description = 'Workflow or composite action contains invalid or ambiguous GitHub Actions syntax.';
@@ -374,10 +376,6 @@ function validRunnerSelector(value) {
       && value.labels.length > 0
       && value.labels.every(label => typeof label === 'string' && label.trim().length > 0);
   return groupValid || labelsValid;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function finding(line, issue, explain, job) {

@@ -5,13 +5,12 @@
  * write access), making them an unstable supply-chain link.
  */
 
+import { GIT_SHA_RE } from '../lib/org-schema.js';
 import { collectUses } from '../lib/parser.js';
 
 export const id = 'unpinned-action';
 export const severity = 'high';
 export const description = 'External action or reusable workflow is not pinned to a full commit SHA.';
-
-const SHA_RE = /^[0-9a-f]{40}$/i;
 
 /**
  * @param {import('../lib/parser.js').WorkflowDoc} workflow
@@ -21,7 +20,7 @@ export function check(workflow) {
   const findings = [];
   for (const { ref } of collectUses(workflow)) {
     if (ref.kind !== 'external' && ref.kind !== 'reusable-workflow') continue;
-    if (ref.ref && SHA_RE.test(ref.ref)) continue;
+    if (ref.ref && GIT_SHA_RE.test(ref.ref)) continue;
     findings.push({
       id,
       severity,

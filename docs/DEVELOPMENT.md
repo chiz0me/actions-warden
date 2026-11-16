@@ -38,6 +38,7 @@ pre-commit install --hook-type pre-push
 | `npm test` | Run the complete Vitest suite once |
 | `npm run test:watch` | Run Vitest in watch mode |
 | `npm run lint` | Lint source, scripts, and tests |
+| `npm run typecheck` | Type-check the modules that opt in with `// @ts-check` (`tsc --noEmit`) |
 | `npm run check:yaml` | Parse repository YAML files |
 | `npm run check:docs` | Validate links and require 100% public-surface documentation/JSDoc coverage |
 | `npm run check:package` | Inspect the exact npm tarball manifest, required files, executable mode, and size bounds |
@@ -58,6 +59,7 @@ npm run check:yaml
 npm run check:docs
 npm run check:package
 npm run lint
+npm run typecheck
 npm test
 npm run audit
 ```
@@ -85,14 +87,21 @@ src/
     config.js, baseline.js  policy and accepted-finding controls
     resolver.js, cache.js   GitHub API, caching, ref and ownership checks
     github-org.js           read-only organization/tree/blob access
-    agent-mode.js           scope-keyed organization artifacts and receipts
+    org-artifacts.js        scope-keyed organization artifacts and receipts
     org-checkpoint.js       validated atomic organization resume state
+    org-schema.js           shared name/SHA patterns, severity and visibility sets, guards
+    org-source-links.js     branch links and commit-pinned permalinks for scanned files
+    org-run.js              shared CLI/Action organization runner: artifacts, destination checks, scan
+    org-report.js           canonical organization report document and record projections
     org-report-comparison.js validated fail-closed report change analysis
     org-report-directory.js guarded compact/per-repository report layout
     org-progress.js         plain and JSONL structured scan progress
     identity.js             stable IDs and semantic fingerprints
     patcher.js, writer.js   source-range rewrites and guarded atomic writes
-    formatter.js, redact.js structured/CSV/HTML output and credential redaction
+    formatter.js            format dispatch, severity summary, and renderer re-exports
+    formats/                one serializer each: toon, text, csv, sarif, html, json
+    redact.js               credential redaction
+    types.js                shared JSDoc typedefs (findings, reports, records)
     annotations.js          GitHub workflow annotations
     action-summary.js       bounded Action metrics and job summaries
     concurrency.js          bounded async work
@@ -128,8 +137,9 @@ normalized action refs → GitHub resolution and ownership verification
 An organization scan follows:
 
 ```text
-repository listing → default-branch Git tree → bounded YAML blob reads
-                   → in-memory auditSources → repository aggregation
+repository listing → default-branch commit → Git tree by that tree SHA
+                   → bounded YAML blob reads → in-memory auditSources
+                   → repository aggregation (file details, permalinks)
 
 default/explicit checkpoint → identity validation → fresh tree SHA comparison
                             → reuse unchanged error-free result or rescan
@@ -190,13 +200,20 @@ Changes must preserve these boundaries:
 - Organization resume never trusts a stale result without fresh discovery and
   a matching repository identity, default branch, and tree SHA. Results with
   operational failures or parse-error findings are never reused and are always
-  rescanned.
+  rescanned. The commit and every permalink come from the current run, never
+  from a checkpoint.
+- Organization ref resolution is pinned: the default-branch commit is resolved
+  first (`commits/heads/<branch>`), the tree is read by that commit's tree SHA
+  and must match it, and only an HTTP 409 on the commit request means an empty
+  repository.
 - Organization result compatibility is controlled by
   `ORGANIZATION_ANALYSIS_GENERATION`, not by the package version. Producer
-  versions remain checkpoint metadata and compatible checkpoints migrate
-  through the guarded atomic writer.
+  versions remain checkpoint metadata that the next guarded atomic write
+  refreshes. Only the current checkpoint schema is accepted; an older schema
+  fails closed.
 - Checkpoints use guarded atomic writes, remain inside the working directory,
-  omit tokens and raw YAML, and cannot replace active policy or baseline files.
+  omit tokens, raw YAML, commits, and links, and cannot replace active policy or
+  baseline files.
 - Report directories remain dedicated and inside the working directory, reject
   symbolic links and control-file overlap, preserve unrelated regular files,
   and use a final manifest as the authoritative artifact set.
@@ -334,8 +351,8 @@ for documentation, release metadata, progress rendering, authentication,
 concurrency, or internal refactors that preserve those results. The rule
 catalog hash independently invalidates catalog changes. A generation change
 must add tests proving the old checkpoint fails closed and automatic scans
-select a new artifact key; a compatible format migration must prove the old checkpoint
-is validated, rewritten atomically, and still subject to fresh tree checks.
+select a new artifact key. A checkpoint schema change does the same; the
+project does not carry migration paths for older checkpoints.
 
 ## Output compatibility
 

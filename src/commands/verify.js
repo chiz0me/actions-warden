@@ -10,8 +10,7 @@ import { readVersionComment } from '../lib/patcher.js';
 import { occurrenceId, canonicalPath } from '../lib/identity.js';
 import { format } from '../lib/formatter.js';
 import { mapLimit } from '../lib/concurrency.js';
-
-const SHA_RE = /^[0-9a-f]{40}$/i;
+import { GIT_SHA_RE } from '../lib/org-schema.js';
 
 /**
  * Verify that external action references are full repository-owned commit
@@ -54,7 +53,7 @@ export async function verify({ cwd = process.cwd(), workflows, token } = {}) {
         start: ref.start,
         subject: ref.raw,
       });
-      if (!ref.ref || !SHA_RE.test(ref.ref)) {
+      if (!ref.ref || !GIT_SHA_RE.test(ref.ref)) {
         return { type: 'error', value: {
           id,
           file,

@@ -24,9 +24,8 @@ import { parseIgnoreDirectives, isIgnored } from '../lib/ignore.js';
 import { format } from '../lib/formatter.js';
 import { occurrenceId, canonicalPath } from '../lib/identity.js';
 import { applyPatches, planUsesPatches, readVersionComment } from '../lib/patcher.js';
+import { GIT_SHA_RE } from '../lib/org-schema.js';
 import { resolveTargets } from '../lib/targets.js';
-
-const SHA_RE = /^[0-9a-f]{40}$/i;
 
 /**
  * @typedef {object} UpgradeChange
@@ -93,7 +92,7 @@ export async function upgrade({
       if (ref.kind !== 'external' && ref.kind !== 'reusable-workflow') continue;
       if (isIgnored(ignore, ref.line, 'unpinned-action')) continue;
       const inlineVersion = readVersionComment(source, ref);
-      const currentVersion = ref.ref && SHA_RE.test(ref.ref) ? inlineVersion : ref.ref;
+      const currentVersion = ref.ref && GIT_SHA_RE.test(ref.ref) ? inlineVersion : ref.ref;
       if (!currentVersion) continue;
       const id = occurrenceId({
         kind: 'upgrade',

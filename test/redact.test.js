@@ -16,6 +16,40 @@ describe('redact', () => {
     expect(redact('password: "secret123"')).toContain('<redacted>');
   });
 
+  describe('GitHub source links', () => {
+    const commit = '34e114876b0b11c390a56381ad16ebd13914f8d5';
+    const awsSecret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+
+    it('keeps permalinks and long branch links the scanner builds', () => {
+      for (const link of [
+        `https://github.com/octo-org/app/blob/${commit}/.github/workflows/ci.yml#L9`,
+        'https://github.com/some-long-organization-name/some-long-repository-name'
+          + `/blob/${commit}/.github/workflows/continuous-integration.yml#L120`,
+        'https://github.com/some-long-organization-name/some-long-repository-name'
+          + '/blob/main/.github/workflows/continuous-integration.yml#L120',
+        'https://github.com/octo-org/app/blob/release%2F1.0/.github/actions/setup/action.yml',
+      ]) {
+        expect(redact(link)).toBe(link);
+      }
+    });
+
+    it('still redacts secret-like text around or outside such links', () => {
+      const link = `https://github.com/octo-org/app/blob/${commit}/ci.yml`;
+      expect(redact(`${link} ${awsSecret}`)).toBe(`${link} <redacted>`);
+      expect(redact(`key ${awsSecret} here`)).toBe('key <redacted> here');
+      expect(redact(`https://example.com/blob/${commit}/${awsSecret}`)).not.toContain(awsSecret);
+      expect(redact(`https://github.com/octo-org/app/tree/${commit}/${awsSecret}`))
+        .not.toContain(awsSecret);
+    });
+
+    it('still applies token patterns inside a source link', () => {
+      const token = `ghp_${'A1b2C3d4E5'.repeat(4)}`;
+      const redacted = redact(`https://github.com/octo-org/app/blob/${commit}/${token}.yml`);
+      expect(redacted).not.toContain(token);
+      expect(redacted).toContain('<redacted>');
+    });
+  });
+
   it('redacts underscore-delimited credential keys', () => {
     for (const key of [
       'access_token',

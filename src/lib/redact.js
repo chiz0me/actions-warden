@@ -27,6 +27,17 @@ const TOKEN_PATTERNS = [
 const SENSITIVE_KEY = /(?:token|secret|password|api[_-]?key|auth[_-]?token|access[_-]?key|private[_-]?key)$/i;
 const KV_TOKEN_KEYS = /([\w-]*(?:token|secret|password|api[_-]?key|auth[_-]?token|access[_-]?key|private[_-]?key))(\s*[:=]\s*)["']?([^"'\s,]+)/gi;
 const HIGH_ENTROPY = /[A-Za-z0-9_+/-]{32,}={0,2}/g;
+// Source links the scanner itself builds: https://github.com/<owner>/<repo>/blob/<ref>/<path>
+// with an optional #L<line>. A commit SHA in the ref makes the whole link one long
+// high-entropy run, so these links are exempt from the entropy heuristic only; explicit
+// token patterns above still redact credential-shaped text inside them. The shape is exact
+// (encodeURIComponent characters only) so it cannot shelter arbitrary secret-like text.
+const URL_SEGMENT = "[A-Za-z0-9._~%!'()*-]+";
+const GITHUB_SOURCE_URL = new RegExp(
+  `https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/blob/${URL_SEGMENT}`
+  + `(?:/${URL_SEGMENT})+(?:#L\\d{1,9})?`,
+  'g',
+);
 // Public rule IDs and artifact kinds long enough to trip the generic entropy
 // heuristic. Keep the exceptions exact instead of weakening detection for
 // arbitrary kebab-case values, which may still be credentials or passphrases.
@@ -51,10 +62,23 @@ export function redact(input) {
   let s = typeof input === 'string' ? input : String(input);
   for (const re of TOKEN_PATTERNS) s = s.replace(re, '<redacted>');
   s = s.replace(KV_TOKEN_KEYS, (_, key, separator) => `${key}${separator}<redacted>`);
-  s = s.replace(HIGH_ENTROPY, value => (
+  return redactHighEntropyOutsideSourceUrls(s);
+}
+
+function redactHighEntropyOutsideSourceUrls(input) {
+  let output = '';
+  let position = 0;
+  for (const match of input.matchAll(GITHUB_SOURCE_URL)) {
+    output += redactHighEntropy(input.slice(position, match.index)) + match[0];
+    position = match.index + match[0].length;
+  }
+  return output + redactHighEntropy(input.slice(position));
+}
+
+function redactHighEntropy(text) {
+  return text.replace(HIGH_ENTROPY, value => (
     shouldRedactHighEntropy(value) ? '<redacted>' : value
   ));
-  return s;
 }
 
 /**
