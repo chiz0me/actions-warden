@@ -9,6 +9,7 @@
  *   - Trailing `STATUS: OK` or `STATUS: FAIL` signal for machine consumers
  */
 
+import { SEVERITY_LEVELS } from './org-schema.js';
 import { redact, redactDeep } from './redact.js';
 
 const MAX_HTML_REPORT_BYTES = 32 * 1024 * 1024;
@@ -40,7 +41,7 @@ const CSV_PREFERRED_COLUMNS = Object.freeze([
 /**
  * Severity ordering, lowest-to-highest.
  */
-export const SEVERITY_ORDER = ['low', 'medium', 'high', 'critical'];
+export const SEVERITY_ORDER = [...SEVERITY_LEVELS];
 
 /**
  * @param {string} value

@@ -6,11 +6,10 @@
  */
 
 import { TextDecoder } from 'node:util';
+import { GIT_SHA_RE, NAME_RE, REPOSITORY_VISIBILITIES } from './org-schema.js';
 import { ghFetch } from './resolver.js';
 
 const API = 'https://api.github.com';
-const NAME_RE = /^[A-Za-z0-9_.-]+$/;
-const SHA_RE = /^[0-9a-f]{40}$/i;
 
 /** Maximum decoded bytes accepted for one remote workflow YAML blob. */
 export const MAX_WORKFLOW_BYTES = 2 * 1024 * 1024;
@@ -135,7 +134,7 @@ export async function fetchRepositoryWorkflowTree({
   if (typeof treeResponse.body.truncated !== 'boolean') {
     throw new Error(`invalid tree truncation state for ${normalized.fullName}`);
   }
-  if (!SHA_RE.test(String(treeResponse.body.sha ?? ''))) {
+  if (!GIT_SHA_RE.test(String(treeResponse.body.sha ?? ''))) {
     throw new Error(`invalid tree SHA for ${normalized.fullName}`);
   }
   if (treeResponse.body.truncated === true) {
@@ -203,7 +202,7 @@ export async function fetchRepositoryWorkflows({
   const errors = [];
   let sourceBytes = 0;
   for (const entry of tree.entries) {
-    if (!SHA_RE.test(String(entry.sha ?? ''))) {
+    if (!GIT_SHA_RE.test(String(entry.sha ?? ''))) {
       errors.push({ path: entry.path, error: 'workflow tree entry has an invalid blob SHA' });
       continue;
     }
@@ -338,7 +337,7 @@ function validateWorkflowTree(tree, repository) {
     || tree.branch !== repository.defaultBranch
     || typeof tree.empty !== 'boolean'
     || !Array.isArray(tree.entries)
-    || (tree.treeSha !== null && !SHA_RE.test(String(tree.treeSha)))
+    || (tree.treeSha !== null && !GIT_SHA_RE.test(String(tree.treeSha)))
   ) {
     throw new Error(`invalid workflow tree snapshot for ${repository.fullName}`);
   }
@@ -382,7 +381,7 @@ function normalizeRepository(raw, expectedOwner) {
   const defaultBranch = suppliedDefaultBranch == null
     ? null
     : validateRef(String(suppliedDefaultBranch));
-  const visibility = ['public', 'private', 'internal'].includes(raw.visibility)
+  const visibility = REPOSITORY_VISIBILITIES.includes(raw.visibility)
     ? raw.visibility
     : raw.private === true ? 'private' : 'public';
   return {

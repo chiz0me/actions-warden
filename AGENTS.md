@@ -34,7 +34,8 @@ network behavior, deterministic output, and no-remote-code-execution model.
 - Begin with read-only inspection. Preserve unrelated user changes in a dirty
   worktree.
 - Use `rg` or `rg --files` for discovery.
-- Use `apply_patch` for hand edits.
+- Make hand edits with your editor's patch or edit tool, not by regenerating
+  whole files.
 - Do not add `--write`, change policy, create a baseline, suppress a finding,
   or broaden a GitHub organization scan without explicit authorization.
 - Do not print tokens. Prefer `GITHUB_TOKEN` or `GH_TOKEN` over a CLI token.

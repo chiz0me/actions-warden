@@ -16,7 +16,7 @@ import { format, summarize, SEVERITY_ORDER } from '../lib/formatter.js';
 import { parseIgnoreDirectives, isIgnored } from '../lib/ignore.js';
 import { canonicalPath, occurrenceId, pinOccurrenceId } from '../lib/identity.js';
 import { resolveTargets } from '../lib/targets.js';
-import { assignBaselineFingerprints, loadBaseline } from '../lib/baseline.js';
+import { assignBaselineFingerprints, emptyBaseline, loadBaseline } from '../lib/baseline.js';
 import { DEFAULT_CONFIG, filterIgnoredPaths, loadConfig } from '../lib/config.js';
 import { RULES } from '../rules/index.js';
 
@@ -227,20 +227,12 @@ async function resolveBaselineData({ baseline, cwd }) {
     : emptyBaseline();
 }
 
-function emptyBaseline() {
-  return { path: null, ids: new Set(), fingerprints: new Set() };
-}
-
 function stripExplain(f) {
   const copy = { ...f };
   delete copy.explain;
   return copy;
 }
 
-/**
- * @param {string[]|undefined} workflows
- * @param {string} cwd
- */
 /**
  * @param {Finding[]} findings
  * @param {string|undefined} min
@@ -253,10 +245,6 @@ function filterBySeverity(findings, min) {
     f.ruleId === 'parse-error'
     || SEVERITY_ORDER.indexOf(f.severity) >= minIdx
   ));
-}
-
-function relPath(p, cwd) {
-  return canonicalPath(p, cwd);
 }
 
 /**
@@ -273,14 +261,14 @@ export function renderAudit(result, opts) {
       status: result.status,
       json: {
         schemaVersion: '1.0',
-        files: result.files.map(f => relPath(f, cwd)),
-        findings: result.findings.map(f => ({ ...f, file: relPath(f.file, cwd) })),
+        files: result.files.map(f => canonicalPath(f, cwd)),
+        findings: result.findings.map(f => ({ ...f, file: canonicalPath(f.file, cwd) })),
         summary: result.summary,
         baseline: {
           ...result.baseline,
-          path: result.baseline.path ? relPath(result.baseline.path, cwd) : null,
+          path: result.baseline.path ? canonicalPath(result.baseline.path, cwd) : null,
         },
-        configPath: result.configPath ? relPath(result.configPath, cwd) : null,
+        configPath: result.configPath ? canonicalPath(result.configPath, cwd) : null,
         status: result.status,
       },
     });
@@ -300,7 +288,7 @@ export function renderAudit(result, opts) {
     }
   }
   for (const f of result.files) {
-    records.push({ label: 'SCAN', fields: { file: relPath(f, opts.cwd ?? process.cwd()) } });
+    records.push({ label: 'SCAN', fields: { file: canonicalPath(f, opts.cwd ?? process.cwd()) } });
   }
   for (const finding of result.findings) {
     const fields = { id: finding.id, ...finding.fields, line: finding.line };
@@ -315,8 +303,8 @@ export function renderAudit(result, opts) {
     status: result.status,
     title: 'Workflow security audit',
     metadata: {
-      config: result.configPath ? relPath(result.configPath, cwd) : 'built-in defaults',
-      baseline: result.baseline.path ? relPath(result.baseline.path, cwd) : 'none',
+      config: result.configPath ? canonicalPath(result.configPath, cwd) : 'built-in defaults',
+      baseline: result.baseline.path ? canonicalPath(result.baseline.path, cwd) : 'none',
     },
   });
 }

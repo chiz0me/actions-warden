@@ -2,9 +2,9 @@ import { readFile, realpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import picomatch from 'picomatch';
 import { parseDocument } from 'yaml';
+import { SEVERITIES, isRecord } from './org-schema.js';
 
 const CONFIG_NAMES = ['.actions-warden.yml', '.actions-warden.yaml'];
-const SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
 const TOP_LEVEL_KEYS = new Set([
   'version',
   'baseline',
@@ -183,10 +183,6 @@ function optionalString(value, label) {
     throw new Error(`config.${label} must be a non-empty string`);
   }
   return value;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function isOutside(path) {

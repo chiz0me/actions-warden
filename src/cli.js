@@ -45,6 +45,8 @@ import {
 } from './lib/agent-mode.js';
 import { loadOrganizationCheckpoint } from './lib/org-checkpoint.js';
 import { buildOrganizationReport } from './lib/org-report.js';
+import { SEVERITY_LEVELS, VISIBILITY_FILTERS } from './lib/org-schema.js';
+import { pathExists } from './lib/paths.js';
 import {
   validateOrganizationReportDirectory,
   writeOrganizationReportDirectory,
@@ -129,7 +131,7 @@ async function emit(payload, opts) {
 
 addCommonOptions(program.command('audit'), { includeToken: false })
   .description('Scan workflows for security findings')
-  .addOption(new Option('--severity <level>', 'minimum severity').choices(['low', 'medium', 'high', 'critical']))
+  .addOption(new Option('--severity <level>', 'minimum severity').choices(SEVERITY_LEVELS))
   .option('--explain', 'include plain-English remediation hint for each finding')
   .addOption(new Option('--config <path>', 'repository policy file (default: .actions-warden.yml)')
     .argParser(value => parseNonEmpty(value, '--config'))
@@ -243,7 +245,7 @@ addCommonOptions(program.command('upgrade'))
 addCommonOptions(program.command('report'))
   .description('Combined audit + pin (dry) + upgrade (dry) report')
   .addOption(new Option('--mode <m>', 'upgrade scope').choices(['major', 'minor', 'patch']).default('minor'))
-  .addOption(new Option('--severity <level>', 'minimum audit severity').choices(['low', 'medium', 'high', 'critical']))
+  .addOption(new Option('--severity <level>', 'minimum audit severity').choices(SEVERITY_LEVELS))
   .option('--explain', 'include remediation hints in audit findings')
   .addOption(new Option('--min-age <days>', 'cooldown for upgrades (days)')
     .argParser(value => parseInteger(value, '--min-age', { min: 0 }))
@@ -297,7 +299,7 @@ program.command('org-scan <organization>')
   .description('Scan workflow security across a GitHub organization')
   .addOption(new Option('-r, --repository <pattern...>', 'repository name or glob (repeatable)')
     .argParser((value, previous) => collectNonEmpty(value, previous, '--repository')))
-  .addOption(new Option('--visibility <visibility>', 'repository visibility').choices(['all', 'public', 'private', 'internal']).default('all'))
+  .addOption(new Option('--visibility <visibility>', 'repository visibility').choices(VISIBILITY_FILTERS).default('all'))
   .option('--include-archived', 'include archived repositories')
   .option('--include-disabled', 'include disabled repositories')
   .option('--include-forks', 'include forked repositories')
@@ -306,7 +308,7 @@ program.command('org-scan <organization>')
   .addOption(new Option('--concurrency <count>', 'concurrent repository scans (1-16)')
     .argParser(value => parseInteger(value, '--concurrency', { min: 1, max: 16 }))
     .default(4))
-  .addOption(new Option('--severity <level>', 'minimum severity').choices(['low', 'medium', 'high', 'critical']))
+  .addOption(new Option('--severity <level>', 'minimum severity').choices(SEVERITY_LEVELS))
   .option('--explain', 'include plain-English remediation hint for each finding')
   .addOption(new Option('--config <path>', 'organization-wide policy file (default: .actions-warden.yml)')
     .argParser(value => parseNonEmpty(value, '--config'))
@@ -690,16 +692,6 @@ function parseFixId(value) {
     throw new InvalidArgumentError('--fix must be a 16-character hexadecimal change id');
   }
   return value.toLowerCase();
-}
-
-async function pathExists(path) {
-  try {
-    await lstat(path);
-    return true;
-  } catch (error) {
-    if (error.code === 'ENOENT') return false;
-    throw error;
-  }
 }
 
 async function migrateLegacyAgentCheckpoint({ source, destination, cwd, identity }) {

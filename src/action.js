@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { appendFile, lstat } from 'node:fs/promises';
+import { appendFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { audit, renderAudit } from './commands/audit.js';
@@ -22,6 +22,8 @@ import {
 } from './lib/org-report-comparison.js';
 import { createOrganizationScanArtifacts } from './lib/agent-mode.js';
 import { buildOrganizationReport } from './lib/org-report.js';
+import { SEVERITIES, VISIBILITIES } from './lib/org-schema.js';
+import { pathExists } from './lib/paths.js';
 import { loadConfig } from './lib/config.js';
 import { loadBaseline } from './lib/baseline.js';
 import {
@@ -45,8 +47,6 @@ import {
 
 const FORMATS = new Set(['toon', 'json', 'text', 'csv', 'sarif', 'html']);
 const MODES = new Set(['major', 'minor', 'patch']);
-const SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
-const VISIBILITIES = new Set(['all', 'public', 'private', 'internal']);
 
 async function main() {
   const command = input('command') || 'audit';
@@ -466,16 +466,6 @@ async function appendSummary(markdown) {
     markdown,
     'utf8',
   );
-}
-
-async function pathExists(path) {
-  try {
-    await lstat(path);
-    return true;
-  } catch (error) {
-    if (error.code === 'ENOENT') return false;
-    throw error;
-  }
 }
 
 /** Redact and visibly escape control bytes before writing ordinary Action logs. */

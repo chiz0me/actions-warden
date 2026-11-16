@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import picomatch from 'picomatch';
 import { auditSources } from './audit.js';
-import { loadBaseline } from '../lib/baseline.js';
+import { emptyBaseline, loadBaseline } from '../lib/baseline.js';
 import { filterIgnoredPaths, loadConfig } from '../lib/config.js';
 import { mapLimit } from '../lib/concurrency.js';
 import { format, summarize } from '../lib/formatter.js';
@@ -27,12 +27,10 @@ import {
   writeOrganizationCheckpoint,
 } from '../lib/org-checkpoint.js';
 import { buildOrganizationReport, organizationReportRecords } from '../lib/org-report.js';
+import { NAME_RE, VISIBILITIES, normalizePatterns } from '../lib/org-schema.js';
 import { resolveToken } from '../lib/resolver.js';
 import { RULES } from '../rules/index.js';
 import { sameFilePath } from '../lib/path-equality.js';
-
-const VISIBILITIES = new Set(['all', 'public', 'private', 'internal']);
-const ORGANIZATION_RE = /^[A-Za-z0-9_.-]+$/;
 
 /**
  * @param {object} opts
@@ -157,7 +155,7 @@ function validateScanOptions(settings) {
 function assertOrganizationName(organization) {
   if (
     typeof organization !== 'string'
-    || !ORGANIZATION_RE.test(organization)
+    || !NAME_RE.test(organization)
     || organization === '.'
     || organization === '..'
   ) throw new Error('invalid organization');
@@ -226,7 +224,7 @@ async function prepareScanEnvironment(settings) {
   const baselinePath = baseline ?? config.baseline;
   const baselineData = baselinePath
     ? await loadBaseline({ path: baselinePath, cwd })
-    : { path: null, ids: new Set(), fingerprints: new Set() };
+    : emptyBaseline();
   if (checkpointPath) {
     await validateOrganizationCheckpointPath({ path: checkpointPath, cwd });
     await assertCheckpointDoesNotReplaceControlFile(checkpointPath, cwd, [
@@ -598,15 +596,6 @@ function selectRepositories(repositories, options) {
     ) return false;
     return true;
   });
-}
-
-function normalizePatterns(patterns) {
-  if (patterns === undefined) return [];
-  if (
-    !Array.isArray(patterns)
-    || patterns.some(pattern => typeof pattern !== 'string' || !pattern)
-  ) throw new Error('repository filters must be non-empty strings');
-  return [...new Set(patterns)];
 }
 
 function sourceUrl(repository, path, line) {

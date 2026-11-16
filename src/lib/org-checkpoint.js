@@ -12,6 +12,13 @@ import { resolveRepositoryFile } from './config.js';
 import { summarize } from './formatter.js';
 import { isWorkflowPath } from './github-org.js';
 import { canonicalPath } from './identity.js';
+import {
+  GIT_SHA_RE,
+  NAME_RE,
+  SEVERITIES,
+  isJsonValue,
+  isRecord,
+} from './org-schema.js';
 import { redactDeep } from './redact.js';
 import { writeFileGuarded } from './writer.js';
 import { listRules } from '../rules/index.js';
@@ -32,10 +39,7 @@ export const ORGANIZATION_ANALYSIS_GENERATION = 2;
 
 /** Maximum accepted or generated checkpoint size, in bytes. */
 export const MAX_ORGANIZATION_CHECKPOINT_BYTES = 256 * 1024 * 1024;
-const NAME_RE = /^[A-Za-z0-9_.-]+$/;
-const SHA_RE = /^[0-9a-f]{40}$/i;
 const ID_RE = /^[0-9a-f]{16}$/;
-const SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
 const RULE_IDS = new Set(['parse-error', ...listRules().map(rule => rule.id)]);
 const RULES_HASH = digest(listRules());
 
@@ -345,7 +349,7 @@ function validateBranch(value) {
 }
 
 function validateSha(value, repository) {
-  if (typeof value !== 'string' || !SHA_RE.test(value)) {
+  if (typeof value !== 'string' || !GIT_SHA_RE.test(value)) {
     throw new Error(`invalid checkpoint tree SHA for ${repository}`);
   }
   return value.toLowerCase();
@@ -458,22 +462,4 @@ function stableValue(value) {
     );
   }
   return value;
-}
-
-function isJsonValue(value, seen = new Set()) {
-  if (value === null || ['string', 'boolean'].includes(typeof value)) return true;
-  if (typeof value === 'number') return Number.isFinite(value);
-  if (!value || typeof value !== 'object' || seen.has(value)) return false;
-  seen.add(value);
-  const valid = Array.isArray(value)
-    ? value.every(item => isJsonValue(item, seen))
-    : Object.entries(value).every(([key, item]) => (
-      typeof key === 'string' && isJsonValue(item, seen)
-    ));
-  seen.delete(value);
-  return valid;
-}
-
-function isRecord(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }

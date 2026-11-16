@@ -3,6 +3,15 @@ import { canonicalPath, occurrenceId } from './identity.js';
 import { resolveRepositoryFile } from './config.js';
 
 /**
+ * Create a baseline that suppresses nothing.
+ *
+ * @returns {{path: null, ids: Set<string>, fingerprints: Set<string>}}
+ */
+export function emptyBaseline() {
+  return { path: null, ids: new Set(), fingerprints: new Set() };
+}
+
+/**
  * Load a versioned baseline and return its finding IDs and semantic
  * fingerprints.
  */

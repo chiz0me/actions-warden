@@ -8,13 +8,17 @@
 
 import { readFile, stat } from 'node:fs/promises';
 import { resolveRepositoryFile } from './config.js';
+import {
+  NAME_RE,
+  SEVERITIES,
+  VISIBILITIES,
+  isJsonValue,
+  isRecord,
+} from './org-schema.js';
 
 const MAX_ORGANIZATION_REPORT_BYTES = 256 * 1024 * 1024;
 const ANALYSIS_ID_RE = /^[0-9a-f]{64}$/;
 const FINDING_ID_RE = /^[0-9a-f]{16}$/;
-const NAME_RE = /^[A-Za-z0-9_.-]+$/;
-const SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
-const VISIBILITIES = new Set(['all', 'public', 'private', 'internal']);
 
 /**
  * Load and validate an organization JSON report from inside the working
@@ -498,22 +502,4 @@ function compareFindings(left, right) {
     || left.line - right.line
     || left.ruleId.localeCompare(right.ruleId)
     || left.id.localeCompare(right.id);
-}
-
-function isRecord(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function isJsonValue(value, seen = new Set()) {
-  if (value === null || ['string', 'boolean'].includes(typeof value)) return true;
-  if (typeof value === 'number') return Number.isFinite(value);
-  if (!value || typeof value !== 'object' || seen.has(value)) return false;
-  seen.add(value);
-  const valid = Array.isArray(value)
-    ? value.every(item => isJsonValue(item, seen))
-    : Object.entries(value).every(([key, item]) => (
-      typeof key === 'string' && isJsonValue(item, seen)
-    ));
-  seen.delete(value);
-  return valid;
 }

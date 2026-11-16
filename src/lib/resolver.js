@@ -10,11 +10,11 @@ import semver from 'semver';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { readCache, readCacheEntry, writeCache } from './cache.js';
+import { GIT_SHA_RE } from './org-schema.js';
 import { redact } from './redact.js';
 
 const API = 'https://api.github.com';
 const IN_FLIGHT = new Map();
-const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
 
 /**
  * Resolve the API token. Precedence: explicit param > GITHUB_TOKEN > GH_TOKEN.
@@ -249,7 +249,7 @@ async function notifyResponse(onResponse, response) {
  */
 export async function resolveRefToSha({ owner, repo, ref, token, cwd }) {
   // Already a full SHA?
-  if (COMMIT_SHA_RE.test(ref)) {
+  if (GIT_SHA_RE.test(ref)) {
     return { sha: ref.toLowerCase(), type: 'commit' };
   }
   // Try as tag.
@@ -257,7 +257,7 @@ export async function resolveRefToSha({ owner, repo, ref, token, cwd }) {
   const tagRes = await ghFetch({ url: tagUrl, token, cwd });
   if (tagRes.status === 200 && tagRes.body && typeof tagRes.body === 'object') {
     const obj = tagRes.body.object;
-    if (obj && COMMIT_SHA_RE.test(String(obj.sha))) {
+    if (obj && GIT_SHA_RE.test(String(obj.sha))) {
       if (obj.type === 'tag') {
         const sha = await dereferenceTagToCommit({
           owner,
@@ -280,14 +280,14 @@ export async function resolveRefToSha({ owner, repo, ref, token, cwd }) {
   if (
     branchRes.status === 200
     && branchRes.body?.object?.type === 'commit'
-    && COMMIT_SHA_RE.test(String(branchRes.body.object.sha))
+    && GIT_SHA_RE.test(String(branchRes.body.object.sha))
   ) {
     return { sha: String(branchRes.body.object.sha).toLowerCase(), type: 'branch' };
   }
   // Try as commit.
   const commitUrl = `${API}/repos/${owner}/${repo}/commits/${encodeURIComponent(ref)}`;
   const commitRes = await ghFetch({ url: commitUrl, token, cwd });
-  if (commitRes.status === 200 && COMMIT_SHA_RE.test(String(commitRes.body?.sha))) {
+  if (commitRes.status === 200 && GIT_SHA_RE.test(String(commitRes.body?.sha))) {
     return { sha: String(commitRes.body.sha).toLowerCase(), type: 'commit' };
   }
   throw new Error(`could not resolve ${owner}/${repo}@${ref}`);
@@ -302,7 +302,7 @@ async function dereferenceTagToCommit({ owner, repo, sha, token, cwd }) {
     if (
       response.status !== 200
       || !target
-      || !COMMIT_SHA_RE.test(String(target.sha))
+      || !GIT_SHA_RE.test(String(target.sha))
     ) {
       throw new Error(`could not dereference annotated tag ${owner}/${repo}@${sha}`);
     }
@@ -320,7 +320,7 @@ async function dereferenceTagToCommit({ owner, repo, sha, token, cwd }) {
  * commits API rather than merely looking like a SHA.
  */
 export async function verifyCommitInRepo({ owner, repo, sha, token, cwd }) {
-  if (!COMMIT_SHA_RE.test(sha)) {
+  if (!GIT_SHA_RE.test(sha)) {
     throw new Error(`invalid commit SHA for ${owner}/${repo}`);
   }
   const url = `${API}/repos/${owner}/${repo}/commits/${encodeURIComponent(sha)}`;

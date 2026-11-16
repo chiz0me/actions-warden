@@ -6,15 +6,16 @@
  * automatic organization artifacts always derive from the same scan identity.
  */
 
-import { lstat } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { loadBaseline } from './baseline.js';
+import { emptyBaseline, loadBaseline } from './baseline.js';
 import { loadConfig } from './config.js';
 import { format } from './formatter.js';
 import {
   createOrganizationCheckpointArtifactKey,
   createOrganizationCheckpointIdentity,
 } from './org-checkpoint.js';
+import { NAME_RE, normalizePatterns } from './org-schema.js';
+import { pathExists } from './paths.js';
 import { RULES } from '../rules/index.js';
 
 /** Legacy agent-mode environment opt-in retained for compatibility. */
@@ -25,7 +26,6 @@ export const EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_CONTEXT';
 
 const EXECUTION_CONTEXTS = new Set(['agent', 'auto', 'ci', 'interactive']);
 
-const ORGANIZATION_RE = /^[A-Za-z0-9_.-]+$/;
 const REPORT_EXTENSIONS = Object.freeze({
   csv: 'csv',
   html: 'html',
@@ -124,7 +124,7 @@ export async function createOrganizationScanArtifacts({
   const baselinePath = baseline ?? config.baseline;
   const baselineData = baselinePath
     ? await loadBaseline({ path: baselinePath, cwd })
-    : { path: null, ids: new Set(), fingerprints: new Set() };
+    : emptyBaseline();
   const identity = createOrganizationCheckpointIdentity({
     organization,
     repositories: patterns,
@@ -218,26 +218,8 @@ function compactCoverage(coverage = {}) {
 function validateOrganization(organization) {
   if (
     typeof organization !== 'string'
-    || !ORGANIZATION_RE.test(organization)
+    || !NAME_RE.test(organization)
     || organization === '.'
     || organization === '..'
   ) throw new Error('invalid organization');
-}
-
-function normalizePatterns(patterns) {
-  if (patterns === undefined) return [];
-  if (!Array.isArray(patterns) || patterns.some(pattern => typeof pattern !== 'string' || !pattern)) {
-    throw new Error('repository filters must be non-empty strings');
-  }
-  return [...new Set(patterns)];
-}
-
-async function pathExists(path) {
-  try {
-    await lstat(path);
-    return true;
-  } catch (error) {
-    if (error.code === 'ENOENT') return false;
-    throw error;
-  }
 }

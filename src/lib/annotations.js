@@ -7,6 +7,7 @@
 
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { listRules } from '../rules/index.js';
+import { SEVERITY_LEVELS } from './org-schema.js';
 import { redact } from './redact.js';
 
 const LEVEL_ORDER = new Map([
@@ -14,12 +15,9 @@ const LEVEL_ORDER = new Map([
   ['warning', 1],
   ['notice', 2],
 ]);
-const SEVERITY_ORDER = new Map([
-  ['critical', 0],
-  ['high', 1],
-  ['medium', 2],
-  ['low', 3],
-]);
+const SEVERITY_ORDER = new Map(
+  [...SEVERITY_LEVELS].reverse().map((severity, index) => [severity, index]),
+);
 const RULE_DESCRIPTIONS = new Map(
   listRules().map(rule => [rule.id, rule.description]),
 );
