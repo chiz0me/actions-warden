@@ -17,19 +17,7 @@ export const ORGANIZATION_PROGRESS_MODES = Object.freeze([
   'plain',
   'json',
   'none',
-  'always',
-  'never',
 ]);
-
-/** Normalize compatibility aliases to the canonical progress modes. */
-export function normalizeOrganizationProgressMode(mode = 'auto') {
-  if (!ORGANIZATION_PROGRESS_MODES.includes(mode)) {
-    throw new Error('progress must be auto, plain, json, none, always, or never');
-  }
-  if (mode === 'always') return 'plain';
-  if (mode === 'never') return 'none';
-  return mode;
-}
 
 /**
  * Resolve an implicit progress mode for an explicit execution context.
@@ -40,11 +28,13 @@ export function resolveOrganizationProgressMode({
   context = 'auto',
   isTTY = false,
 } = {}) {
-  const normalized = normalizeOrganizationProgressMode(mode);
+  if (!ORGANIZATION_PROGRESS_MODES.includes(mode)) {
+    throw new Error('progress must be auto, plain, json, or none');
+  }
   if (!ORGANIZATION_PROGRESS_CONTEXTS.has(context)) {
     throw new Error('progress context must be agent, auto, ci, or interactive');
   }
-  if (normalized !== 'auto') return normalized;
+  if (mode !== 'auto') return mode;
   if (context === 'agent') return 'none';
   if (context === 'ci') return 'plain';
   if (context === 'interactive') return 'plain';

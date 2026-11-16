@@ -114,7 +114,6 @@ describe('organization scan CLI with findings', () => {
     ).href;
     const env = { ...process.env, NODE_OPTIONS: `--import=${preload}` };
     delete env.ACTIONS_WARDEN_CONTEXT;
-    delete env.ACTIONS_WARDEN_MODE;
     try {
       const run = await runCli([
         resolve(repositoryRoot, 'src/cli.js'),

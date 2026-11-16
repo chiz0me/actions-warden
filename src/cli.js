@@ -13,7 +13,7 @@
  *   2  invocation-level failure
  */
 
-import { lstat, readFile, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { createRequire } from 'node:module';
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
@@ -37,13 +37,11 @@ import {
   loadOrganizationReport,
 } from './lib/org-report-comparison.js';
 import {
-  AGENT_MODE_ENVIRONMENT_VARIABLE,
   EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE,
   createOrganizationScanArtifacts,
   renderOrganizationScanReceipt,
   resolveExecutionContext,
 } from './lib/agent-mode.js';
-import { loadOrganizationCheckpoint } from './lib/org-checkpoint.js';
 import { buildOrganizationReport } from './lib/org-report.js';
 import { SEVERITY_LEVELS, VISIBILITY_FILTERS } from './lib/org-schema.js';
 import { pathExists } from './lib/paths.js';
@@ -328,7 +326,7 @@ program.command('org-scan <organization>')
   .addOption(new Option('--previous-report <path>', 'compare with a prior organization JSON report')
     .argParser(value => parseNonEmpty(value, '--previous-report')))
   .addOption(new Option('--progress <mode>', 'stderr progress: auto, plain, json, or none')
-    .choices(['auto', 'plain', 'json', 'none', 'always', 'never'])
+    .choices(['auto', 'plain', 'json', 'none'])
     .default('auto'))
   .addOption(new Option('--report-dir <dir>', 'write compact JSON plus per-repository artifacts')
     .argParser(value => parseNonEmpty(value, '--report-dir'))
@@ -349,7 +347,6 @@ program.command('org-scan <organization>')
       optionValue: opts.agentMode,
       optionSource: command.getOptionValueSource('agentMode'),
       environmentValue: process.env[EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE],
-      legacyEnvironmentValue: process.env[AGENT_MODE_ENVIRONMENT_VARIABLE],
     });
     const agentMode = executionContext === 'agent';
     const effective = { ...opts };
@@ -387,7 +384,6 @@ program.command('org-scan <organization>')
       configPath: effective.ignoreConfig ? false : effective.config,
       baseline: effective.baseline,
       reportFormat: effective.format,
-      artifactNamespace: 'org-scan',
     });
     if (needsGeneratedReport) {
       effective.outputPath = automaticArtifacts.reportPath;
@@ -411,32 +407,9 @@ program.command('org-scan <organization>')
     );
     let checkpointPath = effective.resume ?? effective.checkpoint;
     let resume = Boolean(effective.resume);
-    let legacyCheckpointSource = null;
     if (!checkpointPath && needsGeneratedCheckpoint) {
       checkpointPath = automaticArtifacts.checkpointPath;
       resume = !effective.fresh && automaticArtifacts.resume;
-      if (!resume && !effective.fresh) {
-        const legacyArtifacts = await createOrganizationScanArtifacts({
-          organization,
-          cwd: effective.cwd,
-          repositories: effective.repository,
-          visibility: effective.visibility,
-          includeArchived: Boolean(effective.includeArchived),
-          includeDisabled: Boolean(effective.includeDisabled),
-          includeForks: Boolean(effective.includeForks),
-          maxRepositories,
-          severity: effective.severity,
-          explain: Boolean(effective.explain),
-          configPath: effective.ignoreConfig ? false : effective.config,
-          baseline: effective.baseline,
-          reportFormat: effective.format,
-          artifactNamespace: 'agent',
-        });
-        if (legacyArtifacts.resume) {
-          legacyCheckpointSource = legacyArtifacts.checkpointPath;
-          resume = true;
-        }
-      }
     } else if (effective.checkpoint) {
       resume = !effective.fresh && await pathExists(resolve(effective.cwd, checkpointPath));
     }
@@ -493,14 +466,6 @@ program.command('org-scan <organization>')
           path: resolve(effective.cwd, path),
         })),
       ]);
-    }
-    if (legacyCheckpointSource) {
-      await migrateLegacyAgentCheckpoint({
-        source: legacyCheckpointSource,
-        destination: checkpointPath,
-        cwd: effective.cwd,
-        identity: automaticArtifacts.identity,
-      });
     }
     const previousReport = effective.previousReport
       ? await loadOrganizationReport({
@@ -692,17 +657,6 @@ function parseFixId(value) {
     throw new InvalidArgumentError('--fix must be a 16-character hexadecimal change id');
   }
   return value.toLowerCase();
-}
-
-async function migrateLegacyAgentCheckpoint({ source, destination, cwd, identity }) {
-  const sourcePath = resolve(cwd, source);
-  const metadata = await lstat(sourcePath);
-  if (metadata.isSymbolicLink() || !metadata.isFile()) {
-    throw new Error('legacy agent checkpoint must be a regular file');
-  }
-  const loaded = await loadOrganizationCheckpoint({ path: source, cwd, identity });
-  const content = await readFile(loaded.path, 'utf8');
-  await writeFileGuarded({ path: destination, content, dryRun: false, cwd });
 }
 
 function assertDirectoryDoesNotOverlapControls(directory, controls) {

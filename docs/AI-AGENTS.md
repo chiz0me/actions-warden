@@ -262,9 +262,8 @@ export ACTIONS_WARDEN_CONTEXT=agent
 actions-warden org-scan my-org
 ```
 
-`ACTIONS_WARDEN_MODE=agent` remains a legacy alias. There is no reliable
-universal agent-runtime heuristic; integrations should set the preferred
-context once when they cannot add `--agent-mode` to each invocation.
+There is no reliable universal agent-runtime heuristic; integrations should set
+the context once when they cannot add `--agent-mode` to each invocation.
 
 Organization scans are artifact-first even when an integration forgets agent
 mode: the CLI writes a scope-keyed JSON report and checkpoint, automatically
@@ -276,10 +275,7 @@ explicit contract, not heuristic detection. It additionally:
   distinguish the explicit contract.
 
 Agent and normal execution share `.actions-warden-org-scan.*` artifacts. A
-context switch therefore retains compatible resume state. A compatible legacy
-`.actions-warden-agent.*` checkpoint is validated and copied atomically into
-the common namespace on an automatic-checkpoint run; the legacy file is
-retained.
+context switch therefore retains compatible resume state.
 
 An agent may explicitly select `--format=html` when the user wants a retained
 human-review artifact or `--format=csv` for a flat spreadsheet export, but it
@@ -295,8 +291,8 @@ normal complete JSON report as well if the run must later be used as
 The automatic artifact key covers the organization, repository filters,
 inclusion flags, repository limit, severity, explanation setting, normalized
 policy, baseline contents, analysis generation, and rule catalog. A compatible
-package upgrade keeps the same path and atomically migrates older checkpoint
-metadata on the first successful resume. A changed scope, security control, or
+package upgrade keeps the same path, and the next checkpoint write records the
+current package version. A changed scope, security control, or
 analysis behavior receives a different path instead of replacing an
 incompatible checkpoint.
 The generated files begin `.actions-warden-org-scan.`; protect them as

@@ -184,7 +184,7 @@ function assertCheckpointOptions(checkpointPath, resume) {
 
 async function loadResumeState(settings, environment) {
   const { cwd, checkpointPath, resume, onProgress } = settings;
-  if (!resume) return { results: new Map(), migrationRequired: false };
+  if (!resume) return { results: new Map() };
   const loadedCheckpoint = await loadOrganizationCheckpoint({
     path: checkpointPath,
     cwd,
@@ -317,9 +317,9 @@ async function openCheckpoint(settings, environment, loadedCheckpoint, selection
     identity: environment.checkpointIdentity,
     results,
   });
-  if (checkpointPath && (!resume || loadedCheckpoint.migrationRequired)) {
+  if (checkpointPath && !resume) {
     await persist();
-    if (!resume) await emitProgress(onProgress, { type: 'checkpoint-created' });
+    await emitProgress(onProgress, { type: 'checkpoint-created' });
   }
   return { results, persist };
 }

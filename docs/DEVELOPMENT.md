@@ -195,8 +195,9 @@ Changes must preserve these boundaries:
   rescanned.
 - Organization result compatibility is controlled by
   `ORGANIZATION_ANALYSIS_GENERATION`, not by the package version. Producer
-  versions remain checkpoint metadata and compatible checkpoints migrate
-  through the guarded atomic writer.
+  versions remain checkpoint metadata that the next guarded atomic write
+  refreshes. Only the current checkpoint schema is accepted; an older schema
+  fails closed.
 - Checkpoints use guarded atomic writes, remain inside the working directory,
   omit tokens and raw YAML, and cannot replace active policy or baseline files.
 - Report directories remain dedicated and inside the working directory, reject
@@ -336,8 +337,8 @@ for documentation, release metadata, progress rendering, authentication,
 concurrency, or internal refactors that preserve those results. The rule
 catalog hash independently invalidates catalog changes. A generation change
 must add tests proving the old checkpoint fails closed and automatic scans
-select a new artifact key; a compatible format migration must prove the old checkpoint
-is validated, rewritten atomically, and still subject to fresh tree checks.
+select a new artifact key. A checkpoint schema change does the same; the
+project does not carry migration paths for older checkpoints.
 
 ## Output compatibility
 

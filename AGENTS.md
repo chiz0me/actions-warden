@@ -62,8 +62,7 @@ actions-warden org-scan ORG --agent-mode
   receipt kind. It shares `.actions-warden-org-scan.*` artifacts with normal
   execution so a context switch retains compatible resume state. The packaged
   skill should pass the flag; an integration may instead set
-  `ACTIONS_WARDEN_CONTEXT=agent` once. `ACTIONS_WARDEN_MODE=agent` is a legacy
-  alias.
+  `ACTIONS_WARDEN_CONTEXT=agent` once.
 - Automatic artifact names are derived from the checkpoint compatibility
   identity. An exact-scope later run resumes its checkpoint across compatible
   package versions; a changed filter, severity, policy, baseline, analysis

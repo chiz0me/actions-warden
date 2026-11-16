@@ -373,6 +373,18 @@ describe('CLI safety contract', () => {
     });
   });
 
+  it.each(['always', 'never'])('rejects the removed --progress=%s value with exit code 2', async value => {
+    await expect(execFileAsync(process.execPath, [
+      cli,
+      'org-scan',
+      'octo-org',
+      `--progress=${value}`,
+    ], { cwd })).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining('Allowed choices are auto, plain, json, none.'),
+    });
+  });
+
   it('keeps forced live progress on stderr and JSON reports clean', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aw-cli-progress-'));
     const preload = pathToFileURL(resolve(cwd, 'test/fixtures/mock-org-fetch.js')).href;
@@ -392,7 +404,6 @@ describe('CLI safety contract', () => {
       cwd,
       env: {
         ...process.env,
-        ACTIONS_WARDEN_MODE: '',
         NODE_OPTIONS: `--import=${preload}`,
       },
     };
@@ -402,14 +413,14 @@ describe('CLI safety contract', () => {
         '--checkpoint',
         'scan-checkpoint.json',
         '--progress',
-        'never',
+        'none',
       ], options);
       const { stdout, stderr } = await execFileAsync(process.execPath, [
         ...common,
         '--checkpoint',
         'scan-checkpoint.json',
         '--progress',
-        'always',
+        'plain',
       ], options);
       expect(JSON.parse(stdout)).toMatchObject({
         organization: 'octo-org',
@@ -432,7 +443,6 @@ describe('CLI safety contract', () => {
       env: {
         ...process.env,
         ACTIONS_WARDEN_CONTEXT: '',
-        ACTIONS_WARDEN_MODE: '',
         NODE_OPTIONS: `--import=${preload}`,
       },
     };
@@ -541,7 +551,6 @@ describe('CLI safety contract', () => {
       env: {
         ...process.env,
         ACTIONS_WARDEN_CONTEXT: '',
-        ACTIONS_WARDEN_MODE: '',
         NODE_OPTIONS: `--import=${preload}`,
       },
     };
@@ -648,13 +657,12 @@ describe('CLI safety contract', () => {
       root,
       '--ignore-config',
       '--progress',
-      'never',
+      'none',
     ];
     const options = {
       cwd,
       env: {
         ...process.env,
-        ACTIONS_WARDEN_MODE: '',
         NODE_OPTIONS: `--import=${preload}`,
       },
     };
@@ -724,13 +732,12 @@ describe('CLI safety contract', () => {
       root,
       '--ignore-config',
       '--progress',
-      'never',
+      'none',
     ];
     const options = {
       cwd,
       env: {
         ...process.env,
-        ACTIONS_WARDEN_MODE: '',
         NODE_OPTIONS: `--import=${preload}`,
       },
     };
@@ -760,7 +767,7 @@ describe('CLI safety contract', () => {
       const resumed = await execFileAsync(process.execPath, [
         ...common,
         '--progress',
-        'always',
+        'plain',
       ], options);
       const resumedReceipt = JSON.parse(resumed.stdout);
       expect(resumedReceipt.kind).toBe('actions-warden-org-scan-receipt');
@@ -776,7 +783,7 @@ describe('CLI safety contract', () => {
         ...common,
         '--fresh',
         '--progress',
-        'always',
+        'plain',
       ], options);
       expect(JSON.parse(fresh.stdout).checkpoint).toEqual({
         path: firstReceipt.checkpoint.path,
@@ -836,7 +843,6 @@ describe('CLI safety contract', () => {
       cwd,
       env: {
         ...process.env,
-        ACTIONS_WARDEN_MODE: '',
         NODE_OPTIONS: `--import=${preload}`,
       },
     };
@@ -889,7 +895,7 @@ describe('CLI safety contract', () => {
       const normalRun = await execFileAsync(process.execPath, [
         ...base,
         '--progress',
-        'always',
+        'plain',
       ], options);
       const normalReceipt = JSON.parse(normalRun.stdout);
       expect(normalReceipt.kind).toBe('actions-warden-org-scan-receipt');
@@ -923,23 +929,18 @@ describe('CLI safety contract', () => {
       expect(await readFile(join(root, csvReceipt.report.path), 'utf8'))
         .toMatch(/^record_type,status,/);
 
-      const legacyCheckpointPath = firstReceipt.checkpoint.path.replace(
-        /^\.actions-warden-org-scan\./,
-        '.actions-warden-agent.',
-      );
-      await writeFile(join(root, legacyCheckpointPath), `${JSON.stringify({
+      await writeFile(join(root, firstReceipt.checkpoint.path), `${JSON.stringify({
         schemaVersion: '1.1',
         kind: checkpoint.kind,
         toolVersion: '0.4.0',
         identity: checkpoint.identity,
         repositories: checkpoint.repositories,
       })}\n`);
-      await rm(join(root, firstReceipt.checkpoint.path));
 
       const resumed = await execFileAsync(process.execPath, [
         ...base,
         '--progress',
-        'always',
+        'plain',
       ], options);
       const resumedReceipt = JSON.parse(resumed.stdout);
       expect(resumedReceipt.kind).toBe('actions-warden-org-scan-receipt');
@@ -950,17 +951,15 @@ describe('CLI safety contract', () => {
         repositoriesReused: 1,
       });
       expect(resumed.stderr).toContain('[1/1] resumed octo-org/app');
-      const migratedCheckpoint = JSON.parse(
+      const refreshedCheckpoint = JSON.parse(
         await readFile(join(root, firstReceipt.checkpoint.path), 'utf8'),
       );
-      expect(migratedCheckpoint).toMatchObject({
+      expect(refreshedCheckpoint).toMatchObject({
         schemaVersion: '1.1',
         toolVersion: pkg.version,
         identity: { analysisGeneration: 2 },
       });
-      expect(migratedCheckpoint.identity).not.toHaveProperty('toolVersion');
-      expect(JSON.parse(await readFile(join(root, legacyCheckpointPath), 'utf8')))
-        .toMatchObject({ schemaVersion: '1.1', toolVersion: '0.4.0' });
+      expect(refreshedCheckpoint.identity).not.toHaveProperty('toolVersion');
 
       const changedScope = await execFileAsync(process.execPath, [
         ...common,
@@ -984,7 +983,6 @@ describe('CLI safety contract', () => {
       env: {
         ...process.env,
         ACTIONS_WARDEN_CONTEXT: 'agent',
-        ACTIONS_WARDEN_MODE: 'agent',
         NODE_OPTIONS: `--import=${preload}`,
       },
     };
@@ -998,7 +996,7 @@ describe('CLI safety contract', () => {
         '--ignore-config',
         '--no-agent-mode',
         '--progress',
-        'never',
+        'none',
         '--format',
         'json',
         '--output',
@@ -1009,8 +1007,6 @@ describe('CLI safety contract', () => {
         status: 'OK',
       });
       expect(disabled.stdout).not.toContain('actions-warden-agent-receipt');
-      expect((await readdir(root)).filter(file => file.startsWith('.actions-warden-agent.')))
-        .toEqual([]);
 
       const explicitStdout = await execFileAsync(process.execPath, [
         cli,
@@ -1024,7 +1020,7 @@ describe('CLI safety contract', () => {
         '--format',
         'toon',
         '--progress',
-        'never',
+        'none',
       ], options);
       expect(explicitStdout.stdout).toContain('REPOSITORY:');
       expect(explicitStdout.stdout).toContain('STATUS: OK');
@@ -1034,30 +1030,14 @@ describe('CLI safety contract', () => {
     }
   });
 
-  it('rejects unsupported agent mode environment values', async () => {
+  it('rejects unsupported execution context values', async () => {
     await expect(execFileAsync(process.execPath, [
       cli,
       'org-scan',
       'octo-org',
     ], {
       cwd,
-      env: { ...process.env, ACTIONS_WARDEN_MODE: 'automatic' },
-    })).rejects.toMatchObject({
-      code: 2,
-      stderr: expect.stringContaining('ACTIONS_WARDEN_MODE must be "agent" when set'),
-    });
-
-    await expect(execFileAsync(process.execPath, [
-      cli,
-      'org-scan',
-      'octo-org',
-    ], {
-      cwd,
-      env: {
-        ...process.env,
-        ACTIONS_WARDEN_CONTEXT: 'automatic',
-        ACTIONS_WARDEN_MODE: '',
-      },
+      env: { ...process.env, ACTIONS_WARDEN_CONTEXT: 'automatic' },
     })).rejects.toMatchObject({
       code: 2,
       stderr: expect.stringContaining(
@@ -1071,9 +1051,9 @@ describe('CLI safety contract', () => {
     const preload = pathToFileURL(resolve(cwd, 'test/fixtures/mock-org-fetch.js')).href;
     const baseEnvironment = {
       ...process.env,
-      ACTIONS_WARDEN_MODE: '',
       NODE_OPTIONS: `--import=${preload}`,
     };
+    delete baseEnvironment.ACTIONS_WARDEN_CONTEXT;
     try {
       const agent = await execFileAsync(process.execPath, [
         cli,
@@ -1091,6 +1071,19 @@ describe('CLI safety contract', () => {
         kind: 'actions-warden-agent-receipt',
         report: { layout: 'single' },
       });
+
+      const ignoredAlias = await execFileAsync(process.execPath, [
+        cli,
+        'org-scan',
+        'octo-org',
+        '--cwd',
+        root,
+        '--ignore-config',
+      ], {
+        cwd,
+        env: { ...baseEnvironment, ACTIONS_WARDEN_MODE: 'agent' },
+      });
+      expect(JSON.parse(ignoredAlias.stdout).kind).toBe('actions-warden-org-scan-receipt');
 
       const ci = await execFileAsync(process.execPath, [
         cli,

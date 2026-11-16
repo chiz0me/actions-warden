@@ -452,7 +452,7 @@ describe('organization scan command', () => {
     expect(keyGen2).toMatch(/^[0-9a-f]{32}$/);
   });
 
-  it('rejects a legacy v0.3.0 checkpoint due to analysis-generation mismatch', async () => {
+  it('rejects a schema 1.0 checkpoint with an actionable error', async () => {
     const checkpointPath = 'scan-checkpoint.json';
     vi.stubGlobal('fetch', organizationFetch({ treeSha, workflowSha, workflow }));
     await scanOrganization({ organization: 'octo-org', cwd, checkpointPath });
@@ -460,7 +460,7 @@ describe('organization scan command', () => {
     const current = JSON.parse(await readFile(join(cwd, checkpointPath), 'utf8'));
     await writeFile(
       join(cwd, checkpointPath),
-      `${JSON.stringify(asLegacyCheckpoint(current))}\n`,
+      `${JSON.stringify(asSchema10Checkpoint(current))}\n`,
     );
     vi.stubGlobal('fetch', vi.fn());
 
@@ -469,28 +469,7 @@ describe('organization scan command', () => {
       cwd,
       checkpointPath,
       resume: true,
-    })).rejects.toThrow(/does not match current analysisGeneration/);
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it('rejects a legacy checkpoint without a known analysis-generation mapping', async () => {
-    const checkpointPath = 'scan-checkpoint.json';
-    vi.stubGlobal('fetch', organizationFetch({ treeSha, workflowSha, workflow }));
-    await scanOrganization({ organization: 'octo-org', cwd, checkpointPath });
-
-    const current = JSON.parse(await readFile(join(cwd, checkpointPath), 'utf8'));
-    await writeFile(
-      join(cwd, checkpointPath),
-      `${JSON.stringify(asLegacyCheckpoint(current, '0.2.0'))}\n`,
-    );
-    vi.stubGlobal('fetch', vi.fn());
-
-    await expect(scanOrganization({
-      organization: 'octo-org',
-      cwd,
-      checkpointPath,
-      resume: true,
-    })).rejects.toThrow(/has no compatible analysis generation/);
+    })).rejects.toThrow(/schemaVersion must be "1\.1".*start a fresh scan/);
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -837,12 +816,12 @@ function organizationFetch({ treeSha: revision, workflowSha: blobSha, workflow: 
   });
 }
 
-function asLegacyCheckpoint(checkpoint, toolVersion = '0.3.0') {
+function asSchema10Checkpoint(checkpoint) {
   return {
     schemaVersion: '1.0',
     kind: checkpoint.kind,
     identity: {
-      toolVersion,
+      toolVersion: '0.3.0',
       rulesHash: checkpoint.identity.rulesHash,
       organization: checkpoint.identity.organization,
       scope: checkpoint.identity.scope,

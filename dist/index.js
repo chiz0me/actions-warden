@@ -20235,8 +20235,6 @@ const VERSION = '0.5.0';
 
 const CHECKPOINT_KIND = 'actions-warden-org-scan';
 const CHECKPOINT_SCHEMA_VERSION = '1.1';
-const LEGACY_CHECKPOINT_SCHEMA_VERSION = '1.0';
-const FIRST_ANALYSIS_GENERATION_TOOL_VERSION = '0.3.0';
 const TOOL_VERSION_RE = /^\d+\.\d+\.\d+$/;
 
 /**
@@ -20296,44 +20294,19 @@ function createOrganizationCheckpointIdentity({
 }
 
 /**
- * Create the stable key used by automatic organization-scan artifacts.
- *
- * Generation 1 deliberately retains the exact identity serialization used by
- * v0.3.0 so existing automatic checkpoints remain discoverable after an
- * upgrade. Later generations use the version-independent compatibility
- * identity directly.
+ * Create the stable key used by automatic organization-scan artifacts from
+ * the version-independent compatibility identity.
  */
 function createOrganizationCheckpointArtifactKey(identity) {
-  const compatibleIdentity = identity.analysisGeneration === 1
-    ? {
-        toolVersion: FIRST_ANALYSIS_GENERATION_TOOL_VERSION,
-        rulesHash: identity.rulesHash,
-        organization: identity.organization,
-        scope: {
-          repositories: identity.scope.repositories,
-          visibility: identity.scope.visibility,
-          includeArchived: identity.scope.includeArchived,
-          includeDisabled: identity.scope.includeDisabled,
-          includeForks: identity.scope.includeForks,
-          maxRepositories: identity.scope.maxRepositories,
-          severity: identity.scope.severity,
-          explain: identity.scope.explain,
-        },
-        configHash: identity.configHash,
-        baselineHash: identity.baselineHash,
-      }
-    : identity;
   return (0,external_node_crypto_namespaceObject.createHash)('sha256')
-    .update(identity.analysisGeneration === 1
-      ? JSON.stringify(compatibleIdentity)
-      : stableStringify(compatibleIdentity))
+    .update(stableStringify(identity))
     .digest('hex')
     .slice(0, 32);
 }
 
 /**
- * Load and fully validate a checkpoint, returning reusable repository results
- * plus whether a successful resume should migrate its metadata.
+ * Load and fully validate a checkpoint, returning its reusable repository
+ * results. Only the current schema version is accepted.
  */
 async function loadOrganizationCheckpoint({ path, cwd, identity }) {
   const resolvedPath = await resolveRepositoryFile(path, cwd);
@@ -20352,14 +20325,10 @@ async function loadOrganizationCheckpoint({ path, cwd, identity }) {
     if (error instanceof SyntaxError) throw new Error('organization checkpoint is not valid JSON');
     throw error;
   }
-  if (
-    !isRecord(checkpoint)
-    || ![CHECKPOINT_SCHEMA_VERSION, LEGACY_CHECKPOINT_SCHEMA_VERSION]
-      .includes(checkpoint.schemaVersion)
-  ) {
+  if (!isRecord(checkpoint) || checkpoint.schemaVersion !== CHECKPOINT_SCHEMA_VERSION) {
     throw new Error(
-      `organization checkpoint schemaVersion must be "${CHECKPOINT_SCHEMA_VERSION}"`
-      + ` or "${LEGACY_CHECKPOINT_SCHEMA_VERSION}"`,
+      `organization checkpoint schemaVersion must be "${CHECKPOINT_SCHEMA_VERSION}";`
+      + ' older checkpoints cannot be resumed, so start a fresh scan to replace it',
     );
   }
   if (checkpoint.kind !== CHECKPOINT_KIND) {
@@ -20378,12 +20347,7 @@ async function loadOrganizationCheckpoint({ path, cwd, identity }) {
     if (results.has(key)) throw new Error(`duplicate checkpoint repository: ${result.repository}`);
     results.set(key, result);
   }
-  return {
-    path: resolvedPath,
-    results,
-    migrationRequired: checkpoint.schemaVersion !== CHECKPOINT_SCHEMA_VERSION
-      || checkpoint.toolVersion !== VERSION,
-  };
+  return { path: resolvedPath, results };
 }
 
 /** Validate a checkpoint destination without creating or replacing a file. */
@@ -20493,26 +20457,10 @@ function normalizeCheckpointIdentity(checkpoint) {
   if (!isRecord(checkpoint.identity)) {
     throw new Error('organization checkpoint identity is invalid');
   }
-  if (checkpoint.schemaVersion === CHECKPOINT_SCHEMA_VERSION) {
-    if (typeof checkpoint.toolVersion !== 'string' || !TOOL_VERSION_RE.test(checkpoint.toolVersion)) {
-      throw new Error('organization checkpoint toolVersion is invalid');
-    }
-    return checkpoint.identity;
+  if (typeof checkpoint.toolVersion !== 'string' || !TOOL_VERSION_RE.test(checkpoint.toolVersion)) {
+    throw new Error('organization checkpoint toolVersion is invalid');
   }
-  if (checkpoint.identity.toolVersion !== FIRST_ANALYSIS_GENERATION_TOOL_VERSION) {
-    throw new Error(
-      `organization checkpoint toolVersion ${String(checkpoint.identity.toolVersion)}`
-      + ' has no compatible analysis generation',
-    );
-  }
-  return {
-    analysisGeneration: 1,
-    rulesHash: checkpoint.identity.rulesHash,
-    organization: checkpoint.identity.organization,
-    scope: checkpoint.identity.scope,
-    configHash: checkpoint.identity.configHash,
-    baselineHash: checkpoint.identity.baselineHash,
-  };
+  return checkpoint.identity;
 }
 
 function validateCheckpointResult(value, identity) {
@@ -21066,7 +21014,7 @@ function assertCheckpointOptions(checkpointPath, resume) {
 
 async function loadResumeState(settings, environment) {
   const { cwd, checkpointPath, resume, onProgress } = settings;
-  if (!resume) return { results: new Map(), migrationRequired: false };
+  if (!resume) return { results: new Map() };
   const loadedCheckpoint = await loadOrganizationCheckpoint({
     path: checkpointPath,
     cwd,
@@ -21199,9 +21147,9 @@ async function openCheckpoint(settings, environment, loadedCheckpoint, selection
     identity: environment.checkpointIdentity,
     results,
   });
-  if (checkpointPath && (!resume || loadedCheckpoint.migrationRequired)) {
+  if (checkpointPath && !resume) {
     await persist();
-    if (!resume) await emitProgress(onProgress, { type: 'checkpoint-created' });
+    await emitProgress(onProgress, { type: 'checkpoint-created' });
   }
   return { results, persist };
 }
@@ -21613,19 +21561,7 @@ const ORGANIZATION_PROGRESS_MODES = Object.freeze([
   'plain',
   'json',
   'none',
-  'always',
-  'never',
 ]);
-
-/** Normalize compatibility aliases to the canonical progress modes. */
-function normalizeOrganizationProgressMode(mode = 'auto') {
-  if (!ORGANIZATION_PROGRESS_MODES.includes(mode)) {
-    throw new Error('progress must be auto, plain, json, none, always, or never');
-  }
-  if (mode === 'always') return 'plain';
-  if (mode === 'never') return 'none';
-  return mode;
-}
 
 /**
  * Resolve an implicit progress mode for an explicit execution context.
@@ -21636,11 +21572,13 @@ function resolveOrganizationProgressMode({
   context = 'auto',
   isTTY = false,
 } = {}) {
-  const normalized = normalizeOrganizationProgressMode(mode);
+  if (!ORGANIZATION_PROGRESS_MODES.includes(mode)) {
+    throw new Error('progress must be auto, plain, json, or none');
+  }
   if (!ORGANIZATION_PROGRESS_CONTEXTS.has(context)) {
     throw new Error('progress context must be agent, auto, ci, or interactive');
   }
-  if (normalized !== 'auto') return normalized;
+  if (mode !== 'auto') return mode;
   if (context === 'agent') return 'none';
   if (context === 'ci') return 'plain';
   if (context === 'interactive') return 'plain';
@@ -22342,9 +22280,6 @@ function compareFindings(left, right) {
 
 
 
-/** Legacy agent-mode environment opt-in retained for compatibility. */
-const AGENT_MODE_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_MODE';
-
 /** Preferred execution-context environment variable. */
 const EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_CONTEXT';
 
@@ -22358,37 +22293,16 @@ const REPORT_EXTENSIONS = Object.freeze({
   text: 'txt',
   toon: 'toon',
 });
-const ARTIFACT_PREFIXES = Object.freeze({
-  agent: '.actions-warden-agent',
-  'org-scan': '.actions-warden-org-scan',
-});
+const ARTIFACT_PREFIX = '.actions-warden-org-scan';
 
 /**
- * Resolve explicit CLI precedence over the environment opt-in.
- *
- * @param {object} options
- * @param {boolean} [options.optionValue]
- * @param {string} [options.optionSource]
- * @param {string} [options.environmentValue]
- */
-function resolveAgentMode({ optionValue, optionSource, environmentValue } = {}) {
-  if (optionSource === 'cli') return Boolean(optionValue);
-  if (environmentValue === undefined || environmentValue === '') return false;
-  if (environmentValue !== 'agent') {
-    throw new Error(`${AGENT_MODE_ENVIRONMENT_VARIABLE} must be "agent" when set`);
-  }
-  return true;
-}
-
-/**
- * Resolve CLI flag precedence over the preferred context environment variable
- * and the legacy ACTIONS_WARDEN_MODE=agent alias.
+ * Resolve CLI flag precedence over the ACTIONS_WARDEN_CONTEXT environment
+ * variable. Returns `auto` when neither selects a context.
  */
 function resolveExecutionContext({
   optionValue,
   optionSource,
   environmentValue,
-  legacyEnvironmentValue,
 } = {}) {
   if (optionSource === 'cli') return optionValue ? 'agent' : 'auto';
   if (environmentValue !== undefined && String(environmentValue).trim() !== '') {
@@ -22400,7 +22314,7 @@ function resolveExecutionContext({
     }
     return context;
   }
-  return resolveAgentMode({ environmentValue: legacyEnvironmentValue }) ? 'agent' : 'auto';
+  return 'auto';
 }
 
 /**
@@ -22420,7 +22334,6 @@ function resolveExecutionContext({
  * @param {string|false} [options.configPath]
  * @param {string} [options.baseline]
  * @param {'toon'|'json'|'text'|'csv'|'sarif'|'html'} options.reportFormat
- * @param {'agent'|'org-scan'} [options.artifactNamespace]
  */
 async function createOrganizationScanArtifacts({
   organization,
@@ -22436,7 +22349,6 @@ async function createOrganizationScanArtifacts({
   configPath,
   baseline,
   reportFormat,
-  artifactNamespace = 'org-scan',
 }) {
   validateOrganization(organization);
   const patterns = normalizePatterns(repositories);
@@ -22464,12 +22376,10 @@ async function createOrganizationScanArtifacts({
   });
   const key = createOrganizationCheckpointArtifactKey(identity);
   const groupedKey = key.match(/.{8}/g).join('.');
-  const prefix = ARTIFACT_PREFIXES[artifactNamespace];
-  if (!prefix) throw new Error(`invalid organization artifact namespace: ${artifactNamespace}`);
-  const checkpointPath = `${prefix}.${groupedKey}.checkpoint.json`;
+  const checkpointPath = `${ARTIFACT_PREFIX}.${groupedKey}.checkpoint.json`;
   const reportExtension = REPORT_EXTENSIONS[reportFormat];
   if (!reportExtension) throw new Error(`invalid organization report format: ${reportFormat}`);
-  const reportPath = `${prefix}.${groupedKey}.report.${reportExtension}`;
+  const reportPath = `${ARTIFACT_PREFIX}.${groupedKey}.report.${reportExtension}`;
 
   return {
     checkpointPath,
@@ -22477,7 +22387,6 @@ async function createOrganizationScanArtifacts({
     resume: await pathExists((0,external_node_path_namespaceObject.resolve)(cwd, checkpointPath)),
     configPath: config.path,
     baselinePath: baselineData.path,
-    identity,
   };
 }
 

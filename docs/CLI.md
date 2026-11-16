@@ -313,7 +313,7 @@ actions-warden org-scan <organization> \
   [--checkpoint=<path> | --resume=<path>] [--fresh] \
   [--no-auto-checkpoint] \
   [--previous-report=<path>] \
-  [--progress=auto|plain|json|none|always|never] \
+  [--progress=auto|plain|json|none] \
   [--report-dir=<dedicated-directory>] \
   [--agent-mode | --no-agent-mode] \
   [--format=toon|json|text|csv|sarif|html] \
@@ -481,10 +481,8 @@ actions-warden org-scan my-org
 ```
 
 `ACTIONS_WARDEN_CONTEXT` accepts `agent`, `auto`, `ci`, or `interactive`.
-`ACTIONS_WARDEN_MODE=agent` remains a compatibility alias for older
-integrations. With implicit `--progress=auto`, agent context is quiet, CI and
-interactive contexts use plain progress, and auto context follows stderr TTY
-state.
+With implicit `--progress=auto`, agent context is quiet, CI and interactive
+contexts use plain progress, and auto context follows stderr TTY state.
 
 The general organization-scan defaults already select JSON file output, a
 scope-keyed checkpoint, compatible automatic resume, and a bounded receipt.
@@ -509,10 +507,7 @@ all use these paths:
 An explicitly selected report format changes the report extension. Generated
 files are mode `0600` when first created and may reveal private security
 posture; protect them and ignore `.actions-warden-org-scan.*` in consuming
-repositories when appropriate. On an automatic-checkpoint run, a compatible
-legacy `.actions-warden-agent.*` checkpoint is validated and copied atomically
-to the common path before resume. The legacy file is retained as possible
-audit evidence.
+repositories when appropriate.
 
 After writing the full report, stdout contains only a bounded JSON receipt:
 
@@ -556,16 +551,14 @@ an invocation error. Explicit `--format`, `--output`, `--output-path`,
 With explicit `--output=stdout`, stdout is the complete selected report and no
 receipt is added. Use `--no-agent-mode` to override an inherited environment
 marker. Passing both agent-mode flags is rejected. An explicit agent-mode flag
-has precedence over both environment variables; the preferred context variable
-has precedence over the legacy marker.
+has precedence over `ACTIONS_WARDEN_CONTEXT`.
 
 ### Progress and resume
 
 Progress is independent of the report format and is written only to stderr.
 This keeps stdout valid JSON, CSV, SARIF, TOON, text, or HTML. Select `plain`
 for human CI or redirected logs, `json` for one parseable event per line, and
-`none` when a caller wants no progress channel. `always` and `never` remain
-aliases for `plain` and `none`:
+`none` when a caller wants no progress channel:
 
 ```sh
 actions-warden org-scan my-org \

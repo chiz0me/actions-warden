@@ -137,13 +137,12 @@ default-branch tree SHA. Only unchanged, error-free repository results are
 reused; changed and previously failed repositories are scanned again. Progress
 defaults to interactive terminals; use `--progress=plain` for redirected logs,
 `--progress=json` for JSON Lines events, or `--progress=none` to disable it.
-The older `always` and `never` spellings remain aliases.
 
 Compatible package upgrades reuse the same checkpoint. The producing package
 version is recorded as metadata, while an explicit analysis generation plus
 the rule catalog controls compatibility. A parser, discovery, or rule behavior
-change advances that generation and requires a fresh scan. Compatible older
-checkpoints are rewritten atomically on their first successful resume.
+change advances that generation and requires a fresh scan. The next checkpoint
+write records the current package version.
 
 Compare a fresh scan with a compatible previous JSON report:
 

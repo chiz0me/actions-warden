@@ -67,10 +67,7 @@ Out of scope:
   reports.
 - Explicit CLI agent mode shares the normal scope-keyed report and checkpoint
   identity, uses the same guarded writer and `0600` creation mode, and changes
-  only presentation defaults plus the bounded receipt kind. Compatible legacy
-  `.actions-warden-agent.*` checkpoints are copied into the common namespace
-  on a compatible automatic-checkpoint run through validation and guarded
-  atomic writing; the legacy evidence is left intact.
+  only presentation defaults plus the bounded receipt kind.
 - `--report-dir` accepts only a dedicated directory inside the working tree,
   rejects symbolic-link and control-file overlap, creates directories with
   mode `0700` and files with mode `0600`, and writes its integrity manifest

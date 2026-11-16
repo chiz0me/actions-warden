@@ -18,9 +18,6 @@ import { NAME_RE, normalizePatterns } from './org-schema.js';
 import { pathExists } from './paths.js';
 import { RULES } from '../rules/index.js';
 
-/** Legacy agent-mode environment opt-in retained for compatibility. */
-export const AGENT_MODE_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_MODE';
-
 /** Preferred execution-context environment variable. */
 export const EXECUTION_CONTEXT_ENVIRONMENT_VARIABLE = 'ACTIONS_WARDEN_CONTEXT';
 
@@ -34,37 +31,16 @@ const REPORT_EXTENSIONS = Object.freeze({
   text: 'txt',
   toon: 'toon',
 });
-const ARTIFACT_PREFIXES = Object.freeze({
-  agent: '.actions-warden-agent',
-  'org-scan': '.actions-warden-org-scan',
-});
+const ARTIFACT_PREFIX = '.actions-warden-org-scan';
 
 /**
- * Resolve explicit CLI precedence over the environment opt-in.
- *
- * @param {object} options
- * @param {boolean} [options.optionValue]
- * @param {string} [options.optionSource]
- * @param {string} [options.environmentValue]
- */
-export function resolveAgentMode({ optionValue, optionSource, environmentValue } = {}) {
-  if (optionSource === 'cli') return Boolean(optionValue);
-  if (environmentValue === undefined || environmentValue === '') return false;
-  if (environmentValue !== 'agent') {
-    throw new Error(`${AGENT_MODE_ENVIRONMENT_VARIABLE} must be "agent" when set`);
-  }
-  return true;
-}
-
-/**
- * Resolve CLI flag precedence over the preferred context environment variable
- * and the legacy ACTIONS_WARDEN_MODE=agent alias.
+ * Resolve CLI flag precedence over the ACTIONS_WARDEN_CONTEXT environment
+ * variable. Returns `auto` when neither selects a context.
  */
 export function resolveExecutionContext({
   optionValue,
   optionSource,
   environmentValue,
-  legacyEnvironmentValue,
 } = {}) {
   if (optionSource === 'cli') return optionValue ? 'agent' : 'auto';
   if (environmentValue !== undefined && String(environmentValue).trim() !== '') {
@@ -76,7 +52,7 @@ export function resolveExecutionContext({
     }
     return context;
   }
-  return resolveAgentMode({ environmentValue: legacyEnvironmentValue }) ? 'agent' : 'auto';
+  return 'auto';
 }
 
 /**
@@ -96,7 +72,6 @@ export function resolveExecutionContext({
  * @param {string|false} [options.configPath]
  * @param {string} [options.baseline]
  * @param {'toon'|'json'|'text'|'csv'|'sarif'|'html'} options.reportFormat
- * @param {'agent'|'org-scan'} [options.artifactNamespace]
  */
 export async function createOrganizationScanArtifacts({
   organization,
@@ -112,7 +87,6 @@ export async function createOrganizationScanArtifacts({
   configPath,
   baseline,
   reportFormat,
-  artifactNamespace = 'org-scan',
 }) {
   validateOrganization(organization);
   const patterns = normalizePatterns(repositories);
@@ -140,12 +114,10 @@ export async function createOrganizationScanArtifacts({
   });
   const key = createOrganizationCheckpointArtifactKey(identity);
   const groupedKey = key.match(/.{8}/g).join('.');
-  const prefix = ARTIFACT_PREFIXES[artifactNamespace];
-  if (!prefix) throw new Error(`invalid organization artifact namespace: ${artifactNamespace}`);
-  const checkpointPath = `${prefix}.${groupedKey}.checkpoint.json`;
+  const checkpointPath = `${ARTIFACT_PREFIX}.${groupedKey}.checkpoint.json`;
   const reportExtension = REPORT_EXTENSIONS[reportFormat];
   if (!reportExtension) throw new Error(`invalid organization report format: ${reportFormat}`);
-  const reportPath = `${prefix}.${groupedKey}.report.${reportExtension}`;
+  const reportPath = `${ARTIFACT_PREFIX}.${groupedKey}.report.${reportExtension}`;
 
   return {
     checkpointPath,
@@ -153,7 +125,6 @@ export async function createOrganizationScanArtifacts({
     resume: await pathExists(resolve(cwd, checkpointPath)),
     configPath: config.path,
     baselinePath: baselineData.path,
-    identity,
   };
 }
 

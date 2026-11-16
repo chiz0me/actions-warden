@@ -14,7 +14,7 @@ JSON evidence into a compact aggregate plus integrity-manifested repository
 artifacts, and compare a compatible prior JSON report without calling missing
 or failed repository findings resolved.
 For agent-initiated organization scans, pass `--agent-mode` or set
-`ACTIONS_WARDEN_CONTEXT=agent` (`ACTIONS_WARDEN_MODE=agent` is a legacy alias).
+`ACTIONS_WARDEN_CONTEXT=agent`.
 It disables implicit progress and uses the agent receipt kind while sharing the
 normal artifact identity so compatible resume state survives context switches.
 Preserve requested scope; do not load the complete report into model context.

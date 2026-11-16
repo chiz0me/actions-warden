@@ -66,8 +66,7 @@ contains JSON when the process exits `2`.
 Organization-scan live progress is also a stderr-only channel. It never becomes
 part of JSON, CSV, SARIF, TOON, text, or HTML stdout. `--progress=auto` enables
 plain lines for an interactive stderr, `plain` enables human-readable output,
-`json` emits JSON Lines, and `none` disables it. `always` and `never` are
-compatibility aliases for `plain` and `none`. Once a JSON progress channel has
+`json` emits JSON Lines, and `none` disables it. Once a JSON progress channel has
 started, a fatal scan error is represented by `scan-failed` instead of an
 additional plain `error:` line. GitHub Action organization scans show the same
 phase, repository, retry, checkpoint, and completion updates in the step log by
@@ -100,7 +99,7 @@ credential-redacted before serialization.
 stdout is a separate bounded JSON receipt. Normal scans use kind
 `actions-warden-org-scan-receipt`; `--agent-mode`, or
 `ACTIONS_WARDEN_CONTEXT=agent`, uses `actions-warden-agent-receipt` and disables
-implicit progress. `ACTIONS_WARDEN_MODE=agent` remains a legacy alias:
+implicit progress:
 
 ```js
 {

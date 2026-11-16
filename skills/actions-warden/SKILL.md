@@ -69,14 +69,13 @@ Organization scans accept `--repository <glob...>`, `--visibility`,
 `--concurrency`, `--checkpoint` or `--resume`, `--fresh`,
 `--no-auto-checkpoint`, `--previous-report <json-path>`, and
 `--report-dir <dedicated-directory>`, plus
-`--progress=auto|plain|json|none` (`always` and `never` remain aliases).
+`--progress=auto|plain|json|none`.
 Organization scans default to a scope-keyed JSON
 report, bounded receipt, and compatible automatic checkpoint/resume. Progress
 is stderr-only and never part of the selected report format. For an
 agent-initiated organization scan, pass
 `--agent-mode`; `ACTIONS_WARDEN_CONTEXT=agent` is the preferred
-integration-wide equivalent, while `ACTIONS_WARDEN_MODE=agent` is a legacy
-alias. The mode disables implicit progress and uses the agent receipt kind, but
+integration-wide equivalent. The mode disables implicit progress and uses the agent receipt kind, but
 shares normal `.actions-warden-org-scan.*` artifacts so resume survives context
 switches. Explicit output, format, progress, and checkpoint options take
 precedence.
